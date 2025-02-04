@@ -1,16 +1,16 @@
 {
-  "name": "commands",
+  "name": "thunderbird-cli",
   "version": "1.0.0",
   "main": "index.js",
+  "bin": {
+    "tb": "tb.js"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "",
+  "author": "Alexander Schmitz<arschmitz@gmail.com>",
   "license": "ISC",
   "description": "",
-  "bin": {
-    "moz_dummy": "index.js"
-  },
   "dependencies": {
     "command-line-args": "^6.0.1",
     "command-line-usage": "^7.0.3",

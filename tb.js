@@ -93,7 +93,6 @@ const optionList = [
   { name: 'rebase', description: 'Stashes any uncommited change, pulls m-c & c-c rebases your current stack and unstashes any uncommited changes' },
   { name: 'update', description: 'pulls m-c & c-c updates to tip and checks for rust changes' },
   { name: 'build-update', description: 'the same as update but builds when completed' },
-  { name: 'bump', description: 'does `update` then checks for rust changes, lint issues, updates the dummy file and propmpts to confirm changes before pushing to c-c' },
   { name: 'go', description: 'goes to the comm folder if location is configured in settings' },
   { name: 'submit', description: 'lints all files and submits to phabricator' },
   { name: 'try', description: 'pushes a try run' },
@@ -136,7 +135,7 @@ async function runCommand() {
     case "lint":
       try {
         checkDir();
-        await chainCommands(lintDirs.map((dir) => `../mach commlint ${dir} --fix`));
+        await Promise.all(lintDirs.map((dir) => spawnCommand(`../mach commlint ${dir} --fix`)));
       } catch (error) {
         console.error(error);
         process.exit(1);
@@ -202,6 +201,7 @@ async function runCommand() {
       break;
     case "bump":
       try {
+        checkDir();
         await update();
         await chainCommands([
           "../mach tb-rust check-upstream",
@@ -298,7 +298,6 @@ async function runCommand() {
 
 async function update() {
   try {
-    checkDir();
     await chainCommands([
       { cmd: "cd .. && hg pull central", execute: true },
       { cmd: "cd .. && hg up central", execute: true },
