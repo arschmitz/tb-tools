@@ -1,4 +1,5 @@
-#!/usr/bin / env node
+#!/usr/bin/env node
+
 const args = require('command-line-args');
 const usage = require('command-line-usage');
 const util = require('util');
