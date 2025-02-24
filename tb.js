@@ -98,6 +98,13 @@ const optionList = [
   { name: 'submit', description: 'lints all files and submits to phabricator' },
   { name: 'try', description: 'pushes a try run' },
   { name: 'run', description: 'builds and launches thunderbird' },
+  { name: 'land', description: 'updates to the latest C-C and M-C then Interactivly land patches, updating the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.' }
+];
+const tryOptionList = [
+  { name: 'unit-tests', alias: 'u', description: 'run unit tests', defaultValue: "mochitest" },
+  { name: 'build-types', alias: 'b', description: 'build types to run', defaultValue: "o" },
+  { name: 'artifact', description: 'do an artifact build', defaultValue: 'true' },
+  { name: 'platform', alias: 'p', description: 'platforms to run tests on', defaultValue: "all" },
 ];
 
 const sections = [
@@ -117,8 +124,12 @@ const sections = [
       ]
   },
   {
-      header: 'Command List',
+      header: 'Commands',
       content: optionList
+  },
+  {
+    header: 'Try Options',
+    content: tryOptionList
   }
 ];
 
@@ -236,7 +247,7 @@ async function runCommand() {
           ]);
           process.exit(1);
         }
-  
+
       } catch (error) {
         console.error(error);
         process.exit(1);
@@ -260,6 +271,19 @@ async function runCommand() {
     case "try":
       try {
         checkDir();
+        const tryArgOptions = args(tryOptionList, { argv })
+        const tryOptions = Object.keys(tryArgOptions).map((option) => {
+          const name = tryOptionList.find((_option) => _option.name === option).alias;
+
+          if (!name && tryArgOptions[option] !== "false") {
+            return `--${option}`;
+          } else if (!name) {
+            return;
+          }
+
+          return [`-${name}`, tryArgOptions[option]].join(" ");
+        }).join(" ");
+        console.log(tryOptions)
         await chainCommands([
           {
             cmd: "hg",
@@ -268,7 +292,7 @@ async function runCommand() {
               "-s",
               "ssh://hg.mozilla.org/try-comm-central",
               "-m",
-              "try: -b o -p all -u mochitest --artifact"
+              `try: ${tryOptions}`
             ]
           }
         ]);
@@ -292,8 +316,65 @@ async function runCommand() {
         process.exit(1);
       }
       break;
+    case "land":
+      await landPatch();
+      await chainCommands([
+        "hg out -r .",
+      ]);
+
+      const correct = readlineSync.keyInYN("Does the output look correct? [y/n/c]:", { guide: false });
+
+      if (correct) {
+        // await chainCommands([{
+        //   cmd: "hg",
+        //   args: ["push", "-r", ".", "ssh://hg.mozilla.org/comm-central"],
+        // }]);
+      } else if (correct === false) {
+        process.exit(1);
+      } else {
+        console.info("Rolling back changes");
+        await chainCommands([
+          {
+            cmd: "hg",
+            args: ["prune", "."],
+          }
+        ]);
+        process.exit(1);
+      }
+      break;
     default:
       console.log(usage(sections));
+  }
+}
+
+async function landPatch() {
+  const patchNumber = readlineSync.question("Enter DXXXX number of patch:");
+
+  console.info(`Landing ${patchNumber}… Please update the patch comment with the actual approver and remove any review groups`);
+
+  await chainCommands([
+    `moz-phab patch ${patchNumber} --no-bookmark --skip-dependencies --apply-to .`,
+  ]);
+
+  const message = await chainCommands([{ cmd: "hg log -v --limit 1", execute: true }]);
+  const lines = message.split(/\n/)
+  const messageParts = lines[0].split(".");
+  const reviewers = messageParts.findLast().split(",").filter((item) => !/^#/.test(item)).join(",");
+  messageParts.pop();
+  messageParts.push(reviewers);
+
+  lines.shift();
+  lines.unshift(messageParts.join("."));
+
+  await chainCommands([
+    `moz-phab patch ${patchNumber} --no-bookmark --skip-dependencies --apply-to .`,
+    { cmd: "hg", args: [ "commit", "--ammend", "--date", "now", "-m", lines.join("\n") ] },
+  ]);
+
+  const correct = readlineSync.keyInYN("Would you like to add another patch? [y/n]:", { guide: false });
+
+  if (correct) {
+    await landPatch();
   }
 }
 

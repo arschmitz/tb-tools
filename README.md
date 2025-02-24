@@ -1,5 +1,5 @@
 
-# Thunderbird CLI
+# Thunderbird CLI Tools
 Simplify tasks related to developing thunderbird
 
 ## Examples
@@ -22,8 +22,16 @@ Simplify tasks related to developing thunderbird
 |submit|lints all files and submits to phabricator|
 |try|pushes a try run|
 |run|builds and launches thunderbird|
+|land|updates to the latest C-C and M-C then Interactivly land patches, updating the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.|
 
-
+### Try Options
+Valid options for the `try` command
+|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|
+|----|-----------|--|--|
+|unit-tests|u|run unit tests|mochitest|
+|build-types|b|build types to run|o|
+|artifact||do an artifact build|true|
+|platform|p|platforms to run tests on|all|
   ```
                                                             .....
                                                     ..::-------====---:..
