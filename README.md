@@ -2,6 +2,9 @@
 # Thunderbird CLI Tools
 Simplify tasks related to developing thunderbird
 
+## Instalation
+`npm install -g https://github.com/arschmitz/tb-tools`
+
 ## Examples
 ```
   $ tb update
