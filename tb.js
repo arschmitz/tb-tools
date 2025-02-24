@@ -325,10 +325,10 @@ async function runCommand() {
       const correct = readlineSync.keyInYN("Does the output look correct? [y/n/c]:", { guide: false });
 
       if (correct) {
-        // await chainCommands([{
-        //   cmd: "hg",
-        //   args: ["push", "-r", ".", "ssh://hg.mozilla.org/comm-central"],
-        // }]);
+        await chainCommands([{
+          cmd: "hg",
+          args: ["push", "-r", ".", "ssh://hg.mozilla.org/comm-central"],
+        }]);
       } else if (correct === false) {
         process.exit(1);
       } else {
