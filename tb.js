@@ -28,21 +28,23 @@ try {
   }
 }
 
-async function executeCommand(_command) {
+async function executeCommand(_command, log) {
   const { stdout, stderr } = await exec(_command);
   if (stderr) {
     throw new Error(stderr);
   }
-  console.log(stdout);
+  if(log) {
+    console.log(stdout);
+  }
   return stdout;
 }
 
-async function spawnCommand(_command) {
+async function spawnCommand(_command, options) {
   const { promise, resolve, reject } = Promise.withResolvers();
   const cmd = typeof _command === "string" ? _command : _command.cmd;
   const args = typeof _command === "string" ? [] : _command.args;
   const parts = cmd.split(' ');
-  const io = spawn(parts.shift(), [...parts, ...args], { stdio: 'inherit' });
+  const io = spawn(parts.shift(), [...parts, ...args], { stdio: 'inherit', ...options });
 
   io.on('exit', function (code) {
     if (code > 0) {
@@ -55,7 +57,7 @@ async function spawnCommand(_command) {
   await promise;
 }
 
-async function chainCommands(commands) {
+async function chainCommands(commands, options) {
   let promise = decideCommand(commands[0]);
 
   commands.shift();
@@ -67,12 +69,12 @@ async function chainCommands(commands) {
   return promise;
 }
 
-async function decideCommand(command) {
+async function decideCommand(command, options) {
   if (typeof command === "object" && command.execute) {
     return executeCommand(command.cmd);
   }
 
-  return spawnCommand(command);
+  return spawnCommand(command, options);
 }
 
 const banner =
@@ -107,7 +109,6 @@ const banner =
 `;
 
 const optionList = [
-  { name: 'help', description: 'Show help' },
   { name: 'bump', description: 'Bump thunderbird build by modifying the dummy file. This command updates to the current state using `update`, checks for rust changes, updates the dummy file adding or removing a `.`, commits with the message `No bug, trigger build.`, outputs the staged commits to ensure it is just the build trigger, asks you to verify changes, and either pushes or cleans up the changes based on input.' },
   { name: 'lint', description: 'run commlint on all files' },
   { name: 'rebase', description: 'Stashes any uncommited change, pulls m-c & c-c rebases your current stack and unstashes any uncommited changes' },
@@ -115,22 +116,36 @@ const optionList = [
   { name: 'run-rebase', description: 'the same as rebase but builds and runs when completed. Alias for `tb rebase -r` or `tb rebase && tb run`' },
   { name: 'update', description: 'pulls m-c & c-c updates to tip and checks for rust changes' },
   { name: 'build-update', description: 'the same as update but builds when completed alias for `tb update -b`' },
-  { name: 'run-update', description: 'the same as update but builds and runs when completed. Alias for `tb rebase -r` or `tb update && tb run`' },
+  { name: 'run-update', description: 'the same as update but builds and runs when completed. Alias for `tb update -r` or `tb update && tb run`' },
+  { name: 'test', description: 'Checks files changed or added and runs all tests for any components modified, and test files changed.' },
   { name: 'submit', description: 'lints all files and submits to phabricator' },
   { name: 'try', description: 'pushes a try run' },
   { name: 'run', description: 'builds and launches thunderbird' },
-  { name: 'land', description: 'updates to the latest C-C and M-C then Interactivly land patches, updating the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.' }
+  { name: 'land', description: 'updates to the latest C-C and M-C then Interactivly land patches, updating the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.' },
+  { name: 'help', description: 'Show help' },
 ];
-const tryOptionList = [
-  { name: 'unit-tests', alias: 'u', description: 'run unit tests', defaultValue: "mochitest" },
-  { name: 'build-types', alias: 'b', description: 'build types to run', defaultValue: "o" },
-  { name: 'artifact', description: 'do an artifact build', defaultValue: 'true' },
-  { name: 'platform', alias: 'p', description: 'platforms to run tests on', defaultValue: "all" },
-];
-const updateOptionList = [
-  { name: 'run', alias: 'r', description: 'build run thunderbird when the update complete', defaultValue: false },
-  { name: 'build', alias: 'b', description: 'build thunderbird when the update is complete', defaultValue: false }
-];
+
+const subOptions = {
+  submit: [
+    { name: 'lint', alias: 'l', description: 'lint before submitting patch', defaultValue: "true" },
+    { name: 'test', alias: 't', description: 'run all tests for any components or files modified before submitting patch', defaultValue: "true" }
+  ],
+  test: [
+    { name: 'flavor', alias: 'f', description: 'Flavor of tests to run `browser|unit|all`', defaultValue: 'all' },
+  ],
+  try: [
+    { name: 'unit-tests', alias: 'u', description: 'type of tests to run `mochitest|xpcshell|all`', defaultValue: "all" },
+    { name: 'build-types', alias: 'b', description: 'build types to run', defaultValue: "o" },
+    { name: 'artifact', description: 'do an artifact build', defaultValue: 'true' },
+    { name: 'platform', alias: 'p', description: 'platforms to run tests on', defaultValue: "all" },
+  ],
+  update: [
+    { name: 'run', alias: 'r', description: 'build run thunderbird when the update complete', defaultValue: false },
+    { name: 'build', alias: 'b', description: 'build thunderbird when the update is complete', defaultValue: false }
+  ]
+}
+
+subOptions.submit = [...subOptions.submit, ...subOptions.test];
 
 const sections = [
   {
@@ -138,7 +153,7 @@ const sections = [
       raw: true
   },
   {
-      header: 'TB_CLI',
+      header: 'TB Tools',
       content: 'Simplify tasks related to developing thunderbird'
   },
   {
@@ -154,11 +169,19 @@ const sections = [
   },
   {
     header: 'Try Options',
-    content: tryOptionList
+    content: subOptions.try
   },
   {
     header: 'Update/Rebase Options',
-    content: updateOptionList
+    content: subOptions.update
+  },
+  {
+    header: 'Submit Options',
+    content: subOptions.submit
+  },
+  {
+    header: 'Test Options',
+    content: subOptions.test
   }
 ];
 
@@ -249,12 +272,20 @@ async function runCommand() {
     case "submit":
       try {
         checkDir();
-
+        const options = mapBooleanOptions(args(submitOptionList, { argv }));
         await checkForChanges("Changes found please ammend, commit or shelve your changes.");
-        await Promise.all(lintDirs.map((dir) => spawnCommand(`../mach commlint ${dir} --fix`)));
-        await checkForChanges("Files updated by lint.");
+
+        if (options.lint) {
+          await Promise.all(lintDirs.map((dir) => spawnCommand(`../mach commlint ${dir} --fix`)));
+          await checkForChanges("Files updated by lint.");
+        }
+
+        if (options.test) {
+          await testChanged();
+        }
 
         await chainCommands(['moz-phab submit']);
+
       } catch (error) {
         console.error(error);
         process.exit(1);
@@ -308,6 +339,10 @@ async function runCommand() {
         process.exit(1);
       }
       break;
+    case "test":
+      const options = mapBooleanOptions(args(testOptionList, { argv }));
+      await testChanged(options);
+      break;
     case "land":
       await landPatch();
       await chainCommands([
@@ -333,6 +368,43 @@ async function runCommand() {
         ]);
         process.exit(1);
       }
+      break;
+    case "readme":
+      const lines = [
+        "# TB Tools - Thunderbird CLI Tools",
+        "Simplify tasks related to developing thunderbird.",
+        "",
+        "Right now these are only things that i have personally used and found useful but happy to add more.",
+        "## Instalation",
+        "`npm install -g https://github.com/arschmitz/tb-tools`",
+        "## Command List",
+        "##### <ins>Quick Links</ins>"
+      ];
+
+      optionList.forEach((option) => {
+        lines.push(`- [${option.name}](#${option.name})`)
+      });
+      optionList.forEach((option) => {
+        lines.push(`### ${option.name}`);
+        lines.push("---");
+        lines.push(option.description);
+        lines.push("```bash");
+        lines.push(`tb ${option.name}`);
+        lines.push("```");
+
+        if (subOptions[option.name]) {
+          lines.push(`#### Options`);
+          lines.push("|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|");
+          lines.push("|----|-----------|--|--|");
+          subOptions[option.name].forEach((subOption) => {
+            lines.push(`|${subOption.name}|${subOption.alias || ""}|${subOption.description}|${subOption.defaultValue}|`);
+          });
+        }
+      });
+      lines.push("```");
+      lines.push(...banner.split(/\n/).map((line) => `                      ${line}`));
+      lines.push("```");
+      console.log(lines.join("\n"));
       break;
     default:
       console.log(usage(sections));
@@ -387,6 +459,44 @@ async function rebase({ build, run }) {
     console.error(error);
     process.exit(1);
   }
+}
+
+async function testChanged({ type = "all" } = {}) {
+  const files = (await executeCommand("hg status --change .", false)).split(/\n/);
+  const dirtyFiles = (await executeCommand("hg status -mard", false)).split(/\n/);
+
+  const tests = [...files, ...dirtyFiles].reduce((collection, item) => {
+    item = item.slice(2);
+    if (!item) {
+      return collection;
+    }
+
+    if (!/components/.test(item)) {
+      collection.add(item);
+      return collection;
+    }
+
+    const componentPath = item.split("components")[1];
+    const name = componentPath.split(path.sep)[1];
+
+    if (name === "storybook") {
+      return collection;
+    }
+
+    let _path = `${path.join("mail", "components", name)}`
+    if (type !== "all") {
+      _path = path.join(_path, "test", type)
+    }
+
+    collection.add(_path);
+
+    return collection;
+  }, new Set());
+
+  await chainCommands([{
+    cmd: "../mach",
+    args: ["test", ...Array.from(tests)]
+  }], { cwd: ".." });
 }
 
 async function landPatch() {
