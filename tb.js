@@ -397,7 +397,7 @@ async function runCommand() {
           lines.push("|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|");
           lines.push("|----|-----------|--|--|");
           subOptions[option.name].forEach((subOption) => {
-            lines.push(`|${subOption.name}|${subOption.alias || ""}|${subOption.description}|${subOption.defaultValue}|`);
+            lines.push(`|${subOption.name}|${subOption.alias || ""}|${subOption.description.replaceAll("|", "&#124;")}|${subOption.defaultValue}|`);
           });
         }
       });
