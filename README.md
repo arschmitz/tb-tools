@@ -82,7 +82,7 @@ tb test
 #### Options
 |option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|
 |----|-----------|--|--|
-|flavor|f|Flavor of tests to run `browser&#124;unit&#124;all`|all|
+|flavor|f|Flavor of tests to run `browser\|unit\|all`|all|
 ### submit
 ---
 lints all files and submits to phabricator
@@ -94,7 +94,7 @@ tb submit
 |----|-----------|--|--|
 |lint|l|lint before submitting patch|true|
 |test|t|run all tests for any components or files modified before submitting patch|true|
-|flavor|f|Flavor of tests to run `browser&#124;unit&#124;all`|all|
+|flavor|f|Flavor of tests to run `browser\|unit\|all`|all|
 ### try
 ---
 pushes a try run
@@ -104,7 +104,7 @@ tb try
 #### Options
 |option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|
 |----|-----------|--|--|
-|unit-tests|u|type of tests to run `mochitest&#124;xpcshell&#124;all`|all|
+|unit-tests|u|type of tests to run `mochitest\|xpcshell\|all`|all|
 |build-types|b|build types to run|o|
 |artifact||do an artifact build|true|
 |platform|p|platforms to run tests on|all|
@@ -129,7 +129,7 @@ tb help
 ```
                                                               .....
                                                       ..::-------====---:..
-                                                   .:---====================:.
+                                                   .:---====================:.    
                                   ..             ::-====================-:
                                   ===:          :-=-   -===================-:
                                  :====-       .::--=--=====================-::
@@ -147,13 +147,13 @@ tb help
                          -==+*=--======+-....................:-===========++++=
                           ===++--=======++:..............::-=============+++++
                            ===++==========+=:......----------==========++++++.
-                            =================+=-:...:================+++++++.
+                            =================+=-:...:================+++++++.     
                              -++++=================--::--=========++++++++=
-                              .=++++++=========================++++++++++:
+                              .=++++++=========================++++++++++:        
                                 :=+++++++++===============+++++++++++++:
                                   .-++++++++++++++++++++++++++++++++=.
                                      .-++++++++++++++++++++++++++-:
                                          :-=++++++++++++++++=-:.
                                                ..::::::..
-
+                      
 ```

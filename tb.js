@@ -397,14 +397,17 @@ async function runCommand() {
           lines.push("|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|");
           lines.push("|----|-----------|--|--|");
           subOptions[option.name].forEach((subOption) => {
-            lines.push(`|${subOption.name}|${subOption.alias || ""}|${subOption.description.replaceAll("|", "&#124;")}|${subOption.defaultValue}|`);
+            lines.push(`|${subOption.name}|${subOption.alias || ""}|${subOption.description.replaceAll("|", "\\|")}|${subOption.defaultValue}|`);
           });
         }
       });
       lines.push("```");
       lines.push(...banner.split(/\n/).map((line) => `                      ${line}`));
       lines.push("```");
-      console.log(lines.join("\n"));
+
+      if (fs.existsSync("./README.md")) {
+        await writeFile("./README.md", lines.join("\n"));
+      }
       break;
     default:
       console.log(usage(sections));
