@@ -1,3 +1,4 @@
+<!-- this file is automatiicly generated do not edit -->
 # TB Tools - Thunderbird CLI Tools
 Simplify tasks related to developing thunderbird.
 

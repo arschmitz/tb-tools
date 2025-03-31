@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "bin": {
-    "tb": "tb.js"
+    "tb": "tb.mjs"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -11,11 +11,14 @@
   "author": "Alexander Schmitz<arschmitz@gmail.com>",
   "license": "ISC",
   "description": "",
+  "type": "module",
   "dependencies": {
     "command-line-args": "^6.0.1",
     "command-line-usage": "^7.0.3",
     "diff": "^7.0.0",
+    "eslint": "^9.23.0",
     "ospath": "^1.2.2",
+    "prettier": "^3.5.3",
     "readline-sync": "^1.4.10"
   }
 }
