@@ -1,7 +1,6 @@
 import testChanged from "./test.mjs";
 import {
   chainCommands,
-  checkDir,
   checkForChanges,
   spawnCommand,
 } from "../lib/utils.mjs";
@@ -9,7 +8,6 @@ import {
 const lintDirs = ["build", "calendar", "chat", "docs", "mail", "tools"];
 export default async function(options) {
   try {
-    checkDir();
     await checkForChanges("Changes found please ammend, commit or shelve your changes.");
 
     if (options.lint) {

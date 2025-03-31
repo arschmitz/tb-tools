@@ -1,10 +1,10 @@
 import readlineSync from "readline-sync";
+import update from "./update.mjs";
 import { chainCommands } from "../lib/utils.mjs";
 import { readFile, writeFile } from 'node:fs/promises';
 
 export default async function () {
   try {
-    checkDir();
     await update();
     await chainCommands([
       "../mach tb-rust check-upstream",
@@ -60,7 +60,7 @@ async function update_dummy() {
 
   lines[lines.length - 2] = dotLine;
 
-  newContent = lines.join('\n');
+  const newContent = lines.join('\n');
 
   await writeFile('/Users/aschmitz/projects/firefox/mozilla-unified/comm/build/dummy', newContent);
 

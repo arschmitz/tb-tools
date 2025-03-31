@@ -3,7 +3,6 @@ import { chainCommands, checkDir  } from "../lib/utils.mjs";
 
 export default async function rebase({ build, run }) {
   try {
-    checkDir();
     const startCommit = await chainCommands([{ cmd: 'hg id -i', execute: true }]);
     let shelved;
     try {

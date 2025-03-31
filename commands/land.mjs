@@ -38,9 +38,10 @@ async function landPatch() {
   ]);
 
   const message = await chainCommands([{ cmd: "hg log -v --limit 1", execute: true }]);
-  const lines = message.split(/\n/)
+  const lines = message.split(/\ndescription:\n/)[1].split(/\n/);
   const messageParts = lines[0].split(".");
-  const reviewers = messageParts.findLast().split(",").filter((item) => !/^#/.test(item)).join(",");
+  console.log("message", messageParts)
+  const reviewers = messageParts[messageParts.length - 1].split(",").filter((item) => !/^#/.test(item)).join(",");
   messageParts.pop();
   messageParts.push(reviewers);
 
@@ -48,8 +49,7 @@ async function landPatch() {
   lines.unshift(messageParts.join("."));
 
   await chainCommands([
-    `moz-phab patch ${patchNumber} --no-bookmark --skip-dependencies --apply-to .`,
-    { cmd: "hg", args: [ "commit", "--ammend", "--date", "now", "-m", lines.join("\n") ] },
+    { cmd: "hg", args: [ "commit", "--amend", "--date", "now", "-m", lines.join("\n") ] },
   ]);
 
   const correct = readlineSync.keyInYN("Would you like to add another patch? [y/n]:", { guide: false });

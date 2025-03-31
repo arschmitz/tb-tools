@@ -72,7 +72,6 @@ const commands = {
     description: 'run commlint on all files',
     async run () {
       try {
-        checkDir();
         await Promise.all(lintDirs.map((dir) => spawnCommand(`../mach commlint ${dir} --fix`)));
       } catch (error) {
         console.error(error);
@@ -94,7 +93,6 @@ const commands = {
   run: {
     description: "builds and launches thunderbird",
     async run () {
-      checkDir();
       try {
         await chainCommands(["../mach build", "../mach run"]);
       } catch (error) {
@@ -195,6 +193,8 @@ Object.entries(commands).forEach(([name, { description, header, options }]) => {
 
   sections.push({ header, content: options });
 });
+
+checkDir();
 
 if (commands[command]) {
   commands[command].run();
