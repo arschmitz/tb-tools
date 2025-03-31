@@ -64,7 +64,7 @@ Stashes any uncommited change, pulls m-c & c-c rebases your current stack and un
 tb rebase
 ```
 #### Options
-|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--run|-r|build run thunderbird when the update complete|false|`tb rebase --run=false`
 |--build|-b|build thunderbird when the update is complete|false|`tb rebase --build=false`
@@ -93,7 +93,7 @@ Submits to phabricator, optionally running lint and related tests first
 tb submit
 ```
 #### Options
-|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--lint|-l|lint before submitting patch|true|`tb submit --lint=true`
 |--test|-t|run all tests for any components or files modified before submitting patch|true|`tb submit --test=true`
@@ -105,7 +105,7 @@ Checks files changed or added and runs all tests for any components modified, an
 tb test
 ```
 #### Options
-|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb test --flavor=all`
 ### try
@@ -115,7 +115,7 @@ pushes a try run
 tb try
 ```
 #### Options
-|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--unit-tests|-u|type of tests to run `mochitest\|xpcshell\|all`|all|`tb try --unit-tests=all`
 |--build-types|-b|build types to run|o|`tb try --build-types=o`
@@ -128,7 +128,7 @@ pulls m-c & c-c updates to tip and checks for rust changes
 tb update
 ```
 #### Options
-|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--run|-r|build run thunderbird when the update complete|false|`tb update --run=false`
 |--build|-b|build thunderbird when the update is complete|false|`tb update --build=false`

@@ -28,7 +28,7 @@ export default async function (optionList, subOptions) {
   
     if (subOptions[option.name]) {
       lines.push(`#### Options`);
-      lines.push("|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|");
+      lines.push("|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|");
       lines.push("|----|-----------|--|--|---|");
       subOptions[option.name].forEach((subOption) => {
         lines.push(`|--${subOption.name}|-${subOption.alias || ""}|${subOption.description.replaceAll("|", "\\|")}|${subOption.defaultValue}|\`tb ${option.name} --${subOption.name}=${subOption.defaultValue}\``);
