@@ -7,25 +7,49 @@ Right now these are only things that i have personally used and found useful but
 `npm install -g https://github.com/arschmitz/tb-tools`
 ## Command List
 ##### <ins>Quick Links</ins>
+- [build-rebase](#build-rebase)
+- [build-update](#build-update)
 - [bump](#bump)
+- [help](#help)
+- [land](#land)
 - [lint](#lint)
 - [rebase](#rebase)
-- [build-rebase](#build-rebase)
-- [run-rebase](#run-rebase)
-- [update](#update)
-- [build-update](#build-update)
-- [run-update](#run-update)
-- [test](#test)
-- [submit](#submit)
-- [try](#try)
 - [run](#run)
-- [land](#land)
-- [help](#help)
+- [run-rebase](#run-rebase)
+- [run-update](#run-update)
+- [submit](#submit)
+- [test](#test)
+- [try](#try)
+- [update](#update)
+### build-rebase
+---
+the same as rebase but builds when completed alias for `tb rebase -b`
+```bash
+tb build-rebase
+```
+### build-update
+---
+the same as update but builds when completed alias for `tb update -b`
+```bash
+tb build-update
+```
 ### bump
 ---
 Bump thunderbird build by modifying the dummy file. This command updates to the current state using `update`, checks for rust changes, updates the dummy file adding or removing a `.`, commits with the message `No bug, trigger build.`, outputs the staged commits to ensure it is just the build trigger, asks you to verify changes, and either pushes or cleans up the changes based on input.
 ```bash
 tb bump
+```
+### help
+---
+Show help
+```bash
+tb help
+```
+### land
+---
+updates to the latest C-C and M-C then Interactivly land patches, updating the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.
+```bash
+tb land
 ```
 ### lint
 ---
@@ -39,11 +63,16 @@ Stashes any uncommited change, pulls m-c & c-c rebases your current stack and un
 ```bash
 tb rebase
 ```
-### build-rebase
+#### Options
+|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|----|-----------|--|--|---|
+|--run|-r|build run thunderbird when the update complete|false|`tb rebase --run=false`
+|--build|-b|build thunderbird when the update is complete|false|`tb rebase --build=false`
+### run
 ---
-the same as rebase but builds when completed alias for `tb rebase -b`
+builds and launches thunderbird
 ```bash
-tb build-rebase
+tb run
 ```
 ### run-rebase
 ---
@@ -51,29 +80,24 @@ the same as rebase but builds and runs when completed. Alias for `tb rebase -r` 
 ```bash
 tb run-rebase
 ```
-### update
----
-pulls m-c & c-c updates to tip and checks for rust changes
-```bash
-tb update
-```
-#### Options
-|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|
-|----|-----------|--|--|
-|run|r|build run thunderbird when the update complete|false|
-|build|b|build thunderbird when the update is complete|false|
-### build-update
----
-the same as update but builds when completed alias for `tb update -b`
-```bash
-tb build-update
-```
 ### run-update
 ---
 the same as update but builds and runs when completed. Alias for `tb update -r` or `tb update && tb run`
 ```bash
 tb run-update
 ```
+### submit
+---
+Submits to phabricator, optionally running lint and related tests first
+```bash
+tb submit
+```
+#### Options
+|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|----|-----------|--|--|---|
+|--lint|-l|lint before submitting patch|true|`tb submit --lint=true`
+|--test|-t|run all tests for any components or files modified before submitting patch|true|`tb submit --test=true`
+|--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb submit --flavor=all`
 ### test
 ---
 Checks files changed or added and runs all tests for any components modified, and test files changed.
@@ -81,21 +105,9 @@ Checks files changed or added and runs all tests for any components modified, an
 tb test
 ```
 #### Options
-|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|
-|----|-----------|--|--|
-|flavor|f|Flavor of tests to run `browser\|unit\|all`|all|
-### submit
----
-lints all files and submits to phabricator
-```bash
-tb submit
-```
-#### Options
-|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|
-|----|-----------|--|--|
-|lint|l|lint before submitting patch|true|
-|test|t|run all tests for any components or files modified before submitting patch|true|
-|flavor|f|Flavor of tests to run `browser\|unit\|all`|all|
+|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|----|-----------|--|--|---|
+|--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb test --flavor=all`
 ### try
 ---
 pushes a try run
@@ -103,34 +115,27 @@ pushes a try run
 tb try
 ```
 #### Options
-|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|
-|----|-----------|--|--|
-|unit-tests|u|type of tests to run `mochitest\|xpcshell\|all`|all|
-|build-types|b|build types to run|o|
-|artifact||do an artifact build|true|
-|platform|p|platforms to run tests on|all|
-### run
+|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|----|-----------|--|--|---|
+|--unit-tests|-u|type of tests to run `mochitest\|xpcshell\|all`|all|`tb try --unit-tests=all`
+|--build-types|-b|build types to run|o|`tb try --build-types=o`
+|--artifact|-|do an artifact build|true|`tb try --artifact=true`
+|--platform|-p|platforms to run tests on|all|`tb try --platform=all`
+### update
 ---
-builds and launches thunderbird
+pulls m-c & c-c updates to tip and checks for rust changes
 ```bash
-tb run
+tb update
 ```
-### land
----
-updates to the latest C-C and M-C then Interactivly land patches, updating the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.
-```bash
-tb land
-```
-### help
----
-Show help
-```bash
-tb help
-```
+#### Options
+|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|
+|----|-----------|--|--|---|
+|--run|-r|build run thunderbird when the update complete|false|`tb update --run=false`
+|--build|-b|build thunderbird when the update is complete|false|`tb update --build=false`
 ```
                                                               .....
                                                       ..::-------====---:..
-                                                   .:---====================:.    
+                                                   .:---====================:.
                                   ..             ::-====================-:
                                   ===:          :-=-   -===================-:
                                  :====-       .::--=--=====================-::
@@ -148,9 +153,9 @@ tb help
                          -==+*=--======+-....................:-===========++++=
                           ===++--=======++:..............::-=============+++++
                            ===++==========+=:......----------==========++++++.
-                            =================+=-:...:================+++++++.     
+                            =================+=-:...:================+++++++.
                              -++++=================--::--=========++++++++=
-                              .=++++++=========================++++++++++:        
+                              .=++++++=========================++++++++++:
                                 :=+++++++++===============+++++++++++++:
                                   .-++++++++++++++++++++++++++++++++=.
                                      .-++++++++++++++++++++++++++-:

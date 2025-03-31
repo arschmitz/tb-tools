@@ -1,7 +1,8 @@
 import fs from 'fs';
+import banner from '../lib/banner.mjs';
 import { writeFile } from 'node:fs/promises';
 
-export default async function () {
+export default async function (optionList, subOptions) {
   const lines = [
     "<!-- this file is automatiicly generated do not edit -->",
     "# TB Tools - Thunderbird CLI Tools",
@@ -27,10 +28,10 @@ export default async function () {
   
     if (subOptions[option.name]) {
       lines.push(`#### Options`);
-      lines.push("|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|");
-      lines.push("|----|-----------|--|--|");
+      lines.push("|option&nbsp;&nbsp;&nbsp;&nbsp;|alias|Description|Default|example|");
+      lines.push("|----|-----------|--|--|---|");
       subOptions[option.name].forEach((subOption) => {
-        lines.push(`|${subOption.name}|${subOption.alias || ""}|${subOption.description.replaceAll("|", "\\|")}|${subOption.defaultValue}|`);
+        lines.push(`|--${subOption.name}|-${subOption.alias || ""}|${subOption.description.replaceAll("|", "\\|")}|${subOption.defaultValue}|\`tb ${option.name} --${subOption.name}=${subOption.defaultValue}\``);
       });
     }
   });

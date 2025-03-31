@@ -82,7 +82,7 @@ const commands = {
   },
   readme: {
     description: false,
-    run: readme,
+    run: () => readme(optionList, subOptions),
   },
   rebase: {
     description: 'Stashes any uncommited change, pulls m-c & c-c rebases your current stack and unstashes any uncommited changes',
@@ -163,6 +163,7 @@ commands.rebase.options = commands.update.options;
 commands.submit.options = [...commands.submit.options, ...commands.test.options];
 
 const optionList = [];
+const subOptions = {};
 
 const sections = [
   { content: banner, raw: true },
@@ -183,6 +184,10 @@ Object.entries(commands).forEach(([name, { description, header, options }]) => {
   }
 
   optionList.push({ name, description });
+
+  if (options) {
+    subOptions[name] = options;
+  }
 
   if (!header) {
     return;
