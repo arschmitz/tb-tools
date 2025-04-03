@@ -1,19 +1,21 @@
 import { chainCommands, getUrls } from "../lib/utils.mjs";
 import { comment } from "../lib/phab.mjs";
 
+const validTryOptions = ['unit-tests', 'build-types', 'artifact', 'platform'];
+
 export default async function (options, _tryOptions) {
   try {
-    const tryOptions = Object.keys(options).map((option) => {
+    const tryOptions = validTryOptions.reduce((collection, option) => {
       const alias = _tryOptions.find((_option) => _option.name === option).alias;
 
       if (!alias && options[option] !== "false") {
-        return `--${option}`;
-      } else if (!alias) {
-        return;
+        collection.push(`--${option}`);
+      } else if (alias && options[option]) {
+        collection.push([`-${alias}`, options[option]].join(" "));
       }
 
-      return [`-${alias}`, options[option]].join(" ");
-    }).join(" ");
+      return collection;
+    }, []).join(" ");
 
     const output = await chainCommands([
       {

@@ -126,7 +126,7 @@ const commands = {
     async run () { await update({ run: true }); },
   },
   submit: {
-    description: "Submits to phabricator, optionally running lint and related tests first",
+    description: "Submits to phabricator, optionally running lint and related tests first and posting a try run and submitting pending comments after.",
     header: 'Submit Options',async run () {
       const options = mapBooleanOptions(args(commands.submit.options, { argv }));
       await submit(options);

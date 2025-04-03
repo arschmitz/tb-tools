@@ -95,7 +95,7 @@ tb run-update
 ```
 ### submit
 ---
-Submits to phabricator, optionally running lint and related tests first
+Submits to phabricator, optionally running lint and related tests first and posting a try run and submitting pending comments after.
 ```bash
 tb submit
 ```

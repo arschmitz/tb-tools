@@ -1,4 +1,5 @@
 import testChanged from "./test.mjs";
+import _try from "./try.mjs";
 import { comment } from "../lib/phab.mjs";
 import {
   chainCommands,
@@ -18,6 +19,14 @@ export default async function(options) {
 
     if (options.test) {
       await testChanged();
+    }
+
+    if (options.try) {
+      const tryLink = await _try(options);
+
+      comment(`try: ${tryLink}`, options.resolve);
+    } else if (options.resolve) {
+      comment("", true);
     }
 
     await chainCommands(['moz-phab submit']);
