@@ -15,6 +15,7 @@ Right now these are only things that i have personally used and found useful but
 - [lint](#lint)
 - [rebase](#rebase)
 - [run](#run)
+- [rust-check](#rust-check)
 - [run-rebase](#run-rebase)
 - [run-update](#run-update)
 - [submit](#submit)
@@ -74,6 +75,12 @@ builds and launches thunderbird
 ```bash
 tb run
 ```
+### rust-check
+---
+Check for upstream rust changes without updating locally
+```bash
+tb rust-check
+```
 ### run-rebase
 ---
 the same as rebase but builds and runs when completed. Alias for `tb rebase -r` or `tb rebase && tb run`
@@ -97,7 +104,14 @@ tb submit
 |----|-----------|--|--|---|
 |--lint|-l|lint before submitting patch|true|`tb submit --lint=true`
 |--test|-t|run all tests for any components or files modified before submitting patch|true|`tb submit --test=true`
+|--try|-|Submit a try run and comment with the link|true|`tb submit --try=true`
+|--resolve|-r|Submit all inline comments and comments marked done|true|`tb submit --resolve=true`
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb submit --flavor=all`
+|--unit-tests|-u|type of tests to run `mochitest\|xpcshell\|all`|all|`tb submit --unit-tests=all`
+|--build-types|-b|build types to run|o|`tb submit --build-types=o`
+|--artifact|-|do an artifact build|true|`tb submit --artifact=true`
+|--platform|-p|platforms to run tests on|all|`tb submit --platform=all`
+|--comment|-c|Post try link as comment to phab revision|false|`tb submit --comment=false`
 ### test
 ---
 Checks files changed or added and runs all tests for any components modified, and test files changed.
@@ -121,6 +135,7 @@ tb try
 |--build-types|-b|build types to run|o|`tb try --build-types=o`
 |--artifact|-|do an artifact build|true|`tb try --artifact=true`
 |--platform|-p|platforms to run tests on|all|`tb try --platform=all`
+|--comment|-c|Post try link as comment to phab revision|false|`tb try --comment=false`
 ### update
 ---
 pulls m-c & c-c updates to tip and checks for rust changes

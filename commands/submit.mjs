@@ -1,4 +1,5 @@
 import testChanged from "./test.mjs";
+import { comment } from "../lib/phab.mjs";
 import {
   chainCommands,
   checkForChanges,

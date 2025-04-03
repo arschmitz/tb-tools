@@ -1,20 +1,21 @@
-import { chainCommands } from "../lib/utils.mjs";
+import { chainCommands, getUrls } from "../lib/utils.mjs";
+import { comment } from "../lib/phab.mjs";
 
 export default async function (options, _tryOptions) {
   try {
     const tryOptions = Object.keys(options).map((option) => {
-      const name = _tryOptions.find((_option) => _option.name === option).alias;
+      const alias = _tryOptions.find((_option) => _option.name === option).alias;
 
-      if (!name && options[option] !== "false") {
+      if (!alias && options[option] !== "false") {
         return `--${option}`;
-      } else if (!name) {
+      } else if (!alias) {
         return;
       }
 
-      return [`-${name}`, options[option]].join(" ");
+      return [`-${alias}`, options[option]].join(" ");
     }).join(" ");
 
-    await chainCommands([
+    const output = await chainCommands([
       {
         cmd: "hg",
         args: [
@@ -26,6 +27,16 @@ export default async function (options, _tryOptions) {
         ]
       }
     ]);
+
+    const urls = getUrls(output.data);
+    console.log("urls", urls);
+    console.log(`try: ${urls[urls.length - 1]}`);
+
+    if (tryOptions.comment) {
+      await comment(`try: test`);
+    }
+
+    return urls[urls.length - 1];
   } catch (error) {
     console.error(error);
     process.exit(1);

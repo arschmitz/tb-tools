@@ -1,5 +1,6 @@
 import readlineSync from "readline-sync";
 import { chainCommands } from "../lib/utils.mjs";
+import { getCommitMessage, getIndividualReviewers, getReviewers } from "../lib/hg.mjs";
 
 export default async function () {
   await landPatch();
@@ -37,11 +38,9 @@ async function landPatch() {
     `moz-phab patch ${patchNumber} --no-bookmark --skip-dependencies --apply-to .`,
   ]);
 
-  const message = await chainCommands([{ cmd: "hg log -v --limit 1", execute: true }]);
-  const lines = message.split(/\ndescription:\n/)[1].split(/\n/);
+  const lines = (await getCommitMessage()).split(/\n/);
   const messageParts = lines[0].split(".");
-  console.log("message", messageParts)
-  const reviewers = messageParts[messageParts.length - 1].split(",").filter((item) => !/^#/.test(item)).join(",");
+  const reviewers = await getIndividualReviewers();
   messageParts.pop();
   messageParts.push(reviewers);
 

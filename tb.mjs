@@ -4,16 +4,14 @@ import _try from './commands/try.mjs';
 import args from 'command-line-args';
 import banner from './lib/banner.mjs';
 import bump from './commands/bump.mjs';
-import fs from 'fs';
 import land from './commands/land.mjs';
-import ospath from 'ospath';
-import path from 'path';
 import readme from './commands/readme.mjs';
 import rebase from './commands/rebase.mjs';
 import submit from './commands/submit.mjs';
 import testChanged from './commands/test.mjs';
 import update from './commands/update.mjs';
 import usage from 'command-line-usage';
+import phab from './lib/phab.mjs';
 
 import {
   executeCommand,
@@ -23,22 +21,7 @@ import {
   mapBooleanOptions,
   checkForChanges
 } from './lib/utils.mjs';
-
-const filePath = path.join(ospath.home(), '.tb');
-let settings = {};
-
-try {
-  const data = fs.readFileSync(filePath, 'utf-8');
-  settings = JSON.parse(data);
-} catch (error) {
-  if (error.code === 'ENOENT') {
-    console.info('Settings file not found using default settings.');
-  } else if (error instanceof SyntaxError) {
-    console.error('Error parsing settings file JSON:', error.message);
-  } else {
-    console.error('An unexpected error occurred loading settings:', error);
-  }
-}
+import { getRevision } from './lib/hg.mjs';
 
 const mainDefinitions = [
   { name: 'command', defaultOption: true }
@@ -48,6 +31,25 @@ const argv = _unknown || [];
 const lintDirs = ["build", "calendar", "chat", "docs", "mail", "tools"];
 
 const commands = {
+  revision: {
+    description: false,
+    run: async () => {
+      console.log(await getRevision());
+    }
+  },
+  comment: {
+    description: false,
+    run: async () => {
+      const result = await phab({
+        route: "differential.createcomment",
+        params: {
+          revision_id: "244274",
+          message: "try: test",
+          attach_inlines: true,
+        }
+      });
+    }
+  },
   "build-rebase": {
     description: 'the same as rebase but builds when completed alias for `tb rebase -b`',
     async run() { await rebase({ build: true }) },
@@ -99,6 +101,22 @@ const commands = {
       }
     }
   },
+  "rust-check": {
+    description: "Check for upstream rust changes without updating locally",
+    run: async () => {
+      try {
+        await chainCommands([
+          { cmd: "cd .. && hg pull central", execute: true },
+          { cmd: "cd .. && hg bookmark -f -r . checkpoint", execute: true },
+          { cmd: "cd .. && hg up central", execute: true },
+          "../mach tb-rust check-upstream",
+          { cmd: "cd .. && hg up checkpoint", execute: true },
+        ]);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+  },
   "run-rebase": {
     description: 'the same as rebase but builds and runs when completed. Alias for `tb rebase -r` or `tb rebase && tb run`' ,
     async run() { await rebase({ run: true }) },
@@ -115,7 +133,9 @@ const commands = {
     },
     options: [
       { name: 'lint', alias: 'l', description: 'lint before submitting patch', defaultValue: "true" },
-      { name: 'test', alias: 't', description: 'run all tests for any components or files modified before submitting patch', defaultValue: "true" }
+      { name: 'test', alias: 't', description: 'run all tests for any components or files modified before submitting patch', defaultValue: "true" },
+      { name: 'try', description: 'Submit a try run and comment with the link', defaultValue: "true" },
+      { name: 'resolve', alias: 'r', description: 'Submit all inline comments and comments marked done', defaultValue: "true" }
     ]
   },
   test: {
@@ -137,6 +157,7 @@ const commands = {
       { name: 'build-types', alias: 'b', description: 'build types to run', defaultValue: "o" },
       { name: 'artifact', description: 'do an artifact build', defaultValue: 'true' },
       { name: 'platform', alias: 'p', description: 'platforms to run tests on', defaultValue: "all" },
+      { name: 'comment', alias: 'c', description: 'Post try link as comment to phab revision', defaultValue: "false" }
     ],
     async run () {
       const tryArgOptions = args(commands.try.options, { argv })
@@ -158,7 +179,7 @@ const commands = {
 };
 
 commands.rebase.options = commands.update.options;
-commands.submit.options = [...commands.submit.options, ...commands.test.options];
+commands.submit.options = [...commands.submit.options, ...commands.test.options, ...commands.try.options];
 
 const optionList = [];
 const subOptions = {};
@@ -194,7 +215,9 @@ Object.entries(commands).forEach(([name, { description, header, options }]) => {
   sections.push({ header, content: options });
 });
 
-checkDir();
+if (command && !["help", "readme"].includes(command)) {
+  checkDir();
+}
 
 if (commands[command]) {
   commands[command].run();
