@@ -7,6 +7,7 @@ Right now these are only things that i have personally used and found useful but
 `npm install -g https://github.com/arschmitz/tb-tools`
 ## Command List
 ##### <ins>Quick Links</ins>
+- [comment](#comment)
 - [build-rebase](#build-rebase)
 - [build-update](#build-update)
 - [bump](#bump)
@@ -22,6 +23,17 @@ Right now these are only things that i have personally used and found useful but
 - [test](#test)
 - [try](#try)
 - [update](#update)
+### comment
+---
+Post a comment to phabricator for current patch
+```bash
+tb comment
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--message|-m|Comment text to post to phabricator|undefined|`tb comment --message=undefined`
+|--resolve|-r|Submit all inline comments and comments marked done|true|`tb comment --resolve=true`
 ### build-rebase
 ---
 the same as rebase but builds when completed alias for `tb rebase -b`
@@ -106,6 +118,7 @@ tb submit
 |--test|-t|run all tests for any components or files modified before submitting patch|true|`tb submit --test=true`
 |--try|-|Submit a try run and comment with the link|true|`tb submit --try=true`
 |--resolve|-r|Submit all inline comments and comments marked done|true|`tb submit --resolve=true`
+|--update|-u|Check for update and rebase before submitting|undefined|`tb submit --update=undefined`
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb submit --flavor=all`
 |--unit-tests|-u|type of tests to run `mochitest\|xpcshell\|all`|all|`tb submit --unit-tests=all`
 |--build-types|-b|build types to run|o|`tb submit --build-types=o`
