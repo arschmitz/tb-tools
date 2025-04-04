@@ -1,4 +1,4 @@
-import { chainCommands, getUrls } from "../lib/utils.mjs";
+import { run, getUrls } from "../lib/utils.mjs";
 import { comment } from "../lib/phab.mjs";
 
 const validTryOptions = ['unit-tests', 'build-types', 'artifact', 'platform'];
@@ -17,28 +17,26 @@ export default async function (options, _tryOptions) {
       return collection;
     }, []).join(" ");
 
-    const output = await chainCommands([
-      {
-        cmd: "hg",
-        args: [
-          "push-to-try",
-          "-s",
-          "ssh://hg.mozilla.org/try-comm-central",
-          "-m",
-          `try: ${tryOptions}`
-        ]
-      }
-    ]);
+    const output = await run({
+      cmd: "hg",
+      args: [
+        "push-to-try",
+        "-s",
+        "ssh://hg.mozilla.org/try-comm-central",
+        "-m",
+        `try: ${tryOptions}`
+      ],
+      capture: true,
+    });
 
     const urls = getUrls(output.data);
-    console.log("urls", urls);
-    console.log(`try: ${urls[urls.length - 1]}`);
+    const tryUrl = urls[urls.length - 1];
 
     if (tryOptions.comment) {
-      await comment(`try: test`);
+      await comment(`try: ${tryUrl}`);
     }
 
-    return urls[urls.length - 1];
+    return tryUrl;
   } catch (error) {
     console.error(error);
     process.exit(1);

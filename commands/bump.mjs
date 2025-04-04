@@ -1,41 +1,30 @@
 import readlineSync from "readline-sync";
 import update from "./update.mjs";
-import { chainCommands } from "../lib/utils.mjs";
+import { hg } from "../lib/hg.mjs";
+import { mach, run } from "../lib/utils.mjs";
 import { readFile, writeFile } from 'node:fs/promises';
 
 export default async function () {
   try {
     await update();
-    await chainCommands([
-      "../mach tb-rust check-upstream",
-    ]);
+    await mach("tb-rust check-upstream");
     await update_dummy();
 
-    await chainCommands([
-      {
-        cmd: "hg",
-        args: ["commit", "-m", `"No bug, trigger build."`]
-      },
-      "hg out -r .",
-    ]);
+    await run({
+      cmd: "hg",
+      args: ["commit", "-m", `"No bug, trigger build."`]
+    });
+    await hg("out -r .");
 
     const correct = readlineSync.keyInYN("Does the output look correct? [y/n/c]:", { guide: false });
 
     if (correct) {
-      await chainCommands([{
-        cmd: "hg",
-        args: ["push", "-r", ".", "ssh://hg.mozilla.org/comm-central"],
-      }]);
+      await hg("push -r . ssh://hg.mozilla.org/comm-central");
     } else if (correct === false) {
       process.exit(1);
     } else {
       console.info("Rolling back changes");
-      await chainCommands([
-        {
-          cmd: "hg",
-          args: ["prune", "."],
-        }
-      ]);
+      await hg("prune .");
       process.exit(1);
     }
 

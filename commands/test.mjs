@@ -1,9 +1,10 @@
 import path from "path";
-import { executeCommand, chainCommands } from "../lib/utils.mjs";
+import { hg } from "../lib/hg.mjs";
+import { mach } from "../lib/utils.mjs";
 
 export default async function testChanged({ type = "all" } = {}) {
-  const files = (await executeCommand("hg status --change .", false)).split(/\n/);
-  const dirtyFiles = (await executeCommand("hg status -mard", false)).split(/\n/);
+  const files = (await hg("status --change .", undefined, true)).split(/\n/);
+  const dirtyFiles = (await hg("status -mard", undefined, true)).split(/\n/);
 
   const tests = [...files, ...dirtyFiles].reduce((collection, item) => {
     item = item.slice(2);
@@ -33,8 +34,5 @@ export default async function testChanged({ type = "all" } = {}) {
     return collection;
   }, new Set());
 
-  await chainCommands([{
-    cmd: "../mach",
-    args: ["test", ...Array.from(tests)]
-  }], { cwd: ".." });
+  await mach(["test", ...Array.from(tests)].join(" "));
 }

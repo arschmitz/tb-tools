@@ -6,29 +6,26 @@ import banner from './lib/banner.mjs';
 import bump from './commands/bump.mjs';
 import land from './commands/land.mjs';
 import readme from './commands/readme.mjs';
+import lint from './commands/lint.mjs';
 import rebase from './commands/rebase.mjs';
 import submit from './commands/submit.mjs';
 import testChanged from './commands/test.mjs';
 import update from './commands/update.mjs';
 import usage from 'command-line-usage';
-import phab from './lib/phab.mjs';
+import { comment } from './lib/phab.mjs';
 
 import {
-  executeCommand,
-  spawnCommand,
-  chainCommands,
   checkDir,
   mapBooleanOptions,
-  checkForChanges
+  mach
 } from './lib/utils.mjs';
-import { getRevision } from './lib/hg.mjs';
+import { getRevision, hg, pullUp } from './lib/hg.mjs';
 
 const mainDefinitions = [
   { name: 'command', defaultOption: true }
 ]
 const { command, _unknown } = args(mainDefinitions, { stopAtFirstUnknown: true })
 const argv = _unknown || [];
-const lintDirs = ["build", "calendar", "chat", "docs", "mail", "tools"];
 
 const commands = {
   revision: {
@@ -38,17 +35,15 @@ const commands = {
     }
   },
   comment: {
-    description: false,
+    description: "Post a comment to phabricator for current patch",
     run: async () => {
-      const result = await phab({
-        route: "differential.createcomment",
-        params: {
-          revision_id: "244274",
-          message: "try: test",
-          attach_inlines: true,
-        }
-      });
-    }
+      const options = mapBooleanOptions(args(commands.comment.options, { argv }));
+      await comment(options.message, options.resolve);
+    },
+    options: [
+      { name: "message", alias: "m", description: "Comment text to post to phabricator" },
+      { name: 'resolve', alias: 'r', description: 'Submit all inline comments and comments marked done', defaultValue: "true" }
+    ]
   },
   "build-rebase": {
     description: 'the same as rebase but builds when completed alias for `tb rebase -b`',
@@ -73,12 +68,7 @@ const commands = {
   lint: {
     description: 'run commlint on all files',
     async run () {
-      try {
-        await Promise.all(lintDirs.map((dir) => spawnCommand(`../mach commlint ${dir} --fix`)));
-      } catch (error) {
-        console.error(error);
-        process.exit(1);
-      }
+      await lint();
     },
   },
   readme: {
@@ -95,26 +85,17 @@ const commands = {
   run: {
     description: "builds and launches thunderbird",
     async run () {
-      try {
-        await chainCommands(["../mach build", "../mach run"]);
-      } catch (error) {
-      }
+      await mach("build");
+      await mach("run");
     }
   },
   "rust-check": {
     description: "Check for upstream rust changes without updating locally",
     run: async () => {
-      try {
-        await chainCommands([
-          { cmd: "cd .. && hg pull central", execute: true },
-          { cmd: "cd .. && hg bookmark -f -r . checkpoint", execute: true },
-          { cmd: "cd .. && hg up central", execute: true },
-          "../mach tb-rust check-upstream",
-          { cmd: "cd .. && hg up checkpoint", execute: true },
-        ]);
-      } catch (error) {
-        console.error(error);
-      }
+      await hg("bookmark -f -r . checkpoint");
+      await pullUp("central");
+      await mach("tb-rust check-upstream");
+      await hg("up checkpoint");
     }
   },
   "run-rebase": {
@@ -129,13 +110,14 @@ const commands = {
     description: "Submits to phabricator, optionally running lint and related tests first and posting a try run and submitting pending comments after.",
     header: 'Submit Options',async run () {
       const options = mapBooleanOptions(args(commands.submit.options, { argv }));
-      await submit(options);
+      await submit(options, commands.try.options);
     },
     options: [
       { name: 'lint', alias: 'l', description: 'lint before submitting patch', defaultValue: "true" },
       { name: 'test', alias: 't', description: 'run all tests for any components or files modified before submitting patch', defaultValue: "true" },
       { name: 'try', description: 'Submit a try run and comment with the link', defaultValue: "true" },
-      { name: 'resolve', alias: 'r', description: 'Submit all inline comments and comments marked done', defaultValue: "true" }
+      { name: 'resolve', alias: 'r', description: 'Submit all inline comments and comments marked done', defaultValue: "true" },
+      { name: 'update', alias: 'u', description: 'Check for update and rebase before submitting' },
     ]
   },
   test: {
@@ -220,7 +202,12 @@ if (command && !["help", "readme"].includes(command)) {
 }
 
 if (commands[command]) {
-  commands[command].run();
+  try {
+    commands[command].run();
+  } catch (error) {
+    console.error(error);
+    process.exit(1);
+  }
 } else {
   commands["help"].run();
 }

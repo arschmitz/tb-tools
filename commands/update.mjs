@@ -1,21 +1,18 @@
-import { chainCommands } from "../lib/utils.mjs";
+import { mach } from "../lib/utils.mjs";
+import { pullUp } from "../lib/hg.mjs";
 
 export default async function update({ build = false, run = false } = {}) {
   try {
-    await chainCommands([
-      { cmd: "cd .. && hg pull central", execute: true },
-      { cmd: "cd .. && hg up central", execute: true },
-      "hg pull comm",
-      "hg up comm",
-      "../mach tb-rust check-upstream"
-    ]);
+    await pullUp("central");
+    await pullUp();
+    await mach("tb-rust check-upstream");
 
     if (build || run) {
-      await chainCommands(["../mach build"]);
+      await mach("build");
     }
 
     if (run) {
-      await chainCommands(["../mach run"])
+      await mach("run");
     }
   } catch (error) {
     console.error(error);
