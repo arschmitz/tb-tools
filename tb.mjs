@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import _try from './commands/try.mjs';
 import args from 'command-line-args';
+import _try from './commands/try.mjs';
 import banner from './lib/banner.mjs';
 import bump from './commands/bump.mjs';
 import land from './commands/land.mjs';

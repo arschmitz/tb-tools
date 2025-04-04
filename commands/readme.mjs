@@ -11,6 +11,19 @@ export default async function (optionList, subOptions) {
     "Right now these are only things that i have personally used and found useful but happy to add more.",
     "## Instalation",
     "`npm install -g https://github.com/arschmitz/tb-tools`",
+    "## Configuration",
+    "TB Tools uses a configuration `.tb.json` file in your users home directory to enable some features.",
+    "This file currently contains credentials for phabricator, but may contain additional configuration in the future.",
+    "### Sample Configuration",
+`\`\`\`json
+{
+  "phabricator": {
+    "user": "arschmitz",
+    "token": "cli-uxdexxxkzvy5m5j7xxgajqunxjhe"
+  }
+}
+\`\`\``,
+    "",
     "## Command List",
     "##### <ins>Quick Links</ins>"
   ];
@@ -31,7 +44,7 @@ export default async function (optionList, subOptions) {
       lines.push("|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|");
       lines.push("|----|-----------|--|--|---|");
       subOptions[option.name].forEach((subOption) => {
-        lines.push(`|--${subOption.name}|-${subOption.alias || ""}|${subOption.description.replaceAll("|", "\\|")}|${subOption.defaultValue}|\`tb ${option.name} --${subOption.name}=${subOption.defaultValue}\``);
+        lines.push(`|--${subOption.name}|${subOption.alias ? "-" + subOption.alias : ""}|${subOption.description.replaceAll("|", "\\|")}|${subOption.defaultValue}|\`tb ${option.name} --${subOption.name}=${subOption.defaultValue}\``);
       });
     }
   });

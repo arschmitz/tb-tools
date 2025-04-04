@@ -5,6 +5,19 @@ Simplify tasks related to developing thunderbird.
 Right now these are only things that i have personally used and found useful but happy to add more.
 ## Instalation
 `npm install -g https://github.com/arschmitz/tb-tools`
+## Configuration
+TB Tools uses a configuration `.tb.json` file in your users home directory to enable some features.
+This file currently contains credentials for phabricator, but may contain additional configuration in the future.
+### Sample Configuration
+```json
+{
+  "phabricator": {
+    "user": "arschmitz",
+    "token": "cli-uxdexxxkzvy5m5j7xxgajqunxjhe"
+  }
+}
+```
+
 ## Command List
 ##### <ins>Quick Links</ins>
 - [comment](#comment)
@@ -116,13 +129,13 @@ tb submit
 |----|-----------|--|--|---|
 |--lint|-l|lint before submitting patch|true|`tb submit --lint=true`
 |--test|-t|run all tests for any components or files modified before submitting patch|true|`tb submit --test=true`
-|--try|-|Submit a try run and comment with the link|true|`tb submit --try=true`
+|--try||Submit a try run and comment with the link|true|`tb submit --try=true`
 |--resolve|-r|Submit all inline comments and comments marked done|true|`tb submit --resolve=true`
 |--update|-u|Check for update and rebase before submitting|undefined|`tb submit --update=undefined`
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb submit --flavor=all`
 |--unit-tests|-u|type of tests to run `mochitest\|xpcshell\|all`|all|`tb submit --unit-tests=all`
 |--build-types|-b|build types to run|o|`tb submit --build-types=o`
-|--artifact|-|do an artifact build|true|`tb submit --artifact=true`
+|--artifact||do an artifact build|true|`tb submit --artifact=true`
 |--platform|-p|platforms to run tests on|all|`tb submit --platform=all`
 |--comment|-c|Post try link as comment to phab revision|false|`tb submit --comment=false`
 ### test
@@ -146,7 +159,7 @@ tb try
 |----|-----------|--|--|---|
 |--unit-tests|-u|type of tests to run `mochitest\|xpcshell\|all`|all|`tb try --unit-tests=all`
 |--build-types|-b|build types to run|o|`tb try --build-types=o`
-|--artifact|-|do an artifact build|true|`tb try --artifact=true`
+|--artifact||do an artifact build|true|`tb try --artifact=true`
 |--platform|-p|platforms to run tests on|all|`tb try --platform=all`
 |--comment|-c|Post try link as comment to phab revision|false|`tb try --comment=false`
 ### update

@@ -44,3 +44,10 @@ async function landPatch() {
     await landPatch();
   }
 }
+
+async function getBugs() {
+  const request = await fetch("https://bugzilla.mozilla.org/rest/bug?list_id=17500573&f1=keywords&v1=checkin-needed-tb&classification=Client%20Software&classification=Developer%20Infrastructure&classification=Components&classification=Server%20Software&classification=Other&query_format=advanced&bug_status=UNCONFIRMED&bug_status=NEW&bug_status=ASSIGNED&bug_status=REOPENED&bug_status=VERIFIED&resolution=---&o1=equals");
+  const data = await request.json();
+
+  
+}
