@@ -1,6 +1,7 @@
 import fs from 'fs';
 import banner from '../lib/banner.mjs';
 import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 export default async function (optionList, subOptions) {
   const lines = [
@@ -39,6 +40,10 @@ export default async function (optionList, subOptions) {
     lines.push(`### ${option.name}`);
     lines.push("---");
     lines.push(option.description);
+    if (fs.existsSync(path.join("images", `${option.name}.gif`))) {
+      lines.push(`![Screen recording of ${option.name}.](/images/${option.name}.gif)`);
+    }
+    lines.push("");
     lines.push("```bash");
     lines.push(`tb ${option.name}`);
     lines.push("```");

@@ -46,6 +46,7 @@ This file currently contains credentials for phabricator, and bugzilla. Option d
 ### amend
 ---
 Amends the current commit optionally adding new files
+
 ```bash
 tb amend
 ```
@@ -56,6 +57,7 @@ tb amend
 ### comment
 ---
 Post a comment to phabricator for current patch
+
 ```bash
 tb comment
 ```
@@ -67,12 +69,14 @@ tb comment
 ### commit
 ---
 Create a new commit with message based on your current bookmark.
+
 ```bash
 tb commit
 ```
 ### create
 ---
 Setup a new bookmark based on a bugzilla bug. Optionally updates to latest prior. Marks the bug assigned and assignee to yourself.
+
 ```bash
 tb create
 ```
@@ -83,42 +87,49 @@ tb create
 ### build-rebase
 ---
 the same as rebase but builds when completed alias for `tb rebase -b`
+
 ```bash
 tb build-rebase
 ```
 ### build-update
 ---
 the same as update but builds when completed alias for `tb update -b`
+
 ```bash
 tb build-update
 ```
 ### bump
 ---
 Bump thunderbird build by modifying the dummy file. This command updates to the current state using `update`, checks for rust changes, updates the dummy file adding or removing a `.`, commits with the message `No bug, trigger build.`, outputs the staged commits to ensure it is just the build trigger, asks you to verify changes, and either pushes or cleans up the changes based on input.
+
 ```bash
 tb bump
 ```
 ### help
 ---
 Show help
+
 ```bash
 tb help
 ```
 ### land
 ---
 checks for rust updates, updates to the latest C-C and M-C, pulls bugs from bugzilla with keyword `checkin-needed-tb` and Interactivly land patches, allowing to view the bug or patch, then updates the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.
+
 ```bash
 tb land
 ```
 ### lint
 ---
 run commlint on all files
+
 ```bash
 tb lint
 ```
 ### rebase
 ---
 Stashes any uncommited change, pulls m-c & c-c rebases your current stack and unstashes any uncommited changes
+
 ```bash
 tb rebase
 ```
@@ -131,30 +142,35 @@ tb rebase
 ### run
 ---
 builds and launches thunderbird
+
 ```bash
 tb run
 ```
 ### rust-check
 ---
 Check for upstream rust changes without updating locally
+
 ```bash
 tb rust-check
 ```
 ### run-rebase
 ---
 the same as rebase but builds and runs when completed. Alias for `tb rebase -r` or `tb rebase && tb run`
+
 ```bash
 tb run-rebase
 ```
 ### run-update
 ---
 the same as update but builds and runs when completed. Alias for `tb update -r` or `tb update && tb run`
+
 ```bash
 tb run-update
 ```
 ### submit
 ---
 Submits to phabricator, optionally running lint and related tests first and posting a try run and submitting pending comments after.
+
 ```bash
 tb submit
 ```
@@ -175,6 +191,7 @@ tb submit
 ### test
 ---
 Checks files changed or added and runs all tests for any components modified, and test files changed.
+
 ```bash
 tb test
 ```
@@ -185,6 +202,7 @@ tb test
 ### try
 ---
 pushes a try run
+
 ```bash
 tb try
 ```
@@ -199,6 +217,8 @@ tb try
 ### update
 ---
 pulls m-c & c-c updates to tip and checks for rust changes
+![Screen recording of update.](/images/update.gif)
+
 ```bash
 tb update
 ```
