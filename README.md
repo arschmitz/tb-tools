@@ -54,6 +54,7 @@ tb amend
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--addRemove|-a|Add or remove files added or deleted|undefined|`tb amend --addRemove=undefined`
+
 <br/><br/>
 ### comment
 ---
@@ -67,6 +68,7 @@ tb comment
 |----|-----------|--|--|---|
 |--message|-m|Comment text to post to phabricator|undefined|`tb comment --message=undefined`
 |--resolve|-r|Submit all inline comments and comments marked done|true|`tb comment --resolve=true`
+
 <br/><br/>
 ### commit
 ---
@@ -75,6 +77,7 @@ Create a new commit with message based on your current bookmark.
 tb commit
 ```
 <br/><br/>
+
 <br/><br/>
 ### create
 ---
@@ -87,6 +90,7 @@ tb create
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--update|-u|Update code before creating bookmark|true|`tb create --update=true`
+
 <br/><br/>
 ### build-rebase
 ---
@@ -95,6 +99,7 @@ the same as rebase but builds when completed alias for `tb rebase -b`
 tb build-rebase
 ```
 <br/><br/>
+
 <br/><br/>
 ### build-update
 ---
@@ -103,6 +108,7 @@ the same as update but builds when completed alias for `tb update -b`
 tb build-update
 ```
 <br/><br/>
+
 <br/><br/>
 ### bump
 ---
@@ -111,6 +117,7 @@ Bump thunderbird build by modifying the dummy file. This command updates to the 
 tb bump
 ```
 <br/><br/>
+
 <br/><br/>
 ### help
 ---
@@ -119,6 +126,7 @@ Show help
 tb help
 ```
 <br/><br/>
+
 <br/><br/>
 ### land
 ---
@@ -127,6 +135,7 @@ checks for rust updates, updates to the latest C-C and M-C, pulls bugs from bugz
 tb land
 ```
 <br/><br/>
+
 <br/><br/>
 ### lint
 ---
@@ -135,6 +144,7 @@ run commlint on all files
 tb lint
 ```
 <br/><br/>
+
 <br/><br/>
 ### rebase
 ---
@@ -149,6 +159,7 @@ tb rebase
 |--run|-r|build run thunderbird when the update complete|false|`tb rebase --run=false`
 |--build|-b|build thunderbird when the update is complete|false|`tb rebase --build=false`
 |--force|-f|Continue update despite out of sync rust dependencies|false|`tb rebase --force=false`
+
 <br/><br/>
 ### run
 ---
@@ -157,6 +168,7 @@ builds and launches thunderbird
 tb run
 ```
 <br/><br/>
+
 <br/><br/>
 ### rust-check
 ---
@@ -165,6 +177,7 @@ Check for upstream rust changes without updating locally
 tb rust-check
 ```
 <br/><br/>
+
 <br/><br/>
 ### run-rebase
 ---
@@ -173,6 +186,7 @@ the same as rebase but builds and runs when completed. Alias for `tb rebase -r` 
 tb run-rebase
 ```
 <br/><br/>
+
 <br/><br/>
 ### run-update
 ---
@@ -181,6 +195,7 @@ the same as update but builds and runs when completed. Alias for `tb update -r` 
 tb run-update
 ```
 <br/><br/>
+
 <br/><br/>
 ### submit
 ---
@@ -203,6 +218,7 @@ tb submit
 |--artifact||do an artifact build|true|`tb submit --artifact=true`
 |--platform|-p|platforms to run tests on|all|`tb submit --platform=all`
 |--comment|-c|Post try link as comment to phab revision|false|`tb submit --comment=false`
+
 <br/><br/>
 ### test
 ---
@@ -215,6 +231,7 @@ tb test
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb test --flavor=all`
+
 <br/><br/>
 ### try
 ---
@@ -231,6 +248,7 @@ tb try
 |--artifact||do an artifact build|true|`tb try --artifact=true`
 |--platform|-p|platforms to run tests on|all|`tb try --platform=all`
 |--comment|-c|Post try link as comment to phab revision|false|`tb try --comment=false`
+
 <br/><br/>
 ### update
 ---
@@ -246,6 +264,7 @@ tb update
 |--run|-r|build run thunderbird when the update complete|false|`tb update --run=false`
 |--build|-b|build thunderbird when the update is complete|false|`tb update --build=false`
 |--force|-f|Continue update despite out of sync rust dependencies|false|`tb update --force=false`
+
 <br/><br/>
 ```
                                                               .....

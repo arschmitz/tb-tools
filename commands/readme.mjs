@@ -56,6 +56,7 @@ export default async function (optionList, subOptions) {
         lines.push(`|--${subOption.name}|${subOption.alias ? "-" + subOption.alias : ""}|${subOption.description.replaceAll("|", "\\|")}|${subOption.defaultValue}|\`tb ${option.name} --${subOption.name}=${subOption.defaultValue}\``);
       });
     }
+    lines.push("");
     lines.push("<br/><br/>");
   });
   lines.push("```");
