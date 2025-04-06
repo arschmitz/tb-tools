@@ -1,0 +1,280 @@
+{
+  "bugs": [
+    {
+      "blocks": [
+        1944850
+      ],
+      "dupe_of": null,
+      "cf_qa_whiteboard": "",
+      "cc": [
+        "alessandro@thunderbird.net",
+        "arschmitz@thunderbird.net",
+        "laurel@thunderbird.net",
+        "martin@humanoids.be",
+        "micah@thunderbird.net",
+        "mkmelin+mozilla@iki.fi",
+        "solange@thunderbird.net"
+      ],
+      "alias": null,
+      "groups": [],
+      "cf_cab_review": "---",
+      "priority": "--",
+      "op_sys": "Unspecified",
+      "is_cc_accessible": true,
+      "cf_tracking_thunderbird_relnote": "---",
+      "type": "task",
+      "regressions": [],
+      "id": 1944867,
+      "component": "Calendar Frontend",
+      "assigned_to_detail": {
+        "name": "arschmitz@thunderbird.net",
+        "email": "arschmitz@thunderbird.net",
+        "id": 753875,
+        "real_name": "Alex Schmitz",
+        "nick": "arschmitz"
+      },
+      "flags": [],
+      "creator": "toby@thunderbird.net",
+      "last_change_time": "2025-04-04T20:36:26Z",
+      "cf_tracking_thunderbird_139": "---",
+      "product": "Calendar",
+      "regressed_by": [],
+      "cf_last_resolved": null,
+      "cf_status_thunderbird_esr115": "---",
+      "cf_fx_iteration": "---",
+      "cc_detail": [
+        {
+          "nick": "aleca",
+          "real_name": "Alessandro Castellani [:aleca]",
+          "id": 634666,
+          "email": "alessandro@thunderbird.net",
+          "name": "alessandro@thunderbird.net"
+        },
+        {
+          "id": 753875,
+          "email": "arschmitz@thunderbird.net",
+          "name": "arschmitz@thunderbird.net",
+          "nick": "arschmitz",
+          "real_name": "Alex Schmitz"
+        },
+        {
+          "name": "laurel@thunderbird.net",
+          "email": "laurel@thunderbird.net",
+          "id": 751405,
+          "nick": "laurel",
+          "real_name": "LaurelT"
+        },
+        {
+          "name": "martin@humanoids.be",
+          "email": "martin@humanoids.be",
+          "id": 381211,
+          "real_name": "Martin Giger [:freaktechnik]",
+          "nick": "freaktechnik"
+        },
+        {
+          "name": "micah@thunderbird.net",
+          "email": "micah@thunderbird.net",
+          "id": 704774,
+          "real_name": "micah@thunderbird.net",
+          "nick": "micah"
+        },
+        {
+          "nick": "mkmelin",
+          "real_name": "Magnus Melin [:mkmelin]",
+          "name": "mkmelin+mozilla@iki.fi",
+          "email": "mkmelin+mozilla@iki.fi",
+          "id": 101158
+        },
+        {
+          "nick": "solange",
+          "real_name": "",
+          "id": 713136,
+          "email": "solange@thunderbird.net",
+          "name": "solange@thunderbird.net"
+        }
+      ],
+      "severity": "--",
+      "cf_fx_points": "---",
+      "cf_tracking_thunderbird_esr115": "---",
+      "creator_detail": {
+        "real_name": "Toby Pilling [:tobyp]",
+        "nick": "tobyp",
+        "id": 754499,
+        "email": "toby@thunderbird.net",
+        "name": "toby@thunderbird.net"
+      },
+      "url": "",
+      "resolution": "",
+      "cf_tracking_thunderbird_137": "---",
+      "cf_status_thunderbird_esr128": "---",
+      "target_milestone": "---",
+      "is_open": true,
+      "cf_tracking_thunderbird_138": "---",
+      "is_confirmed": true,
+      "cf_status_thunderbird_138": "---",
+      "summary": "Implement a pref to show events launched from old UI in new dialogs",
+      "is_creator_accessible": true,
+      "qa_contact": "",
+      "depends_on": [],
+      "mentors_detail": [],
+      "see_also": [],
+      "creation_time": "2025-01-30T14:55:12Z",
+      "platform": "Unspecified",
+      "cf_crash_signature": "",
+      "cf_status_thunderbird_139": "---",
+      "version": "unspecified",
+      "classification": "Client Software",
+      "whiteboard": "",
+      "keywords": [
+        "checkin-needed-tb"
+      ],
+      "duplicates": [],
+      "status": "ASSIGNED",
+      "cf_tracking_thunderbird_esr128": "---",
+      "cf_user_story": "",
+      "cf_status_thunderbird_137": "---",
+      "assigned_to": "arschmitz@thunderbird.net",
+      "comment_count": 3,
+      "votes": 0,
+      "mentors": []
+    },
+    {
+      "blocks": [
+        1944850
+      ],
+      "dupe_of": null,
+      "cf_qa_whiteboard": "",
+      "cc": [
+        "alessandro@thunderbird.net",
+        "arschmitz@thunderbird.net",
+        "laurel@thunderbird.net",
+        "martin@humanoids.be",
+        "micah@thunderbird.net",
+        "mkmelin+mozilla@iki.fi",
+        "solange@thunderbird.net"
+      ],
+      "alias": null,
+      "groups": [],
+      "cf_cab_review": "---",
+      "priority": "--",
+      "op_sys": "Unspecified",
+      "is_cc_accessible": true,
+      "cf_tracking_thunderbird_relnote": "---",
+      "type": "task",
+      "regressions": [],
+      "id": 1877326,
+      "component": "Calendar Frontend",
+      "assigned_to_detail": {
+        "name": "arschmitz@thunderbird.net",
+        "email": "arschmitz@thunderbird.net",
+        "id": 753875,
+        "real_name": "Alex Schmitz",
+        "nick": "arschmitz"
+      },
+      "flags": [],
+      "creator": "toby@thunderbird.net",
+      "last_change_time": "2025-04-04T20:36:26Z",
+      "cf_tracking_thunderbird_139": "---",
+      "product": "Calendar",
+      "regressed_by": [],
+      "cf_last_resolved": null,
+      "cf_status_thunderbird_esr115": "---",
+      "cf_fx_iteration": "---",
+      "cc_detail": [
+        {
+          "nick": "aleca",
+          "real_name": "Alessandro Castellani [:aleca]",
+          "id": 634666,
+          "email": "alessandro@thunderbird.net",
+          "name": "alessandro@thunderbird.net"
+        },
+        {
+          "id": 753875,
+          "email": "arschmitz@thunderbird.net",
+          "name": "arschmitz@thunderbird.net",
+          "nick": "arschmitz",
+          "real_name": "Alex Schmitz"
+        },
+        {
+          "name": "laurel@thunderbird.net",
+          "email": "laurel@thunderbird.net",
+          "id": 751405,
+          "nick": "laurel",
+          "real_name": "LaurelT"
+        },
+        {
+          "name": "martin@humanoids.be",
+          "email": "martin@humanoids.be",
+          "id": 381211,
+          "real_name": "Martin Giger [:freaktechnik]",
+          "nick": "freaktechnik"
+        },
+        {
+          "name": "micah@thunderbird.net",
+          "email": "micah@thunderbird.net",
+          "id": 704774,
+          "real_name": "micah@thunderbird.net",
+          "nick": "micah"
+        },
+        {
+          "nick": "mkmelin",
+          "real_name": "Magnus Melin [:mkmelin]",
+          "name": "mkmelin+mozilla@iki.fi",
+          "email": "mkmelin+mozilla@iki.fi",
+          "id": 101158
+        },
+        {
+          "nick": "solange",
+          "real_name": "",
+          "id": 713136,
+          "email": "solange@thunderbird.net",
+          "name": "solange@thunderbird.net"
+        }
+      ],
+      "severity": "--",
+      "cf_fx_points": "---",
+      "cf_tracking_thunderbird_esr115": "---",
+      "creator_detail": {
+        "real_name": "Toby Pilling [:tobyp]",
+        "nick": "tobyp",
+        "id": 754499,
+        "email": "toby@thunderbird.net",
+        "name": "toby@thunderbird.net"
+      },
+      "url": "",
+      "resolution": "",
+      "cf_tracking_thunderbird_137": "---",
+      "cf_status_thunderbird_esr128": "---",
+      "target_milestone": "---",
+      "is_open": true,
+      "cf_tracking_thunderbird_138": "---",
+      "is_confirmed": true,
+      "cf_status_thunderbird_138": "---",
+      "summary": "Vertical layout: only the message pane should resize when the main windows is resized",
+      "is_creator_accessible": true,
+      "qa_contact": "",
+      "depends_on": [],
+      "mentors_detail": [],
+      "see_also": [],
+      "creation_time": "2025-01-30T14:55:12Z",
+      "platform": "Unspecified",
+      "cf_crash_signature": "",
+      "cf_status_thunderbird_139": "---",
+      "version": "unspecified",
+      "classification": "Client Software",
+      "whiteboard": "",
+      "keywords": [
+        "checkin-needed-tb"
+      ],
+      "duplicates": [],
+      "status": "ASSIGNED",
+      "cf_tracking_thunderbird_esr128": "---",
+      "cf_user_story": "",
+      "cf_status_thunderbird_137": "---",
+      "assigned_to": "arschmitz@thunderbird.net",
+      "comment_count": 3,
+      "votes": 0,
+      "mentors": []
+    }
+  ]
+}

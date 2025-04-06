@@ -2,6 +2,7 @@ import testChanged from "./test.mjs";
 import _try from "./try.mjs";
 import rebase from "./rebase.mjs";
 import lint from "./lint.mjs";
+import ora from "ora";
 import { comment } from "../lib/phab.mjs";
 import {
   checkForChanges,
@@ -27,13 +28,29 @@ export default async function(options, tryOptions) {
 
     await run({ cmd: 'moz-phab', args: ["submit"]});
 
+    let spinner;
+    if (options.try || options.resolve) {
+      spinner = new ora({
+        text: "Posting comment to phabricator"
+      }).start();
+    }
     if (options.try) {
-      const tryLink = await _try(options, tryOptions);
-
-      await comment(`try: ${tryLink}`, options.resolve);
+      try {
+        const tryLink = await _try(options, tryOptions);
+        await comment(`try: ${tryLink}`, options.resolve);
+        spinner.success();
+      } catch (error) {
+        spinner.fail();
+        throw error;
+      }
     } else if (options.resolve) {
-
-      await comment("", true);
+      try {
+        await comment("", true);
+        spinner.success();
+      } catch (error) {
+        spinner.fail();
+        throw error;
+      }
     }
   } catch (error) {
     console.error(error);

@@ -1,5 +1,6 @@
 import { run, getUrls } from "../lib/utils.mjs";
 import { comment } from "../lib/phab.mjs";
+import ora from "ora";
 
 const validTryOptions = ['unit-tests', 'build-types', 'artifact', 'platform'];
 
@@ -33,7 +34,16 @@ export default async function (options, _tryOptions) {
     const tryUrl = urls[urls.length - 1];
 
     if (tryOptions.comment) {
-      await comment(`try: ${tryUrl}`);
+      const spinner = new ora({
+        text: "Posting comment to phabricator"
+      }).start();
+      try {
+        await comment(`try: ${tryUrl}`);
+        spinner.success();
+      } catch (error) {
+        spinner.fail();
+        throw error;
+      }
     }
 
     return tryUrl;
