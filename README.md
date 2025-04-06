@@ -49,7 +49,6 @@ Amends the current commit optionally adding new files
 ```bash
 tb amend
 ```
-<br/><br/>
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
@@ -62,7 +61,6 @@ Post a comment to phabricator for current patch
 ```bash
 tb comment
 ```
-<br/><br/>
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
@@ -100,7 +98,6 @@ the same as rebase but builds when completed alias for `tb rebase -b`
 ```bash
 tb build-rebase
 ```
-<br/><br/>
 
 <br/><br/>
 ### build-update
@@ -109,7 +106,6 @@ the same as update but builds when completed alias for `tb update -b`
 ```bash
 tb build-update
 ```
-<br/><br/>
 
 <br/><br/>
 ### bump
@@ -118,7 +114,6 @@ Bump thunderbird build by modifying the dummy file. This command updates to the 
 ```bash
 tb bump
 ```
-<br/><br/>
 
 <br/><br/>
 ### help
@@ -127,7 +122,6 @@ Show help
 ```bash
 tb help
 ```
-<br/><br/>
 
 <br/><br/>
 ### land
@@ -136,7 +130,6 @@ checks for rust updates, updates to the latest C-C and M-C, pulls bugs from bugz
 ```bash
 tb land
 ```
-<br/><br/>
 
 <br/><br/>
 ### lint
@@ -145,7 +138,6 @@ run commlint on all files
 ```bash
 tb lint
 ```
-<br/><br/>
 
 <br/><br/>
 ### rebase
@@ -155,6 +147,7 @@ Stashes any uncommited change, pulls m-c & c-c rebases your current stack and un
 tb rebase
 ```
 <br/><br/>
+![Screen recording of rebase.](/images/rebase.gif)
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
@@ -169,7 +162,6 @@ builds and launches thunderbird
 ```bash
 tb run
 ```
-<br/><br/>
 
 <br/><br/>
 ### rust-check
@@ -179,6 +171,7 @@ Check for upstream rust changes without updating locally
 tb rust-check
 ```
 <br/><br/>
+![Screen recording of rust-check.](/images/rust-check.gif)
 
 <br/><br/>
 ### run-rebase
@@ -187,7 +180,6 @@ the same as rebase but builds and runs when completed. Alias for `tb rebase -r` 
 ```bash
 tb run-rebase
 ```
-<br/><br/>
 
 <br/><br/>
 ### run-update
@@ -196,7 +188,6 @@ the same as update but builds and runs when completed. Alias for `tb update -r` 
 ```bash
 tb run-update
 ```
-<br/><br/>
 
 <br/><br/>
 ### submit
@@ -205,7 +196,6 @@ Submits to phabricator, optionally running lint and related tests first and post
 ```bash
 tb submit
 ```
-<br/><br/>
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
@@ -228,7 +218,6 @@ Checks files changed or added and runs all tests for any components modified, an
 ```bash
 tb test
 ```
-<br/><br/>
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
@@ -241,7 +230,6 @@ pushes a try run
 ```bash
 tb try
 ```
-<br/><br/>
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
