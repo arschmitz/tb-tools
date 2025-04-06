@@ -223,13 +223,17 @@ if (command && !["help", "readme"].includes(command)) {
   checkDir();
 }
 
-if (commands[command]) {
+async function capture() {
   try {
-    commands[command].run();
+    await commands[command].run();
   } catch (error) {
     console.error(error);
     process.exit(1);
   }
+}
+
+if (commands[command]) {
+  capture();
 } else {
   commands["help"].run();
 }

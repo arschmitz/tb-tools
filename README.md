@@ -138,6 +138,8 @@ run commlint on all files
 ```bash
 tb lint
 ```
+<br/><br/>
+![Screen recording of lint.](/images/lint.gif)
 
 <br/><br/>
 ### rebase
