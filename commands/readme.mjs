@@ -40,13 +40,13 @@ export default async function (optionList, subOptions) {
     lines.push(`### ${option.name}`);
     lines.push("---");
     lines.push(option.description);
-    if (fs.existsSync(path.join("images", `${option.name}.gif`))) {
-      lines.push(`![Screen recording of ${option.name}.](/images/${option.name}.gif)`);
-    }
-    lines.push("");
     lines.push("```bash");
     lines.push(`tb ${option.name}`);
     lines.push("```");
+    if (fs.existsSync(path.join("images", `${option.name}.gif`))) {
+      lines.push(`![Screen recording of ${option.name}.](/images/${option.name}.gif)`);
+    }
+    lines.push("<br/><br/>");
   
     if (subOptions[option.name]) {
       lines.push(`#### Options`);
@@ -56,6 +56,7 @@ export default async function (optionList, subOptions) {
         lines.push(`|--${subOption.name}|${subOption.alias ? "-" + subOption.alias : ""}|${subOption.description.replaceAll("|", "\\|")}|${subOption.defaultValue}|\`tb ${option.name} --${subOption.name}=${subOption.defaultValue}\``);
       });
     }
+    lines.push("<br/><br/>");
   });
   lines.push("```");
   lines.push(...banner.split(/\n/).map((line) => `                      ${line}`));
