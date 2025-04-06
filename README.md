@@ -49,6 +49,8 @@ Amends the current commit optionally adding new files
 ```bash
 tb amend
 ```
+<br/><br/>
+![Screen recording of amend.](/images/amend.gif)
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
