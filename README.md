@@ -77,6 +77,7 @@ Create a new commit with message based on your current bookmark.
 tb commit
 ```
 <br/><br/>
+![Screen recording of commit.](/images/commit.gif)
 
 <br/><br/>
 ### create
@@ -86,6 +87,7 @@ Setup a new bookmark based on a bugzilla bug. Optionally updates to latest prior
 tb create
 ```
 <br/><br/>
+![Screen recording of create.](/images/create.gif)
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
@@ -256,8 +258,8 @@ pulls m-c & c-c updates to tip and checks for rust changes
 ```bash
 tb update
 ```
-![Screen recording of update.](/images/update.gif)
 <br/><br/>
+![Screen recording of update.](/images/update.gif)
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|

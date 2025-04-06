@@ -43,10 +43,10 @@ export default async function (optionList, subOptions) {
     lines.push("```bash");
     lines.push(`tb ${option.name}`);
     lines.push("```");
+    lines.push("<br/><br/>");
     if (fs.existsSync(path.join("images", `${option.name}.gif`))) {
       lines.push(`![Screen recording of ${option.name}.](/images/${option.name}.gif)`);
     }
-    lines.push("<br/><br/>");
   
     if (subOptions[option.name]) {
       lines.push(`#### Options`);
