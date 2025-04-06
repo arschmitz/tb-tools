@@ -13,13 +13,14 @@ import testChanged from './commands/test.mjs';
 import update from './commands/update.mjs';
 import usage from 'command-line-usage';
 import { comment } from './lib/phab.mjs';
-
 import {
   checkDir,
   mapBooleanOptions,
   mach
 } from './lib/utils.mjs';
-import { getRevision, hg, pullUp } from './lib/hg.mjs';
+import { amend, commit } from './lib/hg.mjs';
+import rustCheck from './commands/rust-check.mjs';
+import create from './commands/create.mjs';
 
 const mainDefinitions = [
   { name: 'command', defaultOption: true }
@@ -28,14 +29,19 @@ const { command, _unknown } = args(mainDefinitions, { stopAtFirstUnknown: true }
 const argv = _unknown || [];
 
 const commands = {
-  revision: {
-    description: false,
+  amend: {
+    description: "Amends the current commit optionally adding new files",
     run: async () => {
-      console.log(await getRevision());
-    }
+      await amend();
+    },
+    header: "Amend options",
+    options: [
+      { name: "addRemove", alias: "a", description: "Add or remove files added or deleted" }
+    ]
   },
   comment: {
     description: "Post a comment to phabricator for current patch",
+    header: "Comment Options",
     run: async () => {
       const options = mapBooleanOptions(args(commands.comment.options, { argv }));
       await comment(options.message, options.resolve);
@@ -43,6 +49,23 @@ const commands = {
     options: [
       { name: "message", alias: "m", description: "Comment text to post to phabricator" },
       { name: 'resolve', alias: 'r', description: 'Submit all inline comments and comments marked done', defaultValue: "true" }
+    ]
+  },
+  commit: {
+    description: "Create a new commit with message based on your current bookmark.",
+    run: async () => {
+      await commit();
+    }
+  },
+  create: {
+    description: "Setup a new bookmark based on a bugzilla bug. Optionally updates to latest prior. Marks the bug assigned and assignee to yourself.",
+    run: async () => {
+      const options = mapBooleanOptions(args(commands.create.options, { argv }));
+      await create(options);
+    },
+    header: "Create Options",
+    options: [
+      { name: "update", alias: "u", description: "Update code before creating bookmark", defaultValue: "true" },
     ]
   },
   "build-rebase": {
@@ -62,7 +85,7 @@ const commands = {
     run () { console.log(usage(sections)); },
   },
   land: {
-    description: "updates to the latest C-C and M-C then Interactivly land patches, updating the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.",
+    description: "checks for rust updates, updates to the latest C-C and M-C, pulls bugs from bugzilla with keyword `checkin-needed-tb` and Interactivly land patches, allowing to view the bug or patch, then updates the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.",
     run: land
   },
   lint: {
@@ -92,10 +115,7 @@ const commands = {
   "rust-check": {
     description: "Check for upstream rust changes without updating locally",
     run: async () => {
-      await hg("bookmark -f -r . checkpoint");
-      await pullUp("central");
-      await mach("tb-rust check-upstream");
-      await hg("up checkpoint");
+      await rustCheck();
     }
   },
   "run-rebase": {
@@ -108,7 +128,8 @@ const commands = {
   },
   submit: {
     description: "Submits to phabricator, optionally running lint and related tests first and posting a try run and submitting pending comments after.",
-    header: 'Submit Options',async run () {
+    header: 'Submit Options',
+    async run () {
       const options = mapBooleanOptions(args(commands.submit.options, { argv }));
       await submit(options, commands.try.options);
     },
@@ -155,7 +176,8 @@ const commands = {
     },
     options: [
       { name: 'run', alias: 'r', description: 'build run thunderbird when the update complete', defaultValue: false },
-      { name: 'build', alias: 'b', description: 'build thunderbird when the update is complete', defaultValue: false }
+      { name: 'build', alias: 'b', description: 'build thunderbird when the update is complete', defaultValue: false },
+      { name: 'force', alias: 'f', description: 'Continue update despite out of sync rust dependencies', defaultValue: false },
     ]
   },
 };

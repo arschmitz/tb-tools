@@ -13,13 +13,17 @@ export default async function (optionList, subOptions) {
     "`npm install -g https://github.com/arschmitz/tb-tools`",
     "## Configuration",
     "TB Tools uses a configuration `.tb.json` file in your users home directory to enable some features.",
-    "This file currently contains credentials for phabricator, but may contain additional configuration in the future.",
+    "This file currently contains credentials for phabricator, and bugzilla. Option defaults and other features may be added in the future.",
     "### Sample Configuration",
 `\`\`\`json
 {
   "phabricator": {
     "user": "arschmitz",
     "token": "cli-uxdexxxkzvy5m5j7xxgajqunxjhe"
+  },
+  "bugzilla": {
+    "user": "arschmitz",
+    "apiKey": "36IrYQ06NddTOnnp4IBwpZjROxxxmvvuqUcv1M2v"
   }
 }
 \`\`\``,

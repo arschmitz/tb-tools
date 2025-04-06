@@ -7,20 +7,27 @@ Right now these are only things that i have personally used and found useful but
 `npm install -g https://github.com/arschmitz/tb-tools`
 ## Configuration
 TB Tools uses a configuration `.tb.json` file in your users home directory to enable some features.
-This file currently contains credentials for phabricator, but may contain additional configuration in the future.
+This file currently contains credentials for phabricator, and bugzilla. Option defaults and other features may be added in the future.
 ### Sample Configuration
 ```json
 {
   "phabricator": {
     "user": "arschmitz",
     "token": "cli-uxdexxxkzvy5m5j7xxgajqunxjhe"
+  },
+  "bugzilla": {
+    "user": "arschmitz",
+    "apiKey": "36IrYQ06NddTOnnp4IBwpZjROxxxmvvuqUcv1M2v"
   }
 }
 ```
 
 ## Command List
 ##### <ins>Quick Links</ins>
+- [amend](#amend)
 - [comment](#comment)
+- [commit](#commit)
+- [create](#create)
 - [build-rebase](#build-rebase)
 - [build-update](#build-update)
 - [bump](#bump)
@@ -36,6 +43,16 @@ This file currently contains credentials for phabricator, but may contain additi
 - [test](#test)
 - [try](#try)
 - [update](#update)
+### amend
+---
+Amends the current commit optionally adding new files
+```bash
+tb amend
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--addRemove|-a|Add or remove files added or deleted|undefined|`tb amend --addRemove=undefined`
 ### comment
 ---
 Post a comment to phabricator for current patch
@@ -47,6 +64,22 @@ tb comment
 |----|-----------|--|--|---|
 |--message|-m|Comment text to post to phabricator|undefined|`tb comment --message=undefined`
 |--resolve|-r|Submit all inline comments and comments marked done|true|`tb comment --resolve=true`
+### commit
+---
+Create a new commit with message based on your current bookmark.
+```bash
+tb commit
+```
+### create
+---
+Setup a new bookmark based on a bugzilla bug. Optionally updates to latest prior. Marks the bug assigned and assignee to yourself.
+```bash
+tb create
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--update|-u|Update code before creating bookmark|true|`tb create --update=true`
 ### build-rebase
 ---
 the same as rebase but builds when completed alias for `tb rebase -b`
@@ -73,7 +106,7 @@ tb help
 ```
 ### land
 ---
-updates to the latest C-C and M-C then Interactivly land patches, updating the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.
+checks for rust updates, updates to the latest C-C and M-C, pulls bugs from bugzilla with keyword `checkin-needed-tb` and Interactivly land patches, allowing to view the bug or patch, then updates the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.
 ```bash
 tb land
 ```
@@ -94,6 +127,7 @@ tb rebase
 |----|-----------|--|--|---|
 |--run|-r|build run thunderbird when the update complete|false|`tb rebase --run=false`
 |--build|-b|build thunderbird when the update is complete|false|`tb rebase --build=false`
+|--force|-f|Continue update despite out of sync rust dependencies|false|`tb rebase --force=false`
 ### run
 ---
 builds and launches thunderbird
@@ -173,6 +207,7 @@ tb update
 |----|-----------|--|--|---|
 |--run|-r|build run thunderbird when the update complete|false|`tb update --run=false`
 |--build|-b|build thunderbird when the update is complete|false|`tb update --build=false`
+|--force|-f|Continue update despite out of sync rust dependencies|false|`tb update --force=false`
 ```
                                                               .....
                                                       ..::-------====---:..

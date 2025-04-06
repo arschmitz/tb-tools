@@ -1,21 +1,24 @@
+import rustCheck from "./rust-check.mjs";
 import { mach } from "../lib/utils.mjs";
-import { pullUp } from "../lib/hg.mjs";
+import { hg, pullUp } from "../lib/hg.mjs";
 
-export default async function update({ build = false, run = false } = {}) {
+export default async function update({ build = false, run = false, force = false } = {}) {
   try {
-    await pullUp("central");
-    await pullUp();
-    await mach("tb-rust check-upstream");
-
-    if (build || run) {
-      await mach("build");
-    }
-
-    if (run) {
-      await mach("run");
-    }
+    await rustCheck();
   } catch (error) {
-    console.error(error);
-    process.exit(1);
+    if (!force) {
+      console.error(error);
+      return;
+    }
+  }
+  await hg("up central", "..", true);
+  await pullUp();
+
+  if (build || run) {
+    await mach("build");
+  }
+
+  if (run) {
+    await mach("run");
   }
 }
