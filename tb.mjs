@@ -18,7 +18,7 @@ import {
   mapBooleanOptions,
   mach
 } from './lib/utils.mjs';
-import { amend, commit } from './lib/hg.mjs';
+import { amend, commit, handleConflict } from './lib/hg.mjs';
 import rustCheck from './commands/rust-check.mjs';
 import create from './commands/create.mjs';
 
@@ -29,6 +29,12 @@ const { command, _unknown } = args(mainDefinitions, { stopAtFirstUnknown: true }
 const argv = _unknown || [];
 
 const commands = {
+  conflict: {
+    description: false,
+    run: async () => {
+      await handleConflict();
+    }
+  },
   amend: {
     description: "Amends the current commit optionally adding new files",
     run: async () => {

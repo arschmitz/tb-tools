@@ -38,7 +38,7 @@ export default async function(options, tryOptions) {
       try {
         const tryLink = await _try(options, tryOptions);
         await comment(`try: ${tryLink}`, options.resolve);
-        spinner.success();
+        spinner.succeed();
       } catch (error) {
         spinner.fail();
         throw error;
@@ -46,7 +46,7 @@ export default async function(options, tryOptions) {
     } else if (options.resolve) {
       try {
         await comment("", true);
-        spinner.success();
+        spinner.succeed();
       } catch (error) {
         spinner.fail();
         throw error;

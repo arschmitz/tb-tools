@@ -1,18 +1,19 @@
 import readlineSync from "readline-sync";
 import update from "./update.mjs";
 import { hg } from "../lib/hg.mjs";
-import { mach, run } from "../lib/utils.mjs";
+import { run } from "../lib/utils.mjs";
 import { readFile, writeFile } from 'node:fs/promises';
+import rustCheck from "./rust-check.mjs";
 
 export default async function () {
   try {
     await update();
-    await mach("tb-rust check-upstream");
+    await rustCheck();
     await update_dummy();
 
     await run({
       cmd: "hg",
-      args: ["commit", "-m", `"No bug, trigger build."`]
+      args: ["commit", "-m", `No bug, trigger build.`]
     });
     await hg("out -r .");
 

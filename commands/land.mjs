@@ -2,6 +2,7 @@ import readlineSync from "readline-sync";
 import open from "open";
 import phab from "../lib/phab.mjs";
 import chalk from 'chalk';
+import ora from "ora";
 import { hg } from "../lib/hg.mjs";
 import { run } from "../lib/utils.mjs";
 import { getCommitMessage, getIndividualReviewers, } from "../lib/hg.mjs";
@@ -11,30 +12,51 @@ import update from "./update.mjs";
 
 export default async function () {
   await update();
-  const bugs = await getBugs();
-  for(const bug of bugs.bugs) {
-    const attachments = await getAttachments(bug.id);
+  const spinner = ora({
+    text: `Fetching bugs`,
+    spinner: "aesthetic"
+  }).start();
 
-    const phabIds = attachments.reduce((collection, attachment) => {
-      if (attachment.content_type === 'text/x-phabricator-request') {
-        collection.push(attachment.file_name.match(/D[0-9]{6}/)[0].replace("D", ""));
-      }
+  let bugs;
+  try {
+    bugs = await getBugs();
+    for(const bug of bugs) {
+      const attachments = await getAttachments(bug.id);
 
-      return collection;
-    }, []);
+      const phabIds = attachments.reduce((collection, attachment) => {
+        if (attachment.content_type === 'text/x-phabricator-request') {
+          collection.push(attachment.file_name.match(/D[0-9]{6}/)[0].replace("D", ""));
+        }
 
-    bug.patches = new Set((await phab({ route: "differential.query", params: { ids: phabIds }})).result);
+        return collection;
+      }, []);
 
+      bug.patches = new Set((await phab({ route: "differential.query", params: { ids: phabIds }})).result);
+    }
+    spinner.succeed();
+  } catch (error) {
+    spinner.fail();
+    throw error;
   }
 
-  await pickPatch(new Set(bugs.bugs));
+  await pickPatch(new Set(bugs));
 
   await hg("out -r .");
 
   const correct = readlineSync.keyInYN("Does the output look correct? [y/n/c]:", { guide: false });
 
   if (correct) {
-    await hg("push -r . ssh://hg.mozilla.org/comm-central");
+    const uploadSpinner = ora({
+      text: `Fetching bugs`,
+      spinner: "aesthetic"
+    }).start();
+    try {
+      await hg("push -r . ssh://hg.mozilla.org/comm-central");
+      uploadSpinner.succeed();
+    } catch (error) {
+      uploadSpinner.fail();
+      throw error;
+    }
   } else if (correct === false) {
     process.exit(1);
   } else {
@@ -93,7 +115,7 @@ async function checkPatch(choice) {
         value: async () => {
           open(`https://bugzilla.mozilla.org/show_bug.cgi?id=${choice.bug.id}`);
           const next = await checkPatch(choice);
-          next();
+          await next();
         }
       },
       {
@@ -101,7 +123,7 @@ async function checkPatch(choice) {
         value: async () => {
           open(choice.patch.uri);
           const next = await checkPatch(choice);
-          next();
+          await next();
         }
       },
       {
@@ -130,5 +152,15 @@ async function mergePatch(patchNumber) {
   lines.shift();
   lines.unshift(messageParts.join("."));
 
-  await run({ cmd: "hg", args: [ "commit", "--amend", "--date", "now", "-m", lines.join("\n") ] });
+  try {
+    await run({ cmd: "hg", args: [ "commit", "--amend", "--date", "now", "-m", lines.join("\n") ] });
+  } catch (error) {
+    if (/uncommited/.test(error.message)) {
+      throw error;
+    }
+
+    if (/conflict/.test(error.message)) {
+      console.log("conflict")
+    }
+  }
 }
