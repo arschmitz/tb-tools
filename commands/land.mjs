@@ -1,11 +1,11 @@
 import readlineSync from "readline-sync";
 import open from "open";
-import phab from "../lib/phab.mjs";
+import phab, { comment } from "../lib/phab.mjs";
 import chalk from 'chalk';
 import ora from "ora";
 import { hg } from "../lib/hg.mjs";
 import { run } from "../lib/utils.mjs";
-import { getCommitMessage, getIndividualReviewers, } from "../lib/hg.mjs";
+import { getCommitMessage } from "../lib/hg.mjs";
 import { select, Separator } from '@inquirer/prompts';
 import { getBugs, getAttachments } from "../lib/bugzilla.mjs";
 import update from "./update.mjs";
@@ -32,6 +32,14 @@ export default async function () {
       }, []);
 
       bug.patches = new Set((await phab({ route: "differential.query", params: { ids: phabIds }})).result);
+      for(const patch of Array.from(bug.patches)) {
+        const response = await phab({ route: "user.query", params: {
+          phids: Object.keys(patch.reviewers),
+        }});
+
+        const names = response.result.map((reviewer) => reviewer.userName);
+        patch.reviewers = names;
+      }
     }
     spinner.succeed();
   } catch (error) {
@@ -67,8 +75,17 @@ export default async function () {
 }
 
 async function pickPatch(_bugs) {
-  const choices = []
-  for(const bug of Array.from(_bugs)) {
+  const choices = [];
+
+  choices.push(new Separator(chalk.magenta("Actions:")));
+  choices.push({ name: "Continue", value: "continue" });
+  choices.push({ name: "Abort", value: "abort" });
+
+  const iterator = Array.from(_bugs);
+
+  iterator.reverse();
+
+  for(const bug of iterator) {
     choices.push(new Separator(chalk.yellow(`Bug ${bug.id} - ${bug.summary}`.substring(0, process.stdout.columns - 3))));
 
     bug.patches.forEach((patch) => {
@@ -84,14 +101,10 @@ async function pickPatch(_bugs) {
     });
   }
 
-  choices.push(new Separator(chalk.magenta("Actions:")));
-  choices.push({ name: "Continue", value: "continue" });
-  choices.push({ name: "Abort", value: "abort" });
-
   const choice = await select({
     choices,
     message: chalk.green.underline.bold("Select a patch to land or an action:"),
-    pageSize: 30
+    pageSize: 20
   });
 
   if (typeof choice === "object") {
@@ -129,7 +142,7 @@ async function checkPatch(choice) {
       {
         name: "Merge Patch",
         value: async () => {
-          await mergePatch(`D${choice.patch.id}`);
+          await mergePatch(choice.patch);
         }
       }
     ]
@@ -138,29 +151,37 @@ async function checkPatch(choice) {
   });
 }
 
-async function mergePatch(patchNumber) {
-  console.info(`Merging ${patchNumber}… `);
-
-  await run({ cmd: "moz-phab", args:["patch", patchNumber, "--no-bookmark", "--skip-dependencies", "--apply-to", "."]});
-
-  const lines = (await getCommitMessage()).split(/\n/);
-  const messageParts = lines[0].split(".");
-  const reviewers = await getIndividualReviewers();
-  messageParts.pop();
-  messageParts.push(reviewers);
-
-  lines.shift();
-  lines.unshift(messageParts.join("."));
+async function mergePatch(patch) {
+  const spinner = ora({
+    text: `Merging D${patch.id}… `,
+    spinner: "aesthetic"
+  }).start();
 
   try {
-    await run({ cmd: "hg", args: [ "commit", "--amend", "--date", "now", "-m", lines.join("\n") ] });
+    await run({ cmd: "moz-phab", args:["patch", `D${patch.id}`, "--no-bookmark", "--skip-dependencies", "--apply-to", "."], capture: true, silent: true });
+    spinner.succeed();
   } catch (error) {
+    spinner.fail();
     if (/uncommited/.test(error.message)) {
       throw error;
     }
 
-    if (/conflict/.test(error.message)) {
-      console.log("conflict")
+    if (/abort: patch failed to apply/.test(error)) {
+      const correct = readlineSync.keyInYN("Add comment to phabricator? [y/n]:", { guide: false });
+
+      if (correct) {
+        await comment({ message: "Conflicts found while landing. Please Rebase." });
+      }
     }
   }
+
+  const lines = (await getCommitMessage()).split(/\n/);
+  const messageParts = lines[0].split(".");
+  messageParts.pop();
+  messageParts.push(`r=${patch.reviewers.join(",")}`);
+
+  lines.shift();
+  lines.unshift(messageParts.join("."));
+
+  await run({ cmd: "hg", args: [ "commit", "--amend", "--date", "now", "-m", lines.join("\n") ], capture: true, silent: true });
 }
