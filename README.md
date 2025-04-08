@@ -116,6 +116,8 @@ Bump thunderbird build by modifying the dummy file. This command updates to the 
 ```bash
 tb bump
 ```
+<br/><br/>
+![Screen recording of bump.](/images/bump.gif)
 
 <br/><br/>
 ### help
@@ -132,6 +134,8 @@ checks for rust updates, updates to the latest C-C and M-C, pulls bugs from bugz
 ```bash
 tb land
 ```
+<br/><br/>
+![Screen recording of land.](/images/land.gif)
 
 <br/><br/>
 ### lint
