@@ -82,7 +82,10 @@ tb commit
 <br/><br/>
 ### create
 ---
-Setup a new bookmark based on a bugzilla bug. Optionally updates to latest prior. Marks the bug assigned and assignee to yourself.
+**Setup to work on a new bug**
+1. A new bookmark is created based on a bugzilla bug number `Bug-XXXXXXX`.
+2. Optionally update to latest M-C and C-C.
+3. Mark the bug `Assigned` and assignee to yourself.
 ```bash
 tb create
 ```
@@ -112,7 +115,15 @@ tb build-update
 <br/><br/>
 ### bump
 ---
-Bump thunderbird build by modifying the dummy file. This command updates to the current state using `update`, checks for rust changes, updates the dummy file adding or removing a `.`, commits with the message `No bug, trigger build.`, outputs the staged commits to ensure it is just the build trigger, asks you to verify changes, and either pushes or cleans up the changes based on input.
+**Bump thunderbird build Modifying the dummy file**
+1. Checks for rust updates
+2. Updates Mozilla-central and comm-central
+3. Updates the dummy file adding or removing a `.`,
+4. Commits with the message `No bug, trigger build.`,
+5. Outputs the staged commits for approval",
+   * Approve - The stack is pushed to comm-central
+   * Cancel - The current state is pruned
+
 ```bash
 tb bump
 ```
@@ -130,7 +141,7 @@ tb help
 <br/><br/>
 ### land
 ---
-An interactive cli for sherifing and landing bugs on comm central.
+**An interactive cli for sherifing and landing bugs on comm central.**
 1. Checks for rust updates optionally aborting
 2. Updates mozilla-central and comm-central
 3. Pulls bugs  marked for checkin and associated patches from bugzilla
@@ -154,7 +165,8 @@ An interactive cli for sherifing and landing bugs on comm central.
 7. Upon approved the stack is pushed to comm-central
 8. The bug is updated
    * The milestone is set
-   * The status is updated if keep-open is not set
+   * The status is updated if keep-open is not set"
+
 ```bash
 tb land
 ```
@@ -174,7 +186,12 @@ tb lint
 <br/><br/>
 ### rebase
 ---
-Stashes any uncommited change, pulls m-c & c-c rebases your current stack and unstashes any uncommited changes
+**Rebase your current state**
+1. Stashes any uncommited change
+2. Checks for rust updates with option to abort
+3. Updates M-C and C-C
+4. Rebase your current stack
+4. Uunstashes any uncommited changes
 ```bash
 tb rebase
 ```
@@ -198,7 +215,7 @@ tb run
 <br/><br/>
 ### rust-check
 ---
-Check for upstream rust changes without updating locally
+Check for upstream rust changes with option to roll back
 ```bash
 tb rust-check
 ```
@@ -208,7 +225,7 @@ tb rust-check
 <br/><br/>
 ### run-rebase
 ---
-the same as rebase but builds and runs when completed. Alias for `tb rebase -r` or `tb rebase && tb run`
+The same as rebase but builds and runs when completed. Alias for `tb rebase -r` or `tb rebase && tb run`
 ```bash
 tb run-rebase
 ```
@@ -216,7 +233,7 @@ tb run-rebase
 <br/><br/>
 ### run-update
 ---
-the same as update but builds and runs when completed. Alias for `tb update -r` or `tb update && tb run`
+The same as update but builds and runs when completed. Alias for `tb update -r` or `tb update && tb run`
 ```bash
 tb run-update
 ```
@@ -224,7 +241,15 @@ tb run-update
 <br/><br/>
 ### submit
 ---
-Submits to phabricator, optionally running lint and related tests first and posting a try run and submitting pending comments after.
+Submits to phabricator.
+Optionally:
+* Check for changes
+  * Prompt to amend current commit
+* Run lint
+* Run tests
+* Submit a try run and post as a comment on phabricator
+* Submit pending inline comments and comments marked as done,
+
 ```bash
 tb submit
 ```
@@ -258,7 +283,7 @@ tb test
 <br/><br/>
 ### try
 ---
-pushes a try run
+pushes a try run with option to comment on phabricator with link
 ```bash
 tb try
 ```

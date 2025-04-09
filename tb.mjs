@@ -64,7 +64,11 @@ const commands = {
     }
   },
   create: {
-    description: "Setup a new bookmark based on a bugzilla bug. Optionally updates to latest prior. Marks the bug assigned and assignee to yourself.",
+    description:
+`**Setup to work on a new bug**
+1. A new bookmark is created based on a bugzilla bug number \`Bug-XXXXXXX\`.
+2. Optionally update to latest M-C and C-C.
+3. Mark the bug \`Assigned\` and assignee to yourself.`,
     run: async () => {
       const options = mapBooleanOptions(args(commands.create.options, { argv }));
       await create(options);
@@ -83,7 +87,16 @@ const commands = {
     async run () { await update({ build: true }); },
   },
   bump: {
-    description: "Bump thunderbird build by modifying the dummy file. This command updates to the current state using `update`, checks for rust changes, updates the dummy file adding or removing a `.`, commits with the message `No bug, trigger build.`, outputs the staged commits to ensure it is just the build trigger, asks you to verify changes, and either pushes or cleans up the changes based on input.",
+    description:
+`**Bump thunderbird build Modifying the dummy file**
+1. Checks for rust updates
+2. Updates Mozilla-central and comm-central
+3. Updates the dummy file adding or removing a \`.\`,
+4. Commits with the message \`No bug, trigger build.\`,
+5. Outputs the staged commits for approval",
+   * Approve - The stack is pushed to comm-central
+   * Cancel - The current state is pruned
+`,
     run: bump
   },
   help: {
@@ -91,33 +104,33 @@ const commands = {
     run () { console.log(usage(sections)); },
   },
   land: {
-    description: [
-      "An interactive cli for sherifing and landing bugs on comm central.",
-      "1. Checks for rust updates optionally aborting",
-      "2. Updates mozilla-central and comm-central",
-      "3. Pulls bugs  marked for checkin and associated patches from bugzilla",
-      "4. Prompts with a list of patches is displayed",
-      "   * Displays a list of actions of the patch upon selection.",
-      "     - Open bug in default browser",
-      "     - Open Patch in default browser",
-      "     - Merge Patch",
-      "       + If successful - Commit message is updated with individual reviewers removing groups.",
-      "       + If failed - ",
-      "         * A comment is asking for it to be rebased",
-      "         * checkin-needed-tb is removed",
-      "         * A comment is left on phabricator asking for a rebase",
-      "         * The patch is rolled back",
-      "         * The patch selection is shown again with patch removed",
-      "     - Skip",
-      "       + The patch is skipped removed from the list",
-      "       + Patch selection is displayed",
-      "5. Patch selection continues until the stack is aborted or continue is selected",
-      "6. The stack is displayed for approval",
-      "7. Upon approved the stack is pushed to comm-central",
-      "8. The bug is updated",
-      "   * The milestone is set",
-      "   * The status is updated if keep-open is not set",
-      ].join("\n"),
+    description:
+`**An interactive cli for sherifing and landing bugs on comm central.**
+1. Checks for rust updates optionally aborting
+2. Updates mozilla-central and comm-central
+3. Pulls bugs  marked for checkin and associated patches from bugzilla
+4. Prompts with a list of patches is displayed
+   * Displays a list of actions of the patch upon selection.
+     - Open bug in default browser
+     - Open Patch in default browser
+     - Merge Patch
+       + If successful - Commit message is updated with individual reviewers removing groups.
+       + If failed - 
+         * A comment is asking for it to be rebased
+         * checkin-needed-tb is removed
+         * A comment is left on phabricator asking for a rebase
+         * The patch is rolled back
+         * The patch selection is shown again with patch removed
+     - Skip
+       + The patch is skipped removed from the list
+       + Patch selection is displayed
+5. Patch selection continues until the stack is aborted or continue is selected
+6. The stack is displayed for approval
+7. Upon approved the stack is pushed to comm-central
+8. The bug is updated
+   * The milestone is set
+   * The status is updated if keep-open is not set"
+`,
     run: land
   },
   lint: {
@@ -131,7 +144,13 @@ const commands = {
     run: () => readme(optionList, subOptions),
   },
   rebase: {
-    description: 'Stashes any uncommited change, pulls m-c & c-c rebases your current stack and unstashes any uncommited changes',
+    description:
+`**Rebase your current state**
+1. Stashes any uncommited change
+2. Checks for rust updates with option to abort
+3. Updates M-C and C-C
+4. Rebase your current stack
+4. Uunstashes any uncommited changes`,
     async run () {
       const options = mapBooleanOptions(args(commands.rebase.options, { argv }));
       await rebase(options);
@@ -145,21 +164,29 @@ const commands = {
     }
   },
   "rust-check": {
-    description: "Check for upstream rust changes without updating locally",
+    description: "Check for upstream rust changes with option to roll back",
     run: async () => {
       await rustCheck();
     }
   },
   "run-rebase": {
-    description: 'the same as rebase but builds and runs when completed. Alias for `tb rebase -r` or `tb rebase && tb run`' ,
+    description: 'The same as rebase but builds and runs when completed. Alias for `tb rebase -r` or `tb rebase && tb run`' ,
     async run() { await rebase({ run: true }) },
   },
   "run-update": {
-    description: 'the same as update but builds and runs when completed. Alias for `tb update -r` or `tb update && tb run`' ,
+    description: 'The same as update but builds and runs when completed. Alias for `tb update -r` or `tb update && tb run`' ,
     async run () { await update({ run: true }); },
   },
   submit: {
-    description: "Submits to phabricator, optionally running lint and related tests first and posting a try run and submitting pending comments after.",
+    description: `Submits to phabricator.
+Optionally:
+* Check for changes
+  * Prompt to amend current commit
+* Run lint
+* Run tests
+* Submit a try run and post as a comment on phabricator
+* Submit pending inline comments and comments marked as done,
+`,
     header: 'Submit Options',
     async run () {
       const options = mapBooleanOptions(args(commands.submit.options, { argv }));
@@ -185,7 +212,7 @@ const commands = {
     ]
   },
   try: {
-    description: "pushes a try run",
+    description: "pushes a try run with option to comment on phabricator with link",
     header: 'Try Options',
     options: [
       { name: 'unit-tests', alias: 'u', description: 'type of tests to run `mochitest|xpcshell|all`', defaultValue: "all" },
