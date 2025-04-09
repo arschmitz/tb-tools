@@ -114,6 +114,9 @@ const commands = {
       "5. Patch selection continues until the stack is aborted or continue is selected",
       "6. The stack is displayed for approval",
       "7. Upon approved the stack is pushed to comm-central",
+      "8. The bug is updated",
+      "   * The milestone is set",
+      "   * The status is updated if keep-open is not set",
       ].join("\n"),
     run: land
   },
