@@ -130,7 +130,28 @@ tb help
 <br/><br/>
 ### land
 ---
-checks for rust updates, updates to the latest C-C and M-C, pulls bugs from bugzilla with keyword `checkin-needed-tb` and Interactivly land patches, allowing to view the bug or patch, then updates the commit messages to remove group reviewers. Finally confirms the stack and pushes or reverts and cleans up.
+An interactive cli for sherifing and landing bugs on comm central.
+1. Checks for rust updates optionally aborting
+2. Updates mozilla-central and comm-central
+3. Pulls bugs  marked for checkin and associated patches from bugzilla
+4. Prompts with a list of patches is displayed
+   * Displays a list of actions of the patch upon selection.
+     * Open bug in default browser
+     * Open Patch in default browser
+     * Merge Patch
+       * If successful - Commit message is updated with individual reviewers removing groups.
+       * If failed - 
+         * A comment is asking for it to be rebased
+         * checkin-needed-tb is removed
+         * A comment is left on phabricator asking for a rebase
+         * The patch is rolled back
+         * The patch selection is shown again with patch removed
+     * Skip
+       * The patch is skipped removed from the list
+       * Patch selection is displayed
+5. Patch selection continues until the stack is aborted or continue is selected
+6. The stack is displayed for approval
+7. Upon approved the stack is pushed to comm-central
 ```bash
 tb land
 ```
