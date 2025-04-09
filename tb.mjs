@@ -109,6 +109,7 @@ const commands = {
 1. Checks for rust updates optionally aborting
 2. Updates mozilla-central and comm-central
 3. Pulls bugs  marked for checkin and associated patches from bugzilla
+   * If no bugs are found prompt to bump dummy file
 4. Prompts with a list of patches is displayed
    * Displays a list of actions of the patch upon selection.
      - Open bug in default browser

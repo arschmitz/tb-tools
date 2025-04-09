@@ -36,6 +36,19 @@ export default async function (optionList, subOptions) {
   optionList.forEach((option) => {
     lines.push(`- [${option.name}](#${option.name})`)
   });
+  lines.push(
+`
+## Example Workflow
+
+1. Start work on a new bug run \`tb create\` and follow prompt
+2. Make changes until ready to commit
+3. run lint \`tb lint\`
+4. run tests based on your changes \`tb test\`
+5. Commit changes \`tb commit\` and follow prompt to generate commit message.
+6. Make more changes
+7. Add changes to your commit \`tb amend\` selcting new files to add
+8. When ready to submit patches to phabricator lint changes, run tests based on changes, push a try run and submit unsubmited comments in phabricator \`tb submit\`
+`)
   optionList.forEach((option) => {
     lines.push(`### ${option.name}`);
     lines.push("---");

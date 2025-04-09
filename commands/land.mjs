@@ -9,6 +9,7 @@ import { getCommitMessage } from "../lib/hg.mjs";
 import { select, Separator } from '@inquirer/prompts';
 import { getBugs, getAttachments } from "../lib/bugzilla.mjs";
 import update from "./update.mjs";
+import bump from "./bump.mjs";
 
 export default async function () {
   await update();
@@ -20,6 +21,14 @@ export default async function () {
   let bugs;
   try {
     bugs = await getBugs();
+    if (!bugs.length) {
+      const shouldBump = readlineSync.keyInYN("No bugs marked for checkin. Bump dummy file? [y/n/c]:", { guide: false });
+      if (shouldBump) {
+        await bump();
+      }
+
+      return;
+    }
     for(const bug of bugs) {
       const attachments = await getAttachments(bug.id);
 
@@ -144,6 +153,10 @@ async function checkPatch(choice) {
         value: async () => {
           await mergePatch(choice.patch);
         }
+      },
+      {
+        name: "Skip Patch",
+        value: async () => {}
       }
     ]
   },{

@@ -43,6 +43,18 @@ This file currently contains credentials for phabricator, and bugzilla. Option d
 - [test](#test)
 - [try](#try)
 - [update](#update)
+
+## Example Workflow
+
+1. Start work on a new bug run `tb create` and follow prompt
+2. Make changes until ready to commit
+3. run lint `tb lint`
+4. run tests based on your changes `tb test`
+5. Commit changes `tb commit` and follow prompt to generate commit message.
+6. Make more changes
+7. Add changes to your commit `tb amend` selcting new files to add
+8. When ready to submit patches to phabricator lint changes, run tests based on changes, push a try run and submit unsubmited comments in phabricator `tb submit`
+
 ### amend
 ---
 Amends the current commit optionally adding new files
@@ -145,6 +157,7 @@ tb help
 1. Checks for rust updates optionally aborting
 2. Updates mozilla-central and comm-central
 3. Pulls bugs  marked for checkin and associated patches from bugzilla
+   * If no bugs are found prompt to bump dummy file
 4. Prompts with a list of patches is displayed
    * Displays a list of actions of the patch upon selection.
      - Open bug in default browser

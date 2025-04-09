@@ -39,7 +39,7 @@ export default async function (options, _tryOptions) {
       }).start();
       try {
         await comment(`try: ${tryUrl}`);
-        spinner.success();
+        spinner.succeed();
       } catch (error) {
         spinner.fail();
         throw error;
