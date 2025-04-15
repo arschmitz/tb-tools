@@ -44,16 +44,21 @@ This file currently contains credentials for phabricator, and bugzilla. Option d
 - [try](#try)
 - [update](#update)
 
-## Example Workflow
+## Example Development Workflow
 
 1. Start work on a new bug run `tb create` and follow prompt
-2. Make changes until ready to commit
-3. run lint `tb lint`
-4. run tests based on your changes `tb test`
-5. Commit changes `tb commit` and follow prompt to generate commit message.
-6. Make more changes
-7. Add changes to your commit `tb amend` selcting new files to add
-8. When ready to submit patches to phabricator lint changes, run tests based on changes, push a try run and submit unsubmited comments in phabricator `tb submit`
+2. Build and open thunderbird `tb run`
+3. Make changes until ready to commit
+4. run lint `tb lint`
+5. run tests based on your changes `tb test`
+6. Commit changes `tb commit` and follow prompt to generate commit message.
+7. Make more changes
+8. Add changes to your commit `tb amend` selcting new files to add
+9. When ready to submit patches to phabricator lint changes, run tests based on changes, push a try run and submit unsubmited comments in phabricator `tb submit`
+
+## Sheriff Duty
+
+The land command is your all in one tool for handling pushes in thunderbird. This command integrates with both bugzilla and phabricator to form an all in one solution. Just run the land command and tb-tools will check for rust changes and any accompanying patches. Then pulls all bugs marked for checkin and guide you through the process of landing them 1 at a time including viewing and updating the associated bugs and patches. If run with sanity enabled it will run linting and a build at the end before pushing to comm-central. For detailed workflow and documentation see the land command below.
 
 ### amend
 ---
@@ -128,7 +133,7 @@ tb build-update
 ### bump
 ---
 **Bump thunderbird build Modifying the dummy file**
-1. Checks for rust updates
+1. Checks if rust updates are required and if so if patches are available.
 2. Updates Mozilla-central and comm-central
 3. Updates the dummy file adding or removing a `.`,
 4. Commits with the message `No bug, trigger build.`,
@@ -154,7 +159,7 @@ tb help
 ### land
 ---
 **An interactive cli for sherifing and landing bugs on comm central.**
-1. Checks for rust updates optionally aborting
+1. Checks if rust updates are required and if so if patches are available.
 2. Updates mozilla-central and comm-central
 3. Pulls bugs  marked for checkin and associated patches from bugzilla
    * If no bugs are found prompt to bump dummy file
@@ -164,8 +169,8 @@ tb help
      - Open Patch in default browser
      - Merge Patch
        + If successful - Commit message is updated with individual reviewers removing groups.
-       + If failed - 
-         * A comment is asking for it to be rebased
+       + If failed  **EXPIRAMENTAL** -
+         * A comment is left asking for it to be rebased
          * checkin-needed-tb is removed
          * A comment is left on phabricator asking for a rebase
          * The patch is rolled back
@@ -174,11 +179,13 @@ tb help
        + The patch is skipped removed from the list
        + Patch selection is displayed
 5. Patch selection continues until the stack is aborted or continue is selected
-6. The stack is displayed for approval
-7. Upon approved the stack is pushed to comm-central
-8. The bug is updated
+6. Run optional sanity checks
+   * Run lint
+   * Run Build
+7. The stack is displayed for approval
+8. Upon approved the stack is pushed to comm-central
+9. The bug is updated **EXPIRAMENTAL**
    * The milestone is set
-   * The status is updated if keep-open is not set"
 
 ```bash
 tb land
@@ -228,7 +235,17 @@ tb run
 <br/><br/>
 ### rust-check
 ---
-Check for upstream rust changes with option to roll back
+
+**Check for rust updates**
+1. Creates a checkpoint for M-C
+2. Pull changes from M-C
+3. Check for required rust updates
+   * If updates are required
+     1. Pull C-C and see if required changes have already been merged
+     2. Check if rust updates are required
+     3. If updates are still required check phabricator for patches.
+     4. If no patches are found abort
+
 ```bash
 tb rust-check
 ```
@@ -273,7 +290,7 @@ tb submit
 |--test|-t|run all tests for any components or files modified before submitting patch|true|`tb submit --test=true`
 |--try||Submit a try run and comment with the link|true|`tb submit --try=true`
 |--resolve|-r|Submit all inline comments and comments marked done|true|`tb submit --resolve=true`
-|--update|-u|Check for update and rebase before submitting|undefined|`tb submit --update=undefined`
+|--update||Check for update and rebase before submitting|undefined|`tb submit --update=undefined`
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb submit --flavor=all`
 |--unit-tests|-u|type of tests to run `mochitest\|xpcshell\|all`|all|`tb submit --unit-tests=all`
 |--build-types|-b|build types to run|o|`tb submit --build-types=o`
