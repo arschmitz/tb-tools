@@ -38,16 +38,21 @@ export default async function (optionList, subOptions) {
   });
   lines.push(
 `
-## Example Workflow
+## Example Development Workflow
 
 1. Start work on a new bug run \`tb create\` and follow prompt
-2. Make changes until ready to commit
-3. run lint \`tb lint\`
-4. run tests based on your changes \`tb test\`
-5. Commit changes \`tb commit\` and follow prompt to generate commit message.
-6. Make more changes
-7. Add changes to your commit \`tb amend\` selcting new files to add
-8. When ready to submit patches to phabricator lint changes, run tests based on changes, push a try run and submit unsubmited comments in phabricator \`tb submit\`
+2. Build and open thunderbird \`tb run\`
+3. Make changes until ready to commit
+4. run lint \`tb lint\`
+5. run tests based on your changes \`tb test\`
+6. Commit changes \`tb commit\` and follow prompt to generate commit message.
+7. Make more changes
+8. Add changes to your commit \`tb amend\` selcting new files to add
+9. When ready to submit patches to phabricator lint changes, run tests based on changes, push a try run and submit unsubmited comments in phabricator \`tb submit\`
+
+## Sheriff Duty
+
+The land command is your all in one tool for handling pushes in thunderbird. This command integrates with both bugzilla and phabricator to form an all in one solution. Just run the land command and tb-tools will check for rust changes and any accompanying patches. Then pulls all bugs marked for checkin and guide you through the process of landing them 1 at a time including viewing and updating the associated bugs and patches. If run with sanity enabled it will run linting and a build at the end before pushing to comm-central. For detailed workflow and documentation see the land command below.
 `)
   optionList.forEach((option) => {
     lines.push(`### ${option.name}`);

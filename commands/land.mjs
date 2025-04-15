@@ -4,14 +4,23 @@ import phab, { comment } from "../lib/phab.mjs";
 import chalk from 'chalk';
 import ora from "ora";
 import { hg } from "../lib/hg.mjs";
-import { run } from "../lib/utils.mjs";
+import { run, mach, executeCommand } from "../lib/utils.mjs";
 import { getCommitMessage } from "../lib/hg.mjs";
-import { select, Separator } from '@inquirer/prompts';
-import { getBugs, getAttachments } from "../lib/bugzilla.mjs";
+import { select, Separator, input } from '@inquirer/prompts';
+import { getBugs, getAttachments, updateBug } from "../lib/bugzilla.mjs";
 import update from "./update.mjs";
 import bump from "./bump.mjs";
+import lint from "./lint.mjs";
+import fs from "fs";
+import path from "path";
+const landed = [];
 
 export default async function () {
+  try {
+    await executeCommand("hg id --template {dirty} | (grep +  && exit 1 || exit 0)");
+  } catch {
+    throw new Error("Commit or stash changes and try again");
+  }
   await update();
   const spinner = ora({
     text: `Fetching bugs`,
@@ -47,6 +56,7 @@ export default async function () {
         }});
 
         const names = response.result.map((reviewer) => reviewer.userName);
+        patch.bugId = bug.id;
         patch.reviewers = names;
       }
     }
@@ -58,13 +68,49 @@ export default async function () {
 
   await pickPatch(new Set(bugs));
 
+  const lintAnswer = readlineSync.keyInYN("Do you want to run lint? [y/n]:", { guide: false });
+
+  if (lintAnswer) {
+    try {
+      await lint();
+    } catch (error) {
+      const rollAnswer = readlineSync.keyInYN("Lint Failed: Do you want to roll back changes? [y/n]:", { guide: false });
+
+      console.error(error);
+
+      if (rollAnswer) {
+        await hg("up rust-checkpoint", undefined, true);
+      }
+
+      process.exit(1);
+    }
+  }
+
+  const buildAnswer = readlineSync.keyInYN("Do you want to run build? [y/n]:", { guide: false });
+
+  if (buildAnswer) {
+    try {
+      await mach("build");
+    } catch (error) {
+      const rollAnswer = readlineSync.keyInYN("Build Failed: Do you want to roll back changes? [y/n]:", { guide: false });
+
+      console.error(error);
+
+      if (rollAnswer) {
+        await hg("up rust-checkpoint", undefined, true);
+      }
+
+      process.exit(1);
+    }
+  }
+
   await hg("out -r .");
 
   const correct = readlineSync.keyInYN("Does the output look correct? [y/n/c]:", { guide: false });
 
   if (correct) {
     const uploadSpinner = ora({
-      text: `Fetching bugs`,
+      text: `Landing Stack`,
       spinner: "aesthetic"
     }).start();
     try {
@@ -80,6 +126,19 @@ export default async function () {
     console.info("Rolling back changes");
     await hg("prune .");
     process.exit(1);
+  }
+
+  const version = fs.readFileSync(path.join(".", "mail", "config", "version.txt"));
+  const simpleVersion = version.split(".")[0];
+  const mileStone = `${simpleVersion} Branch`;
+
+  for(const bug of landed) {
+    const updates = {};
+    if (bug.target_milestone === "---") {
+      updates.target_milestone = await input({ message: "Enter target milestone:", default: mileStone, required: true });
+
+      await updateBug(bug.id, updates);
+    }
   }
 }
 
@@ -98,6 +157,9 @@ async function pickPatch(_bugs) {
     choices.push(new Separator(chalk.yellow(`Bug ${bug.id} - ${bug.summary}`.substring(0, process.stdout.columns - 3))));
 
     bug.patches.forEach((patch) => {
+      if (patch.statusName === "Closed") {
+        return;
+      }
       const color = patch.statusName === "Accepted" ? chalk.green : chalk.red;
       const status = color(`D${patch.id} [${patch.statusName}]`);
       choices.push({
@@ -121,6 +183,7 @@ async function pickPatch(_bugs) {
     await next();
     choice.bug.patches.delete(choice.patch);
     if (!choice.bug.patches.size) {
+      landed.push(choice.bug);
       _bugs.delete(choice.bug);
     }
     await pickPatch(_bugs);
@@ -183,7 +246,38 @@ async function mergePatch(patch) {
       const correct = readlineSync.keyInYN("Add comment to phabricator? [y/n]:", { guide: false });
 
       if (correct) {
-        await comment({ message: "Conflicts found while landing. Please Rebase." });
+        const commentSpinner = ora({
+          text: `Commenting on patch`,
+          spinner: "aesthetic"
+        }).start();
+        try {
+          await comment({ message: "Conflicts found while landing. Please Rebase." });
+          commentSpinner.succeed();
+        } catch {
+          commentSpinner.fail();
+        }
+      }
+
+      const bugComment = readlineSync.keyInYN("Add comment to bugzilla? [y/n]:", { guide: false });
+
+      if (bugComment) {
+        const commentSpinner = ora({
+          text: `Commenting on patch`,
+          spinner: "aesthetic"
+        }).start();
+        try {
+          updateBug(patch.bugId, {
+            comment: {
+              body: "Please rebase"
+            },
+            keywords: {
+              remove: ["checkin-needed-tb"]
+            }
+          });
+          commentSpinner.succeed();
+        } catch {
+          commentSpinner.fail();
+        }
       }
     }
   }

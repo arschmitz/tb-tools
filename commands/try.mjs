@@ -30,7 +30,7 @@ export default async function (options, _tryOptions) {
       capture: true,
     });
 
-    const urls = getUrls(output.data);
+    const urls = getUrls(output);
     const tryUrl = urls[urls.length - 1];
 
     if (tryOptions.comment) {

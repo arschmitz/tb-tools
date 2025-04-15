@@ -4,13 +4,14 @@ import { hg } from "../lib/hg.mjs";
 import { updateBug } from "../lib/bugzilla.mjs";
 import { run } from "../lib/utils.mjs";
 import ora from "ora";
+import config from "../lib/config.mjs";
 
 export default async function create({ update: _update = true }) {
   const bugId = await input({ message: "Enter bugzilla bug ID:", required: true, validate: (value) => /^[0-9]{4,7}$/.test(value) });
   let name = `Bug-${bugId}`;
 
   if (_update) {
-    await update()
+    await update();
   }
 
   const bookmarkData = await run({
@@ -45,6 +46,7 @@ export default async function create({ update: _update = true }) {
 
   try {
     await updateBug(bugId, {
+      assigned_to: config.bugzilla.user,
       status: "ASSIGNED",
     });
     spinner.succeed();

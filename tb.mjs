@@ -21,6 +21,7 @@ import {
 import { amend, commit, handleConflict } from './lib/hg.mjs';
 import rustCheck from './commands/rust-check.mjs';
 import create from './commands/create.mjs';
+import { getBug } from './lib/bugzilla.mjs';
 
 const mainDefinitions = [
   { name: 'command', defaultOption: true }
@@ -29,6 +30,12 @@ const { command, _unknown } = args(mainDefinitions, { stopAtFirstUnknown: true }
 const argv = _unknown || [];
 
 const commands = {
+  "get-bug": {
+    description: false,
+    run: async () => {
+      console.log((await getBug(1878375)).bugs[0].keywords)
+    }
+  },
   conflict: {
     description: false,
     run: async () => {
@@ -89,7 +96,7 @@ const commands = {
   bump: {
     description:
 `**Bump thunderbird build Modifying the dummy file**
-1. Checks for rust updates
+1. Checks if rust updates are required and if so if patches are available.
 2. Updates Mozilla-central and comm-central
 3. Updates the dummy file adding or removing a \`.\`,
 4. Commits with the message \`No bug, trigger build.\`,
@@ -106,7 +113,7 @@ const commands = {
   land: {
     description:
 `**An interactive cli for sherifing and landing bugs on comm central.**
-1. Checks for rust updates optionally aborting
+1. Checks if rust updates are required and if so if patches are available.
 2. Updates mozilla-central and comm-central
 3. Pulls bugs  marked for checkin and associated patches from bugzilla
    * If no bugs are found prompt to bump dummy file
@@ -116,8 +123,8 @@ const commands = {
      - Open Patch in default browser
      - Merge Patch
        + If successful - Commit message is updated with individual reviewers removing groups.
-       + If failed - 
-         * A comment is asking for it to be rebased
+       + If failed  **EXPIRAMENTAL** -
+         * A comment is left asking for it to be rebased
          * checkin-needed-tb is removed
          * A comment is left on phabricator asking for a rebase
          * The patch is rolled back
@@ -126,11 +133,13 @@ const commands = {
        + The patch is skipped removed from the list
        + Patch selection is displayed
 5. Patch selection continues until the stack is aborted or continue is selected
-6. The stack is displayed for approval
-7. Upon approved the stack is pushed to comm-central
-8. The bug is updated
+6. Run optional sanity checks
+   * Run lint
+   * Run Build
+7. The stack is displayed for approval
+8. Upon approved the stack is pushed to comm-central
+9. The bug is updated **EXPIRAMENTAL**
    * The milestone is set
-   * The status is updated if keep-open is not set"
 `,
     run: land
   },
@@ -165,7 +174,17 @@ const commands = {
     }
   },
   "rust-check": {
-    description: "Check for upstream rust changes with option to roll back",
+    description: `
+**Check for rust updates**
+1. Creates a checkpoint for M-C
+2. Pull changes from M-C
+3. Check for required rust updates
+   * If updates are required
+     1. Pull C-C and see if required changes have already been merged
+     2. Check if rust updates are required
+     3. If updates are still required check phabricator for patches.
+     4. If no patches are found abort
+`,
     run: async () => {
       await rustCheck();
     }
@@ -198,7 +217,7 @@ Optionally:
       { name: 'test', alias: 't', description: 'run all tests for any components or files modified before submitting patch', defaultValue: "true" },
       { name: 'try', description: 'Submit a try run and comment with the link', defaultValue: "true" },
       { name: 'resolve', alias: 'r', description: 'Submit all inline comments and comments marked done', defaultValue: "true" },
-      { name: 'update', alias: 'u', description: 'Check for update and rebase before submitting' },
+      { name: 'update', description: 'Check for update and rebase before submitting' },
     ]
   },
   test: {

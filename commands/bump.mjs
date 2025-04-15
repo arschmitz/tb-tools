@@ -3,12 +3,10 @@ import update from "./update.mjs";
 import { hg } from "../lib/hg.mjs";
 import { run } from "../lib/utils.mjs";
 import { readFile, writeFile } from 'node:fs/promises';
-import rustCheck from "./rust-check.mjs";
 
 export default async function () {
   try {
     await update();
-    await rustCheck();
     await update_dummy();
 
     await run({

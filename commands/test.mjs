@@ -13,7 +13,9 @@ export default async function testChanged({ type = "all" } = {}) {
     }
 
     if (!/components/.test(item)) {
-      collection.add(item);
+      if (/^test_|^browser_/.test(item)) {
+        collection.add(item);
+      }
       return collection;
     }
 
@@ -33,6 +35,10 @@ export default async function testChanged({ type = "all" } = {}) {
 
     return collection;
   }, new Set());
+
+  if (!tests.size) {
+    return;
+  }
 
   await mach(["test", ...Array.from(tests)].join(" "));
 }
