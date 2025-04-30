@@ -16,7 +16,8 @@ import { comment } from './lib/phab.mjs';
 import {
   checkDir,
   mapBooleanOptions,
-  mach
+  mach,
+  machBuild
 } from './lib/utils.mjs';
 import { amend, commit, handleConflict } from './lib/hg.mjs';
 import rustCheck from './commands/rust-check.mjs';
@@ -169,7 +170,7 @@ const commands = {
   run: {
     description: "builds and launches thunderbird",
     async run () {
-      await mach("build");
+      await machBuild();
       await mach("run");
     }
   },

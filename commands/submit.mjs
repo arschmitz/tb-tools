@@ -32,12 +32,13 @@ export default async function(options, tryOptions) {
     if (options.try || options.resolve) {
       spinner = new ora({
         text: "Posting comment to phabricator"
-      }).start();
+      });
     }
     if (options.try) {
       try {
         const tryLink = await _try(options, tryOptions);
-        await comment(`try: ${tryLink}`, options.resolve);
+        spinner.start();
+        await comment({ message: `try: ${tryLink}`, resolve: options.resolve });
         spinner.succeed();
       } catch (error) {
         spinner.fail();
@@ -45,7 +46,7 @@ export default async function(options, tryOptions) {
       }
     } else if (options.resolve) {
       try {
-        await comment("", true);
+        await comment({ message: "", resolve: true });
         spinner.succeed();
       } catch (error) {
         spinner.fail();

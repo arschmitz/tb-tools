@@ -31,6 +31,7 @@ export default async function () {
   try {
     bugs = await getBugs();
     if (!bugs.length) {
+      spinner.succeed();
       const shouldBump = readlineSync.keyInYN("No bugs marked for checkin. Bump dummy file? [y/n/c]:", { guide: false });
       if (shouldBump) {
         await bump();
@@ -109,17 +110,7 @@ export default async function () {
   const correct = readlineSync.keyInYN("Does the output look correct? [y/n/c]:", { guide: false });
 
   if (correct) {
-    const uploadSpinner = ora({
-      text: `Landing Stack`,
-      spinner: "aesthetic"
-    }).start();
-    try {
-      await hg("push -r . ssh://hg.mozilla.org/comm-central");
-      uploadSpinner.succeed();
-    } catch (error) {
-      uploadSpinner.fail();
-      throw error;
-    }
+    // await hg("push -r . ssh://hg.mozilla.org/comm-central");
   } else if (correct === false) {
     process.exit(1);
   } else {
@@ -251,7 +242,7 @@ async function mergePatch(patch) {
           spinner: "aesthetic"
         }).start();
         try {
-          await comment({ message: "Conflicts found while landing. Please Rebase." });
+          await comment({ message: "Conflicts found while landing. Please Rebase.", id: patch.id });
           commentSpinner.succeed();
         } catch {
           commentSpinner.fail();
@@ -268,7 +259,7 @@ async function mergePatch(patch) {
         try {
           updateBug(patch.bugId, {
             comment: {
-              body: "Please rebase"
+              body: "Conflicts found while landing. Please Rebase."
             },
             keywords: {
               remove: ["checkin-needed-tb"]
@@ -290,5 +281,5 @@ async function mergePatch(patch) {
   lines.shift();
   lines.unshift(messageParts.join("."));
 
-  await run({ cmd: "hg", args: [ "commit", "--amend", "--date", "now", "-m", lines.join("\n") ], capture: true, silent: true });
+  await run({ cmd: "hg", args: [ "commit", "--amend", "--date", "now", "-m", lines.join("\n") ] });
 }

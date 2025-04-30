@@ -18,6 +18,7 @@ export default async function (options, _tryOptions) {
       return collection;
     }, []).join(" ");
 
+    console.log(tryOptions);
     const output = await run({
       cmd: "hg",
       args: [
@@ -38,7 +39,7 @@ export default async function (options, _tryOptions) {
         text: "Posting comment to phabricator"
       }).start();
       try {
-        await comment(`try: ${tryUrl}`);
+        await comment({ message: `try: ${tryUrl}` });
         spinner.succeed();
       } catch (error) {
         spinner.fail();

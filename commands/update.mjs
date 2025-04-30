@@ -1,5 +1,5 @@
 import rustCheck from "./rust-check.mjs";
-import { mach } from "../lib/utils.mjs";
+import { mach, machBuild } from "../lib/utils.mjs";
 
 export default async function update({ build = false, run = false, force = false } = {}) {
   try {
@@ -12,7 +12,7 @@ export default async function update({ build = false, run = false, force = false
   }
 
   if (build || run) {
-    await mach("build");
+    await machBuild();
   }
 
   if (run) {
