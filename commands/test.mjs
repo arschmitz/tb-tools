@@ -22,6 +22,10 @@ export default async function testChanged({ type = "all" } = {}) {
     const componentPath = item.split("components")[1];
     const name = componentPath.split(path.sep)[1];
 
+    if (/js/.test(name)) {
+      return collection;
+    }
+
     if (name === "storybook") {
       return collection;
     }

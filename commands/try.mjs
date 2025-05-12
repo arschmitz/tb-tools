@@ -18,7 +18,6 @@ export default async function (options, _tryOptions) {
       return collection;
     }, []).join(" ");
 
-    console.log(tryOptions);
     const output = await run({
       cmd: "hg",
       args: [

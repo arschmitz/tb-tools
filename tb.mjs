@@ -22,7 +22,9 @@ import {
 import { amend, commit, handleConflict } from './lib/hg.mjs';
 import rustCheck from './commands/rust-check.mjs';
 import create from './commands/create.mjs';
-import { getBug } from './lib/bugzilla.mjs';
+import fs from "fs";
+import path from "path";
+
 
 const mainDefinitions = [
   { name: 'command', defaultOption: true }
@@ -31,10 +33,14 @@ const { command, _unknown } = args(mainDefinitions, { stopAtFirstUnknown: true }
 const argv = _unknown || [];
 
 const commands = {
-  "get-bug": {
+  "version": {
     description: false,
     run: async () => {
-      console.log((await getBug(1878375)).bugs[0].keywords)
+      const version = fs.readFileSync(path.join(".", "mail", "config", "version.txt"), { encoding: "utf-8" });
+      console.log("version", version)
+      const simpleVersion = version.split(".")[0];
+      const mileStone = `${simpleVersion} Branch`;
+      console.log({mileStone})
     }
   },
   conflict: {
@@ -203,23 +209,17 @@ const commands = {
 Optionally:
 * Check for changes
   * Prompt to amend current commit
-* Run lint
-* Run tests
-* Submit a try run and post as a comment on phabricator
-* Submit pending inline comments and comments marked as done,
+* Prompt to run lint
+* Prompt to run tests
+* Prompt to submit a try run and post as a comment on phabricator
+* Prompt to Submit pending inline comments and comments marked as done,
 `,
     header: 'Submit Options',
+    options: [],
     async run () {
       const options = mapBooleanOptions(args(commands.submit.options, { argv }));
       await submit(options, commands.try.options);
     },
-    options: [
-      { name: 'lint', alias: 'l', description: 'lint before submitting patch', defaultValue: "true" },
-      { name: 'test', alias: 't', description: 'run all tests for any components or files modified before submitting patch', defaultValue: "true" },
-      { name: 'try', description: 'Submit a try run and comment with the link', defaultValue: "true" },
-      { name: 'resolve', alias: 'r', description: 'Submit all inline comments and comments marked done', defaultValue: "true" },
-      { name: 'update', description: 'Check for update and rebase before submitting' },
-    ]
   },
   test: {
     description: "Checks files changed or added and runs all tests for any components modified, and test files changed.",

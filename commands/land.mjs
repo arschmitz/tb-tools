@@ -110,16 +110,16 @@ export default async function () {
   const correct = readlineSync.keyInYN("Does the output look correct? [y/n/c]:", { guide: false });
 
   if (correct) {
-    // await hg("push -r . ssh://hg.mozilla.org/comm-central");
+    await hg("push -r . ssh://hg.mozilla.org/comm-central");
   } else if (correct === false) {
     process.exit(1);
   } else {
     console.info("Rolling back changes");
-    await hg("prune .");
+    await hg("up rust-checkpoint", undefined, true);
     process.exit(1);
   }
 
-  const version = fs.readFileSync(path.join(".", "mail", "config", "version.txt"));
+  const version = fs.readFileSync(path.join(".", "mail", "config", "version.txt"), { encoding: "utf-8" });
   const simpleVersion = version.split(".")[0];
   const mileStone = `${simpleVersion} Branch`;
 
@@ -171,12 +171,18 @@ async function pickPatch(_bugs) {
 
   if (typeof choice === "object") {
     const next = await checkPatch(choice);
-    await next();
-    choice.bug.patches.delete(choice.patch);
-    if (!choice.bug.patches.size) {
-      landed.push(choice.bug);
-      _bugs.delete(choice.bug);
+
+    console.log({next})
+
+    if (typeof next === "function") {
+      await next();
+      choice.bug.patches.delete(choice.patch);
+      if (!choice.bug.patches.size) {
+        landed.push(choice.bug);
+        _bugs.delete(choice.bug);
+      }
     }
+
     await pickPatch(_bugs);
   } else if (choice === "abort") {
     process.exit(1);
@@ -187,11 +193,12 @@ async function checkPatch(choice) {
   return select({
     message: "Select an option:",
     choices: [
-      { name: "Open Bug",
+      {
+        name: "Open Bug",
         value: async () => {
           open(`https://bugzilla.mozilla.org/show_bug.cgi?id=${choice.bug.id}`);
           const next = await checkPatch(choice);
-          await next();
+          return next();
         }
       },
       {
@@ -199,7 +206,7 @@ async function checkPatch(choice) {
         value: async () => {
           open(choice.patch.uri);
           const next = await checkPatch(choice);
-          await next();
+          return next();
         }
       },
       {
@@ -211,6 +218,10 @@ async function checkPatch(choice) {
       {
         name: "Skip Patch",
         value: async () => {}
+      },
+      {
+        name: "Go Back",
+        value: false,
       }
     ]
   },{
@@ -276,7 +287,7 @@ async function mergePatch(patch) {
   const lines = (await getCommitMessage()).split(/\n/);
   const messageParts = lines[0].split(".");
   messageParts.pop();
-  messageParts.push(`r=${patch.reviewers.join(",")}`);
+  messageParts.push(` r=${patch.reviewers.join(",")}`);
 
   lines.shift();
   lines.unshift(messageParts.join("."));

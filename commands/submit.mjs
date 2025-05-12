@@ -3,6 +3,7 @@ import _try from "./try.mjs";
 import rebase from "./rebase.mjs";
 import lint from "./lint.mjs";
 import ora from "ora";
+import readlineSync from "readline-sync";
 import { comment } from "../lib/phab.mjs";
 import {
   checkForChanges,
@@ -13,44 +14,65 @@ export default async function(options, tryOptions) {
   try {
     await checkForChanges("Changes found please ammend, commit or shelve your changes.");
 
-    if (options.rebase) {
-      await rebase();
+    const lintAnswer = readlineSync.keyInYN("Do you want to run lint? [y/n]:", { guide: false });
+    
+    if (lintAnswer) {
+      try {
+        await lint();
+        await checkForChanges("Files updated by lint.");
+      } catch (error) {
+        const force = readlineSync.keyInYN("Build Failed: Do you want to continue? [y/n]:", { guide: false });
+
+        if (!force) {
+          console.error(error);
+          process.exit(1);
+        }
+      }
     }
 
-    if (options.lint) {
-      await lint();
-      await checkForChanges("Files updated by lint.");
-    }
+    const testAnswer = readlineSync.keyInYN("Do you want to run tests? [y/n]:", { guide: false });
+    
+    if (testAnswer) {
+      try {
+        await testChanged();
+      } catch (error) {
+        const force = readlineSync.keyInYN("tests Failed: Do you want to continue? [y/n]:", { guide: false });
 
-    if (options.test) {
-      await testChanged();
+        if (!force) {
+          console.error(error);
+          process.exit(1);
+        }
+      }
     }
 
     await run({ cmd: 'moz-phab', args: ["submit"]});
 
+    const tryAnswer = readlineSync.keyInYN("Do you want to post a try run? [y/n]:", { guide: false });
+    const resolveAnswer = readlineSync.keyInYN("Do you want to resolve and post inline comments? [y/n]:", { guide: false });
+
     let spinner;
-    if (options.try || options.resolve) {
+    if (tryAnswer || resolveAnswer) {
       spinner = new ora({
         text: "Posting comment to phabricator"
-      });
+      }).start();
     }
-    if (options.try) {
+
+    if (tryAnswer) {
       try {
         const tryLink = await _try(options, tryOptions);
-        spinner.start();
-        await comment({ message: `try: ${tryLink}`, resolve: options.resolve });
+        await comment({ message: `try: ${tryLink}`, resolve: resolveAnswer });
         spinner.succeed();
       } catch (error) {
         spinner.fail();
-        throw error;
+        console.error(error);
       }
-    } else if (options.resolve) {
+    } else if (resolveAnswer) {
       try {
         await comment({ message: "", resolve: true });
         spinner.succeed();
       } catch (error) {
         spinner.fail();
-        throw error;
+        console.error(error);
       }
     }
   } catch (error) {
