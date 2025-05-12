@@ -275,10 +275,10 @@ Submits to phabricator.
 Optionally:
 * Check for changes
   * Prompt to amend current commit
-* Run lint
-* Run tests
-* Submit a try run and post as a comment on phabricator
-* Submit pending inline comments and comments marked as done,
+* Prompt to run lint
+* Prompt to run tests
+* Prompt to submit a try run and post as a comment on phabricator
+* Prompt to Submit pending inline comments and comments marked as done,
 
 ```bash
 tb submit
@@ -286,11 +286,6 @@ tb submit
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
-|--lint|-l|lint before submitting patch|true|`tb submit --lint=true`
-|--test|-t|run all tests for any components or files modified before submitting patch|true|`tb submit --test=true`
-|--try||Submit a try run and comment with the link|true|`tb submit --try=true`
-|--resolve|-r|Submit all inline comments and comments marked done|true|`tb submit --resolve=true`
-|--update||Check for update and rebase before submitting|undefined|`tb submit --update=undefined`
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb submit --flavor=all`
 |--unit-tests|-u|type of tests to run `mochitest\|xpcshell\|all`|all|`tb submit --unit-tests=all`
 |--build-types|-b|build types to run|o|`tb submit --build-types=o`
