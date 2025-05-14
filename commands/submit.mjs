@@ -14,14 +14,14 @@ export default async function(options, tryOptions) {
   try {
     await checkForChanges("Changes found please ammend, commit or shelve your changes.");
 
-    const lintAnswer = readlineSync.keyInYN("Do you want to run lint? [y/n]:", { guide: false });
+    const lintAnswer = readlineSync.keyInYNStrict("Do you want to run lint? [y/n]:", { guide: false });
     
     if (lintAnswer) {
       try {
         await lint();
         await checkForChanges("Files updated by lint.");
       } catch (error) {
-        const force = readlineSync.keyInYN("Build Failed: Do you want to continue? [y/n]:", { guide: false });
+        const force = readlineSync.keyInYNStrict("Build Failed: Do you want to continue? [y/n]:", { guide: false });
 
         if (!force) {
           console.error(error);
@@ -30,13 +30,13 @@ export default async function(options, tryOptions) {
       }
     }
 
-    const testAnswer = readlineSync.keyInYN("Do you want to run tests? [y/n]:", { guide: false });
+    const testAnswer = readlineSync.keyInYNStrict("Do you want to run tests? [y/n]:", { guide: false });
     
     if (testAnswer) {
       try {
         await testChanged();
       } catch (error) {
-        const force = readlineSync.keyInYN("tests Failed: Do you want to continue? [y/n]:", { guide: false });
+        const force = readlineSync.keyInYNStrict("tests Failed: Do you want to continue? [y/n]:", { guide: false });
 
         if (!force) {
           console.error(error);
@@ -47,8 +47,8 @@ export default async function(options, tryOptions) {
 
     await run({ cmd: 'moz-phab', args: ["submit"]});
 
-    const tryAnswer = readlineSync.keyInYN("Do you want to post a try run? [y/n]:", { guide: false });
-    const resolveAnswer = readlineSync.keyInYN("Do you want to resolve and post inline comments? [y/n]:", { guide: false });
+    const tryAnswer = readlineSync.keyInYNStrict("Do you want to post a try run? [y/n]:", { guide: false });
+    const resolveAnswer = readlineSync.keyInYNStrict("Do you want to resolve and post inline comments? [y/n]:", { guide: false });
 
     let spinner;
     if (tryAnswer || resolveAnswer) {

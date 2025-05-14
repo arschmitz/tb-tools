@@ -69,13 +69,13 @@ export default async function () {
 
   await pickPatch(new Set(bugs));
 
-  const lintAnswer = readlineSync.keyInYN("Do you want to run lint? [y/n]:", { guide: false });
+  const lintAnswer = readlineSync.keyInYNStrict("Do you want to run lint? [y/n]:", { guide: false });
 
   if (lintAnswer) {
     try {
       await lint();
     } catch (error) {
-      const rollAnswer = readlineSync.keyInYN("Lint Failed: Do you want to roll back changes? [y/n]:", { guide: false });
+      const rollAnswer = readlineSync.keyInYNStrict("Lint Failed: Do you want to roll back changes? [y/n]:", { guide: false });
 
       console.error(error);
 
@@ -87,13 +87,13 @@ export default async function () {
     }
   }
 
-  const buildAnswer = readlineSync.keyInYN("Do you want to run build? [y/n]:", { guide: false });
+  const buildAnswer = readlineSync.keyInYNStrict("Do you want to run build? [y/n]:", { guide: false });
 
   if (buildAnswer) {
     try {
       await mach("build");
     } catch (error) {
-      const rollAnswer = readlineSync.keyInYN("Build Failed: Do you want to roll back changes? [y/n]:", { guide: false });
+      const rollAnswer = readlineSync.keyInYNStrict("Build Failed: Do you want to roll back changes? [y/n]:", { guide: false });
 
       console.error(error);
 
@@ -245,7 +245,7 @@ async function mergePatch(patch) {
     }
 
     if (/abort: patch failed to apply/.test(error)) {
-      const correct = readlineSync.keyInYN("Add comment to phabricator? [y/n]:", { guide: false });
+      const correct = readlineSync.keyInYNStrict("Add comment to phabricator? [y/n]:", { guide: false });
 
       if (correct) {
         const commentSpinner = ora({
@@ -260,7 +260,7 @@ async function mergePatch(patch) {
         }
       }
 
-      const bugComment = readlineSync.keyInYN("Add comment to bugzilla? [y/n]:", { guide: false });
+      const bugComment = readlineSync.keyInYNStrict("Add comment to bugzilla? [y/n]:", { guide: false });
 
       if (bugComment) {
         const commentSpinner = ora({
