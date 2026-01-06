@@ -11,6 +11,8 @@ export default async function (options, _tryOptions) {
 
       if (!alias && options[option] !== "false") {
         collection.push(`--${option}`);
+      } else if (alias === "debug") {
+        collection.push('-d');
       } else if (alias && options[option]) {
         collection.push([`-${alias}`, options[option]].join(" "));
       }

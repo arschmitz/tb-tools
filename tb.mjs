@@ -237,10 +237,10 @@ Optionally:
     header: 'Try Options',
     options: [
       { name: 'unit-tests', alias: 'u', description: 'type of tests to run `mochitest|xpcshell|all`', defaultValue: "all" },
-      { name: 'build-types', alias: 'b', description: 'build types to run', defaultValue: "o" },
+      { name: 'build-types', alias: 'b', description: 'build types to run', defaultValue: "od" },
       { name: 'artifact', description: 'do an artifact build', defaultValue: 'true' },
       { name: 'platform', alias: 'p', description: 'platforms to run tests on', defaultValue: "all" },
-      { name: 'comment', alias: 'c', description: 'Post try link as comment to phab revision', defaultValue: "false" }
+      { name: 'comment', alias: 'c', description: 'Post try link as comment to phab revision', defaultValue: "false" },
     ],
     async run () {
       const tryArgOptions = args(commands.try.options, { argv })

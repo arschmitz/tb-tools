@@ -51,15 +51,13 @@ export default async function(options, tryOptions) {
     const resolveAnswer = readlineSync.keyInYNStrict("Do you want to resolve and post inline comments? [y/n]:", { guide: false });
 
     let spinner;
-    if (tryAnswer || resolveAnswer) {
-      spinner = new ora({
-        text: "Posting comment to phabricator"
-      }).start();
-    }
 
     if (tryAnswer) {
       try {
         const tryLink = await _try(options, tryOptions);
+        spinner = new ora({
+          text: "Posting comment to phabricator"
+        }).start();
         await comment({ message: `try: ${tryLink}`, resolve: resolveAnswer });
         spinner.succeed();
       } catch (error) {
@@ -67,6 +65,9 @@ export default async function(options, tryOptions) {
         console.error(error);
       }
     } else if (resolveAnswer) {
+      spinner = new ora({
+        text: "Posting comment to phabricator"
+      }).start();
       try {
         await comment({ message: "", resolve: true });
         spinner.succeed();
