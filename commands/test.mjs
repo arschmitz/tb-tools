@@ -1,13 +1,11 @@
 import path from "path";
-import { hg } from "../lib/hg.mjs";
+import { getChangedFilePaths } from "../lib/git.mjs";
 import { mach } from "../lib/utils.mjs";
 
-export default async function testChanged({ type = "all" } = {}) {
-  const files = (await hg("status --change .", undefined, true)).split(/\n/);
-  const dirtyFiles = (await hg("status -mard", undefined, true)).split(/\n/);
+export default async function testChanged({ flavor = "all" } = {}) {
+  const files = await getChangedFilePaths();
 
-  const tests = [...files, ...dirtyFiles].reduce((collection, item) => {
-    item = item.slice(2);
+  const tests = files.reduce((collection, item) => {
     if (!item) {
       return collection;
     }
@@ -31,8 +29,8 @@ export default async function testChanged({ type = "all" } = {}) {
     }
 
     let _path = `${path.join("mail", "components", name)}`
-    if (type !== "all") {
-      _path = path.join(_path, "test", type)
+    if (flavor !== "all") {
+      _path = path.join(_path, "test", flavor)
     }
 
     collection.add(_path);

@@ -3,9 +3,10 @@ import open from "open";
 import phab, { comment } from "../lib/phab.mjs";
 import chalk from 'chalk';
 import ora from "ora";
-import { hg } from "../lib/hg.mjs";
-import { run, mach, executeCommand } from "../lib/utils.mjs";
-import { getCommitMessage } from "../lib/hg.mjs";
+import { createCheckpoint, ensureWorkingTreeClean, git, restoreCheckpoint, showPendingCommits } from "../lib/git.mjs";
+import { run, mach } from "../lib/utils.mjs";
+import { getCommitMessage } from "../lib/git.mjs";
+import { pushCommits } from "../lib/lando.mjs";
 import { select, Separator, input } from '@inquirer/prompts';
 import { getBugs, getAttachments, updateBug } from "../lib/bugzilla.mjs";
 import update from "./update.mjs";
@@ -15,13 +16,10 @@ import fs from "fs";
 import path from "path";
 const landed = [];
 
-export default async function () {
-  try {
-    await executeCommand("hg id --template {dirty} | (grep +  && exit 1 || exit 0)");
-  } catch {
-    throw new Error("Commit or stash changes and try again");
-  }
+export default async function (options = {}) {
+  await ensureWorkingTreeClean();
   await update();
+  const landingCheckpoint = await createCheckpoint("landing-start");
   const spinner = ora({
     text: `Fetching bugs`,
     spinner: "aesthetic"
@@ -80,7 +78,7 @@ export default async function () {
       console.error(error);
 
       if (rollAnswer) {
-        await hg("up rust-checkpoint", undefined, true);
+        await restoreCheckpoint(landingCheckpoint);
       }
 
       process.exit(1);
@@ -98,24 +96,28 @@ export default async function () {
       console.error(error);
 
       if (rollAnswer) {
-        await hg("up rust-checkpoint", undefined, true);
+        await restoreCheckpoint(landingCheckpoint);
       }
 
       process.exit(1);
     }
   }
 
-  await hg("out -r .");
+  await showPendingCommits();
 
   const correct = readlineSync.keyInYN("Does the output look correct? [y/n/c]:", { guide: false });
 
   if (correct) {
-    await hg("push -r . ssh://hg.mozilla.org/comm-central");
+    await pushCommits({
+      landoRepo: options["lando-repo"],
+      relbranch: options.relbranch,
+      yes: true,
+    });
   } else if (correct === false) {
     process.exit(1);
   } else {
     console.info("Rolling back changes");
-    await hg("up rust-checkpoint", undefined, true);
+    await restoreCheckpoint(landingCheckpoint);
     process.exit(1);
   }
 
@@ -236,15 +238,15 @@ async function mergePatch(patch) {
   }).start();
 
   try {
-    await run({ cmd: "moz-phab", args:["patch", `D${patch.id}`, "--no-bookmark", "--skip-dependencies", "--apply-to", "."], capture: true, silent: true });
+    await run({ cmd: "moz-phab", args:["patch", `D${patch.id}`, "--skip-dependencies", "--apply-to", "here"], capture: true, silent: true });
     spinner.succeed();
   } catch (error) {
     spinner.fail();
-    if (/uncommited/.test(error.message)) {
+    if (/uncommitted/.test(error.message)) {
       throw error;
     }
 
-    if (/abort: patch failed to apply/.test(error)) {
+    if (/patch failed|conflict|CONFLICT|error:/i.test(error)) {
       const correct = readlineSync.keyInYNStrict("Add comment to phabricator? [y/n]:", { guide: false });
 
       if (correct) {
@@ -292,5 +294,5 @@ async function mergePatch(patch) {
   lines.shift();
   lines.unshift(messageParts.join("."));
 
-  await run({ cmd: "hg", args: [ "commit", "--amend", "--date", "now", "-m", lines.join("\n") ] });
+  await git([ "commit", "--amend", "--date=now", "-m", lines.join("\n") ]);
 }

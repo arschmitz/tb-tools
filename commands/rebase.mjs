@@ -1,36 +1,31 @@
 import update from "./update.mjs";
-import { getCommit, getStackParent, hg } from "../lib/hg.mjs";
+import { git, getCommit, getCurrentBranch } from "../lib/git.mjs";
 import { mach } from "../lib/utils.mjs";
 
 export default async function rebase({ build, run } = {}) {
   try {
     const startCommit = await getCommit();
-    let shelved;
+    const startBranch = await getCurrentBranch();
+    let stashed;
     try {
-      await hg("shelve");
-      shelved = true;
+      const stashOutput = await git(["stash", "push", "--include-untracked", "-m", "tb-tools rebase"], undefined, true);
+      stashed = !/No local changes/.test(stashOutput);
     } catch {
-      // no changes to shelve
+      // no changes to stash
     }
     await update();
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    const tip = await getCommit();
-    await hg(`up ${startCommit}`);
-    let stackParent;
-    try {
-      stackParent = await getStackParent();
-    } catch {
-      // no stack
+
+    if (startBranch) {
+      await git(["switch", startBranch]);
+    } else {
+      await git(["switch", "--detach", startCommit]);
     }
-    if (stackParent) {
-      try {
-        await hg(`rebase -b ${stackParent} -d ${tip}`);
-      } catch {
-        // nothing to rebase
-      }
-    }
-    if (shelved) {
-      await hg("unshelve");
+
+    await git(["fetch", "origin", "main"], undefined, true);
+    await git(["rebase", "origin/main"]);
+
+    if (stashed) {
+      await git(["stash", "pop"]);
     }
 
     if (build || run) {

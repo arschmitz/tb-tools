@@ -1,41 +1,45 @@
 import { run, getUrls } from "../lib/utils.mjs";
 import { comment } from "../lib/phab.mjs";
 import ora from "ora";
+import path from "path";
 
-const validTryOptions = ['unit-tests', 'build-types', 'artifact', 'platform'];
-
-export default async function (options, _tryOptions) {
+export default async function (options) {
   try {
-    const tryOptions = validTryOptions.reduce((collection, option) => {
-      const alias = _tryOptions.find((_option) => _option.name === option).alias;
+    const selector = options.selector || (options.query ? "fuzzy" : "auto");
+    const machArgs = ["try", selector];
 
-      if (!alias && options[option] !== "false") {
-        collection.push(`--${option}`);
-      } else if (alias === "debug") {
-        collection.push('-d');
-      } else if (alias && options[option]) {
-        collection.push([`-${alias}`, options[option]].join(" "));
-      }
+    if (selector === "fuzzy" && options.query) {
+      machArgs.push("--query", options.query);
+    }
 
-      return collection;
-    }, []).join(" ");
+    if (selector === "auto" && options["tasks-regex"]) {
+      machArgs.push("--tasks-regex", options["tasks-regex"]);
+    }
+
+    if (options.preset) {
+      machArgs.push("--preset", options.preset);
+    }
+
+    if (options.artifact === false) {
+      machArgs.push("--no-artifact");
+    } else if (options.artifact !== "false") {
+      machArgs.push("--artifact");
+    }
 
     const output = await run({
-      cmd: "hg",
-      args: [
-        "push-to-try",
-        "-s",
-        "ssh://hg.mozilla.org/try-comm-central",
-        "-m",
-        `try: ${tryOptions}`
-      ],
+      cmd: path.join("..", "mach"),
+      args: machArgs,
       capture: true,
     });
 
-    const urls = getUrls(output);
+    const urls = getUrls(output) || [];
     const tryUrl = urls[urls.length - 1];
 
-    if (tryOptions.comment) {
+    if (options.comment) {
+      if (!tryUrl) {
+        throw new Error("Could not find a try URL in mach try output.");
+      }
+
       const spinner = new ora({
         text: "Posting comment to phabricator"
       }).start();

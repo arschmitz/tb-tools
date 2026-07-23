@@ -1,6 +1,5 @@
 import testChanged from "./test.mjs";
 import _try from "./try.mjs";
-import rebase from "./rebase.mjs";
 import lint from "./lint.mjs";
 import ora from "ora";
 import readlineSync from "readline-sync";
@@ -12,7 +11,7 @@ import {
 
 export default async function(options, tryOptions) {
   try {
-    await checkForChanges("Changes found please ammend, commit or shelve your changes.");
+    await checkForChanges("Changes found please amend, commit, or stash your changes.");
 
     const lintAnswer = readlineSync.keyInYNStrict("Do you want to run lint? [y/n]:", { guide: false });
     
@@ -54,7 +53,7 @@ export default async function(options, tryOptions) {
 
     if (tryAnswer) {
       try {
-        const tryLink = await _try(options, tryOptions);
+        const tryLink = await _try({ ...options, comment: false }, tryOptions);
         spinner = new ora({
           text: "Posting comment to phabricator"
         }).start();

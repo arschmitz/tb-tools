@@ -1,29 +1,32 @@
 import readlineSync from "readline-sync";
 import update from "./update.mjs";
-import { hg } from "../lib/hg.mjs";
-import { run } from "../lib/utils.mjs";
+import { discardLastCommit, git, showPendingCommits } from "../lib/git.mjs";
+import { pushCommits } from "../lib/lando.mjs";
 import { readFile, writeFile } from 'node:fs/promises';
+import path from "path";
 
-export default async function () {
+export default async function (options = {}) {
   try {
     await update();
     await update_dummy();
 
-    await run({
-      cmd: "hg",
-      args: ["commit", "-m", `No bug, trigger build.`]
-    });
-    await hg("out -r .");
+    await git(["add", "--", "build/dummy"]);
+    await git(["commit", "-m", `No bug, trigger build.`]);
+    await showPendingCommits();
 
     const correct = readlineSync.keyInYN("Does the output look correct? [y/n/c]:", { guide: false });
 
     if (correct) {
-      await hg("push -r . ssh://hg.mozilla.org/comm-central");
+      await pushCommits({
+        landoRepo: options["lando-repo"],
+        relbranch: options.relbranch,
+        yes: true,
+      });
     } else if (correct === false) {
       process.exit(1);
     } else {
       console.info("Rolling back changes");
-      await hg("prune .");
+      await discardLastCommit();
       process.exit(1);
     }
 
@@ -34,7 +37,7 @@ export default async function () {
 }
 
 async function update_dummy() {
-  const contents = await readFile('/Users/aschmitz/projects/firefox/mozilla-unified/comm/build/dummy', { encoding: 'utf8' });
+  const contents = await readFile(path.join(process.cwd(), "build", "dummy"), { encoding: 'utf8' });
   const lines = contents.split(/\n/);
   let dotLine = lines[lines.length - 2];
   const dots = dotLine.match(/\./g)

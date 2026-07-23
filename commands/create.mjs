@@ -1,6 +1,6 @@
 import update from "./update.mjs";
 import { input } from "@inquirer/prompts";
-import { hg } from "../lib/hg.mjs";
+import { git } from "../lib/git.mjs";
 import { updateBug } from "../lib/bugzilla.mjs";
 import { run } from "../lib/utils.mjs";
 import ora from "ora";
@@ -14,23 +14,23 @@ export default async function create({ update: _update = true }) {
     await update();
   }
 
-  const bookmarkData = await run({
-    cmd: "hg",
-    args: ["bookmark", "--list", "--template", `{bookmarks % '{bookmark}\\n'}`],
+  const branchData = await run({
+    cmd: "git",
+    args: ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
     silent: true,
     capture: true,
   });
-  let bookmarks = bookmarkData.split("\n");
+  const branches = branchData.split("\n");
 
-  if (bookmarks.includes(name)) {
+  if (branches.includes(name)) {
     const dupTest = new RegExp(`${name}_([0-9]{1,3})`);
     let patchCount = 1;
-    if (bookmarks.some((bookmark) => dupTest.test(bookmark))) {
-      patchCount = bookmarks.reduce((highest, bookmark) => {
-        if (!dupTest.test(bookmark)) {
+    if (branches.some((branch) => dupTest.test(branch))) {
+      patchCount = branches.reduce((highest, branch) => {
+        if (!dupTest.test(branch)) {
           return highest;
         }
-        const number = parseInt(bookmark.match(dupTest)[1]);
+        const number = parseInt(branch.match(dupTest)[1]);
         return number > highest ? number : highest;
       }, 1);
       patchCount = parseInt(patchCount);
@@ -39,7 +39,7 @@ export default async function create({ update: _update = true }) {
     name = `${name}_${patchCount}`;
   }
 
-  await hg(`bookmark ${name}`);
+  await git(["switch", "-c", name]);
   const spinner = ora({
     text: "Updating bugzilla"
   }).start();

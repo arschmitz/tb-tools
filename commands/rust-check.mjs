@@ -1,15 +1,15 @@
 import ora from "ora";
 import phab from "../lib/phab.mjs";
-import { hg, pullUp } from "../lib/hg.mjs";
+import { createCheckpoint, restoreCheckpoint, pullUp } from "../lib/git.mjs";
 import { mach, run } from "../lib/utils.mjs";
 
 export default async function (update) {
-  await hg("bookmark -f -r . checkpoint", "..");
+  const firefoxCheckpoint = await createCheckpoint("checkpoint", "..");
   await pullUp("central");
   let error = await runRust();
   let commUpdated = false;
 
-  await hg("bookmark -f -r . rust-checkpoint");
+  const commCheckpoint = await createCheckpoint("rust-checkpoint");
   const spinner = ora({
     text: "Checking comm for updates"
   }).start();
@@ -31,13 +31,13 @@ export default async function (update) {
       error = await runRust();
 
       if (error) {
-        await hg("up rust-checkpoint", undefined, true);
+        await restoreCheckpoint(commCheckpoint);
 
         const patchSpinner = ora({
           text: "Landing rust patch"
         }).start();
         try {
-          await run({ cmd: "moz-phab", args:["patch", `D${response.result[0].id}`, "--no-bookmark", "--skip-dependencies", "--apply-to", "."], capture: true, silent: true });
+          await run({ cmd: "moz-phab", args:["patch", `D${response.result[0].id}`, "--skip-dependencies", "--apply-to", "here"], capture: true, silent: true });
           patchSpinner.succeed();
           error = false;
         } catch {
@@ -59,8 +59,8 @@ export default async function (update) {
   }
 
   if (!update || error) {
-    await hg("up checkpoint", "..", true);
-    await hg("up rust-checkpoint", undefined, true);
+    await restoreCheckpoint(firefoxCheckpoint, "..");
+    await restoreCheckpoint(commCheckpoint);
   } else if (!commUpdated) {
     await pullUp("comm");
   }
