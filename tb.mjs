@@ -7,6 +7,7 @@ import bump from './commands/bump.mjs';
 import land from './commands/land.mjs';
 import readme from './commands/readme.mjs';
 import lint from './commands/lint.mjs';
+import patchCommand from './commands/patch.mjs';
 import rebase from './commands/rebase.mjs';
 import submit from './commands/submit.mjs';
 import statusCommand from './commands/status.mjs';
@@ -185,6 +186,21 @@ const commands = {
     description: 'run commlint on all files',
     async run () {
       await lint();
+    },
+  },
+  patch: {
+    description: "Applies a Phabricator revision with moz-phab after creating a rollback checkpoint.",
+    header: "Patch Options",
+    options: [
+      { name: "revision", description: "Phabricator revision to apply, for example D123456", defaultOption: true },
+      { name: "bug", alias: "b", description: "Create or switch to Bug-N before applying the patch" },
+      { name: "checkpoint", description: "Create a rollback checkpoint before applying the patch", defaultValue: "true" },
+      { name: "rollback", description: "Prompt to roll back if patching fails", defaultValue: "true" },
+      { name: "skipDependencies", description: "Pass --skip-dependencies to moz-phab patch", defaultValue: "true" },
+    ],
+    async run () {
+      const options = mapBooleanOptions(args(commands.patch.options, { argv }));
+      await patchCommand(options);
     },
   },
   readme: {

@@ -38,6 +38,7 @@ This file currently contains credentials for phabricator and bugzilla, plus opti
 - [help](#help)
 - [land](#land)
 - [lint](#lint)
+- [patch](#patch)
 - [rebase](#rebase)
 - [run](#run)
 - [rust-check](#rust-check)
@@ -230,6 +231,22 @@ tb lint
 ```
 <br/><br/>
 ![Screen recording of lint.](/images/lint.gif)
+
+<br/><br/>
+### patch
+---
+Applies a Phabricator revision with moz-phab after creating a rollback checkpoint.
+```bash
+tb patch
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--revision||Phabricator revision to apply, for example D123456||`tb patch --revision=<value>`
+|--bug|-b|Create or switch to Bug-N before applying the patch||`tb patch --bug=<value>`
+|--checkpoint||Create a rollback checkpoint before applying the patch|true|`tb patch --checkpoint=false`
+|--rollback||Prompt to roll back if patching fails|true|`tb patch --rollback=false`
+|--skipDependencies||Pass --skip-dependencies to moz-phab patch|true|`tb patch --skipDependencies=false`
 
 <br/><br/>
 ### rebase
