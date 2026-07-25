@@ -4,12 +4,53 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import hljs from "highlight.js";
 import openUrl from "open";
 import { run } from "../lib/utils.mjs";
 
 const FIELD_SEPARATOR = "\x1f";
 const RECORD_SEPARATOR = "\x1e";
 const DEFAULT_MAX_DIFF_BYTES = 200000;
+const HIGHLIGHT_LANGUAGE_BY_EXTENSION = new Map([
+  [".c", "c"],
+  [".cc", "cpp"],
+  [".cjs", "javascript"],
+  [".cpp", "cpp"],
+  [".css", "css"],
+  [".ftl", "ini"],
+  [".h", "cpp"],
+  [".hh", "cpp"],
+  [".hpp", "cpp"],
+  [".html", "xml"],
+  [".ini", "ini"],
+  [".js", "javascript"],
+  [".json", "json"],
+  [".jsx", "javascript"],
+  [".mjs", "javascript"],
+  [".md", "markdown"],
+  [".mm", "objectivec"],
+  [".mozbuild", "python"],
+  [".py", "python"],
+  [".rs", "rust"],
+  [".scss", "scss"],
+  [".sh", "bash"],
+  [".toml", "ini"],
+  [".ts", "typescript"],
+  [".tsx", "typescript"],
+  [".xml", "xml"],
+  [".xhtml", "xml"],
+  [".xul", "xml"],
+  [".yaml", "yaml"],
+  [".yml", "yaml"],
+]);
+const HIGHLIGHT_LANGUAGE_BY_BASENAME = new Map([
+  ["dockerfile", "dockerfile"],
+  ["makefile", "makefile"],
+  ["moz.build", "python"],
+  ["moz.configure", "python"],
+  ["package-lock.json", "json"],
+  ["package.json", "json"],
+]);
 
 export function parseDecorations(decorations = "") {
   const refs = [];
@@ -282,12 +323,47 @@ export function getDiffChangeCounts(diff) {
   }, { insertions: 0, deletions: 0 });
 }
 
-function formatDiffLineContent(line, className) {
+function getHighlightLanguage(file) {
+  const normalized = String(file || "").toLowerCase();
+  const basename = path.basename(normalized);
+
+  if (HIGHLIGHT_LANGUAGE_BY_BASENAME.has(basename)) {
+    return HIGHLIGHT_LANGUAGE_BY_BASENAME.get(basename);
+  }
+
+  if (basename.endsWith(".sys.mjs")) {
+    return "javascript";
+  }
+
+  const extension = path.extname(basename);
+  return HIGHLIGHT_LANGUAGE_BY_EXTENSION.get(extension) || "";
+}
+
+function highlightDiffCode(content, language) {
+  if (!language || !content) {
+    return escapeDiffHtml(content);
+  }
+
+  if (!hljs.getLanguage(language)) {
+    return escapeDiffHtml(content);
+  }
+
+  try {
+    return hljs.highlight(content, {
+      language,
+      ignoreIllegals: true,
+    }).value;
+  } catch {
+    return escapeDiffHtml(content);
+  }
+}
+
+function formatDiffLineContent(line, className, language) {
   if (className === "insert" || className === "delete" || className === "context") {
     const marker = className === "context" ? " " : line.charAt(0);
     const content = line.slice(1);
 
-    return `<span class="line-marker">${escapeDiffHtml(marker)}</span><span class="line-content">${escapeDiffHtml(content)}</span>`;
+    return `<span class="line-marker">${escapeDiffHtml(marker)}</span><span class="line-content">${highlightDiffCode(content, language)}</span>`;
   }
 
   return `<span class="line-marker"></span><span class="line-content">${escapeDiffHtml(line)}</span>`;
@@ -312,6 +388,7 @@ export function formatPrettyDiffHtml(diff) {
   return Object.entries(files).map(([file, lines]) => {
     const { insertions, deletions } = countDiffChanges(lines);
     const changeCountLabel = formatChangeCountLabel(insertions, deletions);
+    const language = getHighlightLanguage(file);
     const lineNumberState = { oldLine: null, newLine: null };
     const diffLines = lines.reduce((rendered, line) => {
       if (!shouldRenderDiffLine(line, lineNumberState)) {
@@ -324,7 +401,7 @@ export function formatPrettyDiffHtml(diff) {
       rendered.push(`<tr class="diff-line ${className}">
           <td class="line-number old-line">${oldLine}</td>
           <td class="line-number new-line">${newLine}</td>
-          <td class="line-code">${formatDiffLineContent(line, className)}</td>
+          <td class="line-code">${formatDiffLineContent(line, className, language)}</td>
         </tr>`);
       return rendered;
     }, []).join("\n");
@@ -868,6 +945,16 @@ export function buildGraphHtml({
     .line-code { background: var(--diff-bg); color: var(--diff-code); font: 14px/24px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 24px; vertical-align: top; white-space: pre; width: 100%; }
     .line-marker { display: inline-block; text-align: center; user-select: none; width: 1ch; }
     .line-content { display: inline; }
+    .line-content .hljs-comment, .line-content .hljs-quote { color: #6e7781; }
+    .line-content .hljs-keyword, .line-content .hljs-selector-tag, .line-content .hljs-subst { color: #cf222e; }
+    .line-content .hljs-number, .line-content .hljs-literal, .line-content .hljs-variable, .line-content .hljs-template-variable { color: #0550ae; }
+    .line-content .hljs-string, .line-content .hljs-doctag, .line-content .hljs-regexp { color: #0a3069; }
+    .line-content .hljs-title, .line-content .hljs-section, .line-content .hljs-selector-id { color: #8250df; }
+    .line-content .hljs-type, .line-content .hljs-class .hljs-title { color: #953800; }
+    .line-content .hljs-tag, .line-content .hljs-name, .line-content .hljs-attribute { color: #116329; }
+    .line-content .hljs-symbol, .line-content .hljs-bullet, .line-content .hljs-link { color: #0969da; }
+    .line-content .hljs-built_in, .line-content .hljs-builtin-name { color: #953800; }
+    .line-content .hljs-meta { color: #57606a; }
     .diff-line.file .line-number, .diff-line.file .line-code { background: var(--diff-file-line-bg); color: var(--diff-muted); }
     .diff-line.info .line-number, .diff-line.info .line-code { background: var(--diff-hunk-bg); color: var(--diff-hunk-code); }
     .diff-line.delete .line-marker { color: #cf222e; }
@@ -912,6 +999,16 @@ export function buildGraphHtml({
       .stat-additions { color: #3fb950; }
       .stat-deletions { color: #f85149; }
       .copy-path { color: var(--diff-code); }
+      .line-content .hljs-comment, .line-content .hljs-quote { color: #8b949e; }
+      .line-content .hljs-keyword, .line-content .hljs-selector-tag, .line-content .hljs-subst { color: #ff7b72; }
+      .line-content .hljs-number, .line-content .hljs-literal, .line-content .hljs-variable, .line-content .hljs-template-variable { color: #79c0ff; }
+      .line-content .hljs-string, .line-content .hljs-doctag, .line-content .hljs-regexp { color: #a5d6ff; }
+      .line-content .hljs-title, .line-content .hljs-section, .line-content .hljs-selector-id { color: #d2a8ff; }
+      .line-content .hljs-type, .line-content .hljs-class .hljs-title { color: #ffa657; }
+      .line-content .hljs-tag, .line-content .hljs-name, .line-content .hljs-attribute { color: #7ee787; }
+      .line-content .hljs-symbol, .line-content .hljs-bullet, .line-content .hljs-link { color: #58a6ff; }
+      .line-content .hljs-built_in, .line-content .hljs-builtin-name { color: #ffa657; }
+      .line-content .hljs-meta { color: #8b949e; }
       .diff-line.delete .line-marker { color: #f85149; }
       .diff-line.insert .line-marker { color: #3fb950; }
       .checkout-commit, .load-more { background: #4b9eff; border-color: #4b9eff; color: #07111f; }

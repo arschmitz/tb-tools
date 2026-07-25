@@ -198,6 +198,17 @@ test("formatPrettyDiffHtml renders pretty-diff style markup", () => {
   assert.match(markerLikeContentHtml, /class="file-stats" aria-label="1 addition and 1 deletion"/);
   assert.match(markerLikeContentHtml, /class="diff-line delete"[^]*<span class="line-marker">-<\/span><span class="line-content">-- markdown heading<\/span>/);
   assert.match(markerLikeContentHtml, /class="diff-line insert"[^]*<span class="line-marker">\+<\/span><span class="line-content">\+\+ plus heading<\/span>/);
+
+  const highlightedHtml = formatPrettyDiffHtml([
+    "diff --git a/file.mjs b/file.mjs",
+    "@@ -1 +1 @@",
+    "-const oldValue = 1;",
+    "+const newValue = \"ok\";",
+  ].join("\n"));
+
+  assert.match(highlightedHtml, /<span class="hljs-keyword">const<\/span>/);
+  assert.match(highlightedHtml, /<span class="hljs-number">1<\/span>/);
+  assert.match(highlightedHtml, /<span class="hljs-string">&quot;ok&quot;<\/span>/);
 });
 
 test("getCommitDiffs collects git show output by commit hash", async () => {
@@ -498,6 +509,8 @@ test("buildGraphHtml creates tabbed GitGraph HTML", () => {
   assert.match(html, /\.diff-stats/);
   assert.match(html, /\.line-marker/);
   assert.match(html, /\.line-number/);
+  assert.match(html, /\.line-content \.hljs-keyword/);
+  assert.match(html, /\.line-content \.hljs-string/);
   assert.match(html, /const COMMIT_DOT_RADIUS = 10/);
   assert.match(html, /function centerBranchLabelsVertically/);
   assert.match(html, /function decorateCommitRows/);
