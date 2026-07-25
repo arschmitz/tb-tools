@@ -39,6 +39,7 @@ This file currently contains credentials for phabricator and bugzilla, plus opti
 - [help](#help)
 - [land](#land)
 - [lint](#lint)
+- [open](#open)
 - [patch](#patch)
 - [rebase](#rebase)
 - [run](#run)
@@ -249,6 +250,23 @@ tb lint
 ```
 <br/><br/>
 ![Screen recording of lint.](/images/lint.gif)
+
+<br/><br/>
+### open
+---
+Opens detected Bugzilla, Phabricator, and Treeherder links for the current work.
+```bash
+tb open
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--target||Link target to open: bug, phab, try, or all||`tb open --target=<value>`
+|--bug||Open the detected Bugzilla bug|false|`tb open --bug`
+|--phab||Open the detected Phabricator revision|false|`tb open --phab`
+|--try||Open the detected Treeherder try run|false|`tb open --try`
+|--all|-a|Open every detected link|false|`tb open --all`
+|--base||Base ref used while detecting pending commit links|origin/main|`tb open --base=origin/main`
 
 <br/><br/>
 ### patch

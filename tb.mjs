@@ -17,6 +17,7 @@ import usage from 'command-line-usage';
 import { comment } from './lib/phab.mjs';
 import { DEFAULT_LANDO_REPO } from './lib/lando.mjs';
 import cleanupCommand from './commands/cleanup.mjs';
+import openCommand from './commands/open.mjs';
 import {
   checkDir,
   mapBooleanOptions,
@@ -203,6 +204,22 @@ const commands = {
     description: 'run commlint on all files',
     async run () {
       await lint();
+    },
+  },
+  open: {
+    description: "Opens detected Bugzilla, Phabricator, and Treeherder links for the current work.",
+    header: "Open Options",
+    options: [
+      { name: "target", description: "Link target to open: bug, phab, try, or all", defaultOption: true, multiple: true },
+      { name: "bug", description: "Open the detected Bugzilla bug", defaultValue: "false" },
+      { name: "phab", description: "Open the detected Phabricator revision", defaultValue: "false" },
+      { name: "try", description: "Open the detected Treeherder try run", defaultValue: "false" },
+      { name: "all", alias: "a", description: "Open every detected link", defaultValue: "false" },
+      { name: "base", description: "Base ref used while detecting pending commit links", defaultValue: "origin/main" },
+    ],
+    async run () {
+      const options = mapBooleanOptions(args(commands.open.options, { argv }));
+      await openCommand(options);
     },
   },
   patch: {
