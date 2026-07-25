@@ -50,7 +50,7 @@ export default async function (update) {
     if (error) {
       spinner.fail();
       console.info(`❌ Rust updates required and not found`);
-      process.exit(1);
+      error = new Error("Rust updates required and not found");
     } else {
       spinner.succeed();
     }

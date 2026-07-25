@@ -10,6 +10,14 @@ export default async function create({ update: _update = true }) {
   const bugId = await input({ message: "Enter bugzilla bug ID:", required: true, validate: (value) => /^[0-9]{4,7}$/.test(value) });
   let name = `Bug-${bugId}`;
 
+  if (!config?.bugzilla?.user) {
+    throw new Error("You must have a Bugzilla user in your configuration to assign bugs.");
+  }
+
+  if (!config?.bugzilla?.apiKey) {
+    throw new Error("You must have a Bugzilla API key in your configuration to assign bugs.");
+  }
+
   if (_update) {
     await update();
   }
@@ -46,7 +54,7 @@ export default async function create({ update: _update = true }) {
 
   try {
     await updateBug(bugId, {
-      assigned_to: config.bugzilla.user,
+      assigned_to: config?.bugzilla?.user,
       status: "ASSIGNED",
     });
     spinner.succeed();

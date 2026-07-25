@@ -1,66 +1,76 @@
-import testChanged from "./test.mjs";
-import _try from "./try.mjs";
-import lint from "./lint.mjs";
+import defaultTestChanged from "./test.mjs";
+import defaultTry from "./try.mjs";
+import defaultLint from "./lint.mjs";
 import ora from "ora";
 import readlineSync from "readline-sync";
-import { comment } from "../lib/phab.mjs";
+import { comment as defaultComment } from "../lib/phab.mjs";
 import {
   checkForChanges,
   run,
 } from "../lib/utils.mjs";
 
-export default async function(options, tryOptions) {
-  try {
-    await checkForChanges("Changes found please amend, commit, or stash your changes.");
+export function createSubmitCommand({
+  checkChanges = checkForChanges,
+  lint = defaultLint,
+  testChanged = defaultTestChanged,
+  tryCommand = defaultTry,
+  prompts = readlineSync,
+  postComment = defaultComment,
+  runCommand = run,
+} = {}) {
+  return async function submit(options, tryOptions) {
+    await checkChanges("Changes found please amend, commit, or stash your changes.");
 
-    const lintAnswer = readlineSync.keyInYNStrict("Do you want to run lint? [y/n]:", { guide: false });
+    const lintAnswer = prompts.keyInYNStrict("Do you want to run lint? [y/n]:", { guide: false });
     
     if (lintAnswer) {
       try {
         await lint();
-        await checkForChanges("Files updated by lint.");
+        await checkChanges("Files updated by lint.");
       } catch (error) {
-        const force = readlineSync.keyInYNStrict("Build Failed: Do you want to continue? [y/n]:", { guide: false });
+        const force = prompts.keyInYNStrict("Build Failed: Do you want to continue? [y/n]:", { guide: false });
 
         if (!force) {
-          console.error(error);
-          process.exit(1);
+          throw error;
         }
       }
     }
 
-    const testAnswer = readlineSync.keyInYNStrict("Do you want to run tests? [y/n]:", { guide: false });
+    const testAnswer = prompts.keyInYNStrict("Do you want to run tests? [y/n]:", { guide: false });
     
     if (testAnswer) {
       try {
         await testChanged();
       } catch (error) {
-        const force = readlineSync.keyInYNStrict("tests Failed: Do you want to continue? [y/n]:", { guide: false });
+        const force = prompts.keyInYNStrict("tests Failed: Do you want to continue? [y/n]:", { guide: false });
 
         if (!force) {
-          console.error(error);
-          process.exit(1);
+          throw error;
         }
       }
     }
 
-    await run({ cmd: 'moz-phab', args: ["submit"]});
+    await runCommand({ cmd: 'moz-phab', args: ["submit"]});
 
-    const tryAnswer = readlineSync.keyInYNStrict("Do you want to post a try run? [y/n]:", { guide: false });
-    const resolveAnswer = readlineSync.keyInYNStrict("Do you want to resolve and post inline comments? [y/n]:", { guide: false });
+    const tryAnswer = prompts.keyInYNStrict("Do you want to post a try run? [y/n]:", { guide: false });
+    const resolveAnswer = prompts.keyInYNStrict("Do you want to resolve and post inline comments? [y/n]:", { guide: false });
 
     let spinner;
 
     if (tryAnswer) {
       try {
-        const tryLink = await _try({ ...options, comment: false }, tryOptions);
+        const tryLink = await tryCommand({ ...options, comment: false }, tryOptions);
+        if (!tryLink) {
+          throw new Error("Could not find a try URL in mach try output.");
+        }
+
         spinner = new ora({
           text: "Posting comment to phabricator"
         }).start();
-        await comment({ message: `try: ${tryLink}`, resolve: resolveAnswer });
+        await postComment({ message: `try: ${tryLink}`, resolve: resolveAnswer });
         spinner.succeed();
       } catch (error) {
-        spinner.fail();
+        spinner?.fail();
         console.error(error);
       }
     } else if (resolveAnswer) {
@@ -68,15 +78,14 @@ export default async function(options, tryOptions) {
         text: "Posting comment to phabricator"
       }).start();
       try {
-        await comment({ message: "", resolve: true });
+        await postComment({ message: "", resolve: true });
         spinner.succeed();
       } catch (error) {
         spinner.fail();
         console.error(error);
       }
     }
-  } catch (error) {
-    console.error(error);
-    process.exit(1);
-  }
+  };
 }
+
+export default createSubmitCommand();

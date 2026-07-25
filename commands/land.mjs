@@ -32,7 +32,7 @@ export default async function (options = {}) {
       spinner.succeed();
       const shouldBump = readlineSync.keyInYN("No bugs marked for checkin. Bump dummy file? [y/n/c]:", { guide: false });
       if (shouldBump) {
-        await bump();
+        await bump(options);
       }
 
       return;
@@ -42,7 +42,10 @@ export default async function (options = {}) {
 
       const phabIds = attachments.reduce((collection, attachment) => {
         if (attachment.content_type === 'text/x-phabricator-request') {
-          collection.push(attachment.file_name.match(/D[0-9]{6}/)[0].replace("D", ""));
+          const match = attachment.file_name.match(/D[0-9]+/);
+          if (match) {
+            collection.push(match[0].replace("D", ""));
+          }
         }
 
         return collection;
@@ -65,7 +68,7 @@ export default async function (options = {}) {
     throw error;
   }
 
-  await pickPatch(new Set(bugs));
+  await pickPatch(new Set(bugs), landingCheckpoint);
 
   const lintAnswer = readlineSync.keyInYNStrict("Do you want to run lint? [y/n]:", { guide: false });
 
@@ -75,13 +78,11 @@ export default async function (options = {}) {
     } catch (error) {
       const rollAnswer = readlineSync.keyInYNStrict("Lint Failed: Do you want to roll back changes? [y/n]:", { guide: false });
 
-      console.error(error);
-
       if (rollAnswer) {
-        await restoreCheckpoint(landingCheckpoint);
+        await restoreCheckpoint(landingCheckpoint, undefined, { clean: true });
       }
 
-      process.exit(1);
+      throw error;
     }
   }
 
@@ -93,13 +94,11 @@ export default async function (options = {}) {
     } catch (error) {
       const rollAnswer = readlineSync.keyInYNStrict("Build Failed: Do you want to roll back changes? [y/n]:", { guide: false });
 
-      console.error(error);
-
       if (rollAnswer) {
-        await restoreCheckpoint(landingCheckpoint);
+        await restoreCheckpoint(landingCheckpoint, undefined, { clean: true });
       }
 
-      process.exit(1);
+      throw error;
     }
   }
 
@@ -114,11 +113,11 @@ export default async function (options = {}) {
       yes: true,
     });
   } else if (correct === false) {
-    process.exit(1);
+    throw new Error("Landing aborted.");
   } else {
     console.info("Rolling back changes");
-    await restoreCheckpoint(landingCheckpoint);
-    process.exit(1);
+    await restoreCheckpoint(landingCheckpoint, undefined, { clean: true });
+    throw new Error("Landing rolled back.");
   }
 
   const version = fs.readFileSync(path.join(".", "mail", "config", "version.txt"), { encoding: "utf-8" });
@@ -135,7 +134,7 @@ export default async function (options = {}) {
   }
 }
 
-async function pickPatch(_bugs) {
+async function pickPatch(_bugs, landingCheckpoint) {
   const choices = [];
 
   choices.push(new Separator(chalk.magenta("Actions:")));
@@ -172,26 +171,34 @@ async function pickPatch(_bugs) {
   });
 
   if (typeof choice === "object") {
-    const next = await checkPatch(choice);
-
-    console.log({next})
+    const next = await checkPatch(choice, landingCheckpoint);
 
     if (typeof next === "function") {
-      await next();
-      choice.bug.patches.delete(choice.patch);
-      if (!choice.bug.patches.size) {
-        landed.push(choice.bug);
-        _bugs.delete(choice.bug);
+      const result = await next();
+
+      if (["landed", "skipped"].includes(result)) {
+        if (result === "landed") {
+          choice.bug.hasLandedPatch = true;
+        }
+
+        choice.bug.patches.delete(choice.patch);
+
+        if (!choice.bug.patches.size) {
+          if (choice.bug.hasLandedPatch) {
+            landed.push(choice.bug);
+          }
+          _bugs.delete(choice.bug);
+        }
       }
     }
 
-    await pickPatch(_bugs);
+    await pickPatch(_bugs, landingCheckpoint);
   } else if (choice === "abort") {
-    process.exit(1);
+    throw new Error("Landing aborted.");
   }
 }
 
-async function checkPatch(choice) {
+async function checkPatch(choice, landingCheckpoint) {
   return select({
     message: "Select an option:",
     choices: [
@@ -199,27 +206,27 @@ async function checkPatch(choice) {
         name: "Open Bug",
         value: async () => {
           open(`https://bugzilla.mozilla.org/show_bug.cgi?id=${choice.bug.id}`);
-          const next = await checkPatch(choice);
-          return next();
+          const next = await checkPatch(choice, landingCheckpoint);
+          return typeof next === "function" ? next() : next;
         }
       },
       {
         name: "Open Patch",
         value: async () => {
           open(choice.patch.uri);
-          const next = await checkPatch(choice);
-          return next();
+          const next = await checkPatch(choice, landingCheckpoint);
+          return typeof next === "function" ? next() : next;
         }
       },
       {
         name: "Merge Patch",
         value: async () => {
-          await mergePatch(choice.patch);
+          return mergePatch(choice.patch, landingCheckpoint);
         }
       },
       {
         name: "Skip Patch",
-        value: async () => {}
+        value: async () => "skipped"
       },
       {
         name: "Go Back",
@@ -231,7 +238,7 @@ async function checkPatch(choice) {
   });
 }
 
-async function mergePatch(patch) {
+async function mergePatch(patch, landingCheckpoint) {
   const spinner = ora({
     text: `Merging D${patch.id}… `,
     spinner: "aesthetic"
@@ -242,11 +249,13 @@ async function mergePatch(patch) {
     spinner.succeed();
   } catch (error) {
     spinner.fail();
-    if (/uncommitted/.test(error.message)) {
+    const message = String(error?.message || error);
+
+    if (/uncommitted/.test(message)) {
       throw error;
     }
 
-    if (/patch failed|conflict|CONFLICT|error:/i.test(error)) {
+    if (/patch failed|conflict|CONFLICT|error:/i.test(message)) {
       const correct = readlineSync.keyInYNStrict("Add comment to phabricator? [y/n]:", { guide: false });
 
       if (correct) {
@@ -270,7 +279,7 @@ async function mergePatch(patch) {
           spinner: "aesthetic"
         }).start();
         try {
-          updateBug(patch.bugId, {
+          await updateBug(patch.bugId, {
             comment: {
               body: "Conflicts found while landing. Please Rebase."
             },
@@ -283,7 +292,12 @@ async function mergePatch(patch) {
           commentSpinner.fail();
         }
       }
+
+      await restoreCheckpoint(landingCheckpoint, undefined, { clean: true });
+      return "skipped";
     }
+
+    throw error;
   }
 
   const lines = (await getCommitMessage()).split(/\n/);
@@ -295,4 +309,5 @@ async function mergePatch(patch) {
   lines.unshift(messageParts.join("."));
 
   await git([ "commit", "--amend", "--date=now", "-m", lines.join("\n") ]);
+  return "landed";
 }

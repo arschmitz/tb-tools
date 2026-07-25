@@ -1,39 +1,47 @@
 import { run, getUrls } from "../lib/utils.mjs";
-import { comment } from "../lib/phab.mjs";
+import { comment as defaultComment } from "../lib/phab.mjs";
 import ora from "ora";
 import path from "path";
 
-export default async function (options) {
-  try {
-    const selector = options.selector || (options.query ? "fuzzy" : "auto");
-    const machArgs = ["try", selector];
+export function getMachTryArgs(options) {
+  const selector = options.selector || (options.query ? "fuzzy" : "auto");
+  const args = ["try", selector];
 
-    if (selector === "fuzzy" && options.query) {
-      machArgs.push("--query", options.query);
-    }
+  if (selector === "fuzzy" && options.query) {
+    args.push("--query", options.query);
+  }
 
-    if (selector === "auto" && options["tasks-regex"]) {
-      machArgs.push("--tasks-regex", options["tasks-regex"]);
-    }
+  if (selector === "auto" && options["tasks-regex"]) {
+    args.push("--tasks-regex", options["tasks-regex"]);
+  }
 
-    if (options.preset) {
-      machArgs.push("--preset", options.preset);
-    }
+  if (options.preset) {
+    args.push("--preset", options.preset);
+  }
 
-    if (options.artifact === false) {
-      machArgs.push("--no-artifact");
-    } else if (options.artifact !== "false") {
-      machArgs.push("--artifact");
-    }
+  if (options.artifact === false) {
+    args.push("--no-artifact");
+  } else if (options.artifact !== "false") {
+    args.push("--artifact");
+  }
 
-    const output = await run({
+  return args;
+}
+
+export function getTryUrl(output) {
+  const urls = getUrls(output) || [];
+  return urls[urls.length - 1];
+}
+
+export function createTryCommand({ runCommand = run, postComment = defaultComment } = {}) {
+  return async function tryCommand(options = {}) {
+    const output = await runCommand({
       cmd: path.join("..", "mach"),
-      args: machArgs,
+      args: getMachTryArgs(options),
       capture: true,
     });
 
-    const urls = getUrls(output) || [];
-    const tryUrl = urls[urls.length - 1];
+    const tryUrl = getTryUrl(output);
 
     if (options.comment) {
       if (!tryUrl) {
@@ -44,7 +52,7 @@ export default async function (options) {
         text: "Posting comment to phabricator"
       }).start();
       try {
-        await comment({ message: `try: ${tryUrl}` });
+        await postComment({ message: `try: ${tryUrl}` });
         spinner.succeed();
       } catch (error) {
         spinner.fail();
@@ -53,8 +61,7 @@ export default async function (options) {
     }
 
     return tryUrl;
-  } catch (error) {
-    console.error(error);
-    process.exit(1);
-  }
+  };
 }
+
+export default createTryCommand();

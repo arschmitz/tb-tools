@@ -53,11 +53,12 @@ const commands = {
   amend: {
     description: "Amends the current commit optionally adding new files",
     run: async () => {
-      await amend();
+      const options = mapBooleanOptions(args(commands.amend.options, { argv }));
+      await amend(options);
     },
     header: "Amend options",
     options: [
-      { name: "addRemove", alias: "a", description: "Add or remove files added or deleted" }
+      { name: "addRemove", alias: "a", description: "Add or remove files added or deleted", defaultValue: "true" }
     ]
   },
   comment: {

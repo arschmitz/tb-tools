@@ -6,8 +6,7 @@ export default async function update({ build = false, run = false, force = false
     await rustCheck(true);
   } catch (error) {
     if (!force) {
-      console.error(error);
-      return;
+      throw error;
     }
   }
 

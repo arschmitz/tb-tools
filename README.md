@@ -74,7 +74,7 @@ tb amend
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
-|--addRemove|-a|Add or remove files added or deleted|undefined|`tb amend --addRemove=undefined`
+|--addRemove|-a|Add or remove files added or deleted|true|`tb amend --addRemove=false`
 
 <br/><br/>
 ### comment
@@ -86,8 +86,8 @@ tb comment
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
-|--message|-m|Comment text to post to phabricator|undefined|`tb comment --message=undefined`
-|--resolve|-r|Submit all inline comments and comments marked done|true|`tb comment --resolve=true`
+|--message|-m|Comment text to post to phabricator||`tb comment --message=<value>`
+|--resolve|-r|Submit all inline comments and comments marked done|true|`tb comment --resolve=false`
 
 <br/><br/>
 ### commit
@@ -114,7 +114,7 @@ tb create
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
-|--update|-u|Update code before creating branch|true|`tb create --update=true`
+|--update|-u|Update code before creating branch|true|`tb create --update=false`
 
 <br/><br/>
 ### build-rebase
@@ -153,7 +153,7 @@ tb bump
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--lando-repo||Lando repository to push commits to|thunderbird-desktop-main|`tb bump --lando-repo=thunderbird-desktop-main`
-|--relbranch||Push commits to a named release branch|undefined|`tb bump --relbranch=undefined`
+|--relbranch||Push commits to a named release branch||`tb bump --relbranch=<value>`
 
 <br/><br/>
 ### help
@@ -204,7 +204,7 @@ tb land
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--lando-repo||Lando repository to push commits to|thunderbird-desktop-main|`tb land --lando-repo=thunderbird-desktop-main`
-|--relbranch||Push commits to a named release branch|undefined|`tb land --relbranch=undefined`
+|--relbranch||Push commits to a named release branch||`tb land --relbranch=<value>`
 
 <br/><br/>
 ### lint
@@ -233,9 +233,9 @@ tb rebase
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
-|--run|-r|build run thunderbird when the update complete|false|`tb rebase --run=false`
-|--build|-b|build thunderbird when the update is complete|false|`tb rebase --build=false`
-|--force|-f|Continue update despite out of sync rust dependencies|false|`tb rebase --force=false`
+|--run|-r|build run thunderbird when the update complete|false|`tb rebase --run`
+|--build|-b|build thunderbird when the update is complete|false|`tb rebase --build`
+|--force|-f|Continue update despite out of sync rust dependencies|false|`tb rebase --force`
 
 <br/><br/>
 ### run
@@ -301,11 +301,11 @@ tb submit
 |----|-----------|--|--|---|
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb submit --flavor=all`
 |--selector|-s|mach try selector `auto\|fuzzy\|empty\|chooser`|auto|`tb submit --selector=auto`
-|--query|-q|fuzzy selector query|undefined|`tb submit --query=undefined`
-|--tasks-regex|-t|auto selector task regex|undefined|`tb submit --tasks-regex=undefined`
-|--preset||mach try preset to load|undefined|`tb submit --preset=undefined`
-|--artifact||force artifact builds where possible|true|`tb submit --artifact=true`
-|--comment|-c|Post try link as comment to phab revision|false|`tb submit --comment=false`
+|--query|-q|fuzzy selector query||`tb submit --query=<value>`
+|--tasks-regex|-t|auto selector task regex||`tb submit --tasks-regex=<value>`
+|--preset||mach try preset to load||`tb submit --preset=<value>`
+|--artifact||force artifact builds where possible|true|`tb submit --artifact=false`
+|--comment|-c|Post try link as comment to phab revision|false|`tb submit --comment`
 
 <br/><br/>
 ### test
@@ -330,11 +330,11 @@ tb try
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--selector|-s|mach try selector `auto\|fuzzy\|empty\|chooser`|auto|`tb try --selector=auto`
-|--query|-q|fuzzy selector query|undefined|`tb try --query=undefined`
-|--tasks-regex|-t|auto selector task regex|undefined|`tb try --tasks-regex=undefined`
-|--preset||mach try preset to load|undefined|`tb try --preset=undefined`
-|--artifact||force artifact builds where possible|true|`tb try --artifact=true`
-|--comment|-c|Post try link as comment to phab revision|false|`tb try --comment=false`
+|--query|-q|fuzzy selector query||`tb try --query=<value>`
+|--tasks-regex|-t|auto selector task regex||`tb try --tasks-regex=<value>`
+|--preset||mach try preset to load||`tb try --preset=<value>`
+|--artifact||force artifact builds where possible|true|`tb try --artifact=false`
+|--comment|-c|Post try link as comment to phab revision|false|`tb try --comment`
 
 <br/><br/>
 ### update
@@ -348,9 +348,9 @@ tb update
 #### Options
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
-|--run|-r|build run thunderbird when the update complete|false|`tb update --run=false`
-|--build|-b|build thunderbird when the update is complete|false|`tb update --build=false`
-|--force|-f|Continue update despite out of sync rust dependencies|false|`tb update --force=false`
+|--run|-r|build run thunderbird when the update complete|false|`tb update --run`
+|--build|-b|build thunderbird when the update is complete|false|`tb update --build`
+|--force|-f|Continue update despite out of sync rust dependencies|false|`tb update --force`
 
 <br/><br/>
 ```
