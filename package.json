@@ -14,6 +14,7 @@
   "description": "",
   "type": "module",
   "dependencies": {
+    "@gitgraph/js": "^1.4.0",
     "@inquirer/prompts": "^7.4.1",
     "canduit": "^1.3.1",
     "chalk": "^5.4.1",

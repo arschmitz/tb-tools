@@ -33,6 +33,7 @@ This file currently contains credentials for phabricator and bugzilla, plus opti
 - [create](#create)
 - [cleanup](#cleanup)
 - [diff](#diff)
+- [graph](#graph)
 - [build-rebase](#build-rebase)
 - [build-update](#build-update)
 - [bump](#bump)
@@ -151,6 +152,27 @@ tb diff
 |----|-----------|--|--|---|
 |--gist|-g|Publish the diff to a GitHub gist instead of opening a local HTML view|false|`tb diff --gist`
 |--public||Publish a public gist. Implies --gist|false|`tb diff --public`
+
+<br/><br/>
+### graph
+---
+Generates and opens a tabbed branch graph for comm and the Firefox parent checkout.
+```bash
+tb graph
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--limit|-l|Maximum commits to include per checkout|80|`tb graph --limit=80`
+|--output|-o|HTML output path||`tb graph --output=<value>`
+|--open||Open the generated graph in a browser|true|`tb graph --open=false`
+|--comm||Include the comm checkout tab|true|`tb graph --comm=false`
+|--firefox||Include the Firefox parent checkout tab|true|`tb graph --firefox=false`
+|--diffs||Embed per-commit diffs for click-to-view|true|`tb graph --diffs=false`
+|--maxDiffBytes||Maximum embedded diff bytes per commit|200000|`tb graph --maxDiffBytes=200000`
+|--interactive|-i|Serve an interactive graph with paged commits, server-loaded diffs, and checkout callbacks|false|`tb graph --interactive`
+|--pageSize||Commit page size for interactive infinite loading|80|`tb graph --pageSize=80`
+|--port||Localhost port for interactive mode. Use 0 for a random free port|0|`tb graph --port=0`
 
 <br/><br/>
 ### build-rebase
