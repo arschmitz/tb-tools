@@ -255,7 +255,7 @@ test("buildGraphHtml creates tabbed GitGraph HTML", () => {
         commits: [{
           hash: "abc123",
           parents: [],
-          refs: ["main"],
+          refs: ["HEAD", "main"],
           author: { name: "Alice", email: "alice@example.com" },
           subject: "Fix",
         }],
@@ -277,10 +277,30 @@ test("buildGraphHtml creates tabbed GitGraph HTML", () => {
   assert.match(html, /function renderGraph/);
   assert.match(html, /renderGraph\(0\)/);
   assert.match(html, /function showDiff/);
+  assert.match(html, /\.graph svg \{ overflow: visible; \}/);
+  assert.match(html, /\.commit-row, \.commit-row \* \{ cursor: pointer; \}/);
+  assert.match(html, /\.commit-row\.active \.commit-row-hitbox/);
+  assert.match(html, /\.commit-row\.current \.commit-row-hitbox/);
+  assert.match(html, /const COMMIT_DOT_RADIUS = 10/);
+  assert.match(html, /function centerBranchLabelsVertically/);
+  assert.match(html, /function decorateCommitRows/);
+  assert.match(html, /function isCurrentCommit/);
+  assert.match(html, /const labelTranslate = getTranslate\(labelContainer\)/);
+  assert.match(html, /graphStates\[index\]\.selectedHash = commit\.hash/);
+  assert.match(html, /currentHash: getCurrentCommitHash\(graph\.commits \|\| \[\]\)/);
+  assert.match(html, /row\.classList\.toggle\("current", row\.dataset\.hash === currentHash\)/);
+  assert.match(html, /graphStates\[graphIndex\]\.currentHash = hash/);
+  assert.match(html, /scheduleGraphEnhancements\(index\)/);
   assert.match(html, /onClick: \(\) => showDiff/);
   assert.doesNotMatch(html, /orientation: GitgraphJS\.Orientation\.VerticalReverse/);
+  assert.match(html, /branch: \{\n\s+spacing: 24/);
+  assert.match(html, /commit: \{\n\s+spacing: 30/);
+  assert.match(html, /borderRadius: 4/);
+  assert.match(html, /normal 10px/);
+  assert.match(html, /size: COMMIT_DOT_RADIUS/);
   assert.match(html, /strokeColor: "#ffffff"/);
-  assert.match(html, /strokeWidth: 3/);
+  assert.match(html, /strokeWidth: 2/);
+  assert.match(html, /normal 16px/);
 });
 
 test("buildGraphHtml supports interactive loading and checkout callbacks", () => {

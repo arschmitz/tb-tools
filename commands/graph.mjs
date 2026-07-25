@@ -433,35 +433,45 @@ export function buildGraphHtml({
   <style>
     :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     body { margin: 0; background: #f6f7f9; color: #20242a; }
-    header { padding: 16px 20px 10px; border-bottom: 1px solid #d6dae1; background: #fff; position: sticky; top: 0; z-index: 1; }
-    h1 { font-size: 20px; margin: 0 0 12px; }
-    .tabs { display: flex; gap: 8px; flex-wrap: wrap; }
-    .tab { border: 1px solid #b9c0cc; background: #fff; color: #20242a; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+    header { padding: 12px 16px 8px; border-bottom: 1px solid #d6dae1; background: #fff; position: sticky; top: 0; z-index: 1; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+    .tab { border: 1px solid #b9c0cc; background: #fff; color: #20242a; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
     .tab.active { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
-    main { padding: 20px; }
+    main { padding: 12px; }
     .panel { display: none; }
     .panel.active { display: block; }
-    .summary { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: baseline; padding: 12px 14px; margin-bottom: 16px; background: #fff; border: 1px solid #d6dae1; border-radius: 8px; }
-    .summary span { color: #59616d; font-size: 13px; }
-    .workspace { display: grid; grid-template-columns: minmax(420px, 1fr) minmax(420px, 48vw); gap: 16px; align-items: start; }
+    .summary { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; padding: 8px 10px; margin-bottom: 10px; background: #fff; border: 1px solid #d6dae1; border-radius: 8px; }
+    .summary span { color: #59616d; font-size: 12px; }
+    .workspace { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(400px, 46vw); gap: 10px; align-items: start; }
     .graph, .diff-viewer { background: #fff; border: 1px solid #d6dae1; border-radius: 8px; overflow: auto; }
-    .graph { padding: 18px; min-height: 240px; }
-    .diff-viewer { max-height: calc(100vh - 142px); position: sticky; top: 92px; }
-    .diff-header { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; padding: 12px 14px; border-bottom: 1px solid #d6dae1; }
-    .diff-title { font-size: 14px; }
+    .graph { padding: 10px; min-height: 220px; }
+    .diff-viewer { max-height: calc(100vh - 112px); position: sticky; top: 78px; }
+    .diff-header { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; padding: 8px 10px; border-bottom: 1px solid #d6dae1; }
+    .diff-title { font-size: 13px; }
     .diff-meta { color: #59616d; font-size: 12px; }
     .checkout-commit, .load-more { border: 1px solid #1f5f9f; border-radius: 4px; background: #1f5f9f; color: #fff; cursor: pointer; font-size: 12px; padding: 4px 8px; }
     .checkout-commit:disabled, .load-more:disabled { cursor: wait; opacity: 0.65; }
     .checkout-status, .graph-status { color: #59616d; font-size: 12px; }
     .checkout-status.error, .graph-status.error { color: #9b1c1c; }
-    .diff-body, .error { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
-    .diff-body { margin: 0; padding: 14px; tab-size: 2; }
+    .diff-body, .error { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.38; white-space: pre-wrap; }
+    .diff-body { margin: 0; padding: 10px; tab-size: 2; }
     .load-sentinel { block-size: 1px; inline-size: 100%; }
-    .pretty-file { margin: 0 0 14px; }
-    .pretty-file h3 { align-items: center; background: linear-gradient(#fafafa, #eaeaea); border: 1px solid #d8d8d8; border-bottom: 0; color: #555; display: flex; font: 14px sans-serif; justify-content: space-between; margin: 0; overflow: hidden; padding: 10px 6px; text-shadow: 0 1px 0 white; }
+    .graph svg { overflow: visible; }
+    .commit-row, .commit-row * { cursor: pointer; }
+    .commit-row:focus { outline: none; }
+    .commit-row-hitbox { fill: transparent; pointer-events: all; transition: fill 120ms ease, stroke 120ms ease; }
+    .commit-row.hover .commit-row-hitbox, .commit-row:focus-visible .commit-row-hitbox { fill: rgba(31, 95, 159, 0.08); }
+    .commit-row.active .commit-row-hitbox { fill: rgba(31, 95, 159, 0.14); stroke: rgba(31, 95, 159, 0.35); stroke-width: 1; }
+    .commit-row.active.hover .commit-row-hitbox { fill: rgba(31, 95, 159, 0.18); }
+    .commit-row.current .commit-row-hitbox { fill: rgba(245, 158, 11, 0.18); stroke: rgba(180, 83, 9, 0.35); stroke-width: 1; }
+    .commit-row.current.hover .commit-row-hitbox { fill: rgba(245, 158, 11, 0.24); }
+    .commit-row.current.active .commit-row-hitbox { fill: rgba(245, 158, 11, 0.3); stroke: rgba(31, 95, 159, 0.48); }
+    .pretty-file { margin: 0 0 10px; }
+    .pretty-file h3 { align-items: center; background: linear-gradient(#fafafa, #eaeaea); border: 1px solid #d8d8d8; border-bottom: 0; color: #555; display: flex; font: 13px sans-serif; justify-content: space-between; margin: 0; overflow: hidden; padding: 7px 6px; text-shadow: 0 1px 0 white; }
     .pretty-file .title { margin-left: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .copy-path { border: 1px solid #c4c8d0; border-radius: 4px; background: #fff; color: #20242a; cursor: pointer; font-size: 12px; padding: 4px 8px; }
-    .file-diff { border: 1px solid #d8d8d8; overflow: auto; padding: 0.5em 0; }
+    .file-diff { border: 1px solid #d8d8d8; overflow: auto; padding: 0.25em 0; }
     .file-diff pre { margin: 0; text-indent: 0.5em; }
     .file { color: #8b949e; }
     .delete { background-color: #fdd; }
@@ -487,6 +497,12 @@ export function buildGraphHtml({
       .insert { background-color: #1f4b2b; }
       .info { color: #d19cff; }
       .tab.active { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .commit-row.hover .commit-row-hitbox, .commit-row:focus-visible .commit-row-hitbox { fill: rgba(75, 158, 255, 0.12); }
+      .commit-row.active .commit-row-hitbox { fill: rgba(75, 158, 255, 0.2); stroke: rgba(75, 158, 255, 0.42); }
+      .commit-row.active.hover .commit-row-hitbox { fill: rgba(75, 158, 255, 0.26); }
+      .commit-row.current .commit-row-hitbox { fill: rgba(251, 191, 36, 0.22); stroke: rgba(251, 191, 36, 0.42); }
+      .commit-row.current.hover .commit-row-hitbox { fill: rgba(251, 191, 36, 0.28); }
+      .commit-row.current.active .commit-row-hitbox { fill: rgba(251, 191, 36, 0.34); stroke: rgba(75, 158, 255, 0.55); }
     }
   </style>
 </head>
@@ -504,6 +520,10 @@ export function buildGraphHtml({
       pageSize: interactive.pageSize || 80,
       token: interactive.token,
     })};
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const COMMIT_DOT_RADIUS = 10;
+    const COMMIT_ROW_HEIGHT = 28;
+    const COMMIT_ROW_HORIZONTAL_INSET = 4;
 
     const graphStates = GRAPHS.map((graph) => ({
       graph,
@@ -516,6 +536,8 @@ export function buildGraphHtml({
       sentinelReady: true,
       lastScrollY: window.scrollY,
       scrolledTowardBottom: false,
+      selectedHash: "",
+      currentHash: getCurrentCommitHash(graph.commits || []),
     }));
 
     function showError(container, message) {
@@ -536,6 +558,196 @@ export function buildGraphHtml({
 
     function getGraphContainer(index) {
       return document.getElementById("graph-" + index);
+    }
+
+    function getTranslate(node) {
+      const match = (node.getAttribute("transform") || "").match(/translate\\((-?\\d+(?:\\.\\d+)?),\\s*(-?\\d+(?:\\.\\d+)?)\\)/);
+
+      return {
+        x: match ? Number(match[1]) : 0,
+        y: match ? Number(match[2]) : 0,
+      };
+    }
+
+    function setTranslate(node, x, y) {
+      node.setAttribute("transform", "translate(" + Number(x.toFixed(2)) + ", " + Number(y.toFixed(2)) + ")");
+    }
+
+    function centerBranchLabelsVertically(index) {
+      const container = getGraphContainer(index);
+
+      for (const text of container.querySelectorAll("svg text")) {
+        const labelGroup = text.parentElement;
+        const labelContainer = labelGroup && labelGroup.parentElement;
+        const labelTransform = labelContainer && labelContainer.getAttribute("transform");
+
+        if (
+          !labelGroup ||
+          !labelContainer ||
+          !labelTransform ||
+          !labelGroup.firstElementChild ||
+          labelGroup.firstElementChild.tagName.toLowerCase() !== "rect"
+        ) {
+          continue;
+        }
+
+        let labelBounds;
+
+        try {
+          labelBounds = labelGroup.getBBox();
+        } catch {
+          continue;
+        }
+
+        if (!labelBounds.width || !labelBounds.height) {
+          continue;
+        }
+
+        const labelTranslate = getTranslate(labelContainer);
+        const labelY = COMMIT_DOT_RADIUS - labelBounds.y - labelBounds.height / 2;
+
+        setTranslate(labelContainer, labelTranslate.x, labelY);
+      }
+    }
+
+    function updateCommitRowStates(index) {
+      const container = getGraphContainer(index);
+      const { currentHash, selectedHash } = graphStates[index];
+
+      for (const row of container.querySelectorAll(".commit-row")) {
+        row.classList.toggle("active", row.dataset.hash === selectedHash);
+        row.classList.toggle("current", row.dataset.hash === currentHash);
+      }
+    }
+
+    function getCommitRowsWidth(container, svg) {
+      let width = container.clientWidth || 0;
+      const hitboxes = Array.from(container.querySelectorAll(".commit-row-hitbox"));
+
+      for (const hitbox of hitboxes) {
+        hitbox.setAttribute("visibility", "hidden");
+      }
+
+      try {
+        width = Math.max(width, svg.getBBox().width + COMMIT_ROW_HORIZONTAL_INSET * 2);
+      } catch {
+        // The graph may be between render passes; the next scheduled pass will retry.
+      } finally {
+        for (const hitbox of hitboxes) {
+          hitbox.removeAttribute("visibility");
+        }
+      }
+
+      return Math.max(width, 1);
+    }
+
+    function getCommitForMessage(text, commits) {
+      const abbrev = (text.textContent || "").split(" ")[0];
+
+      return commits.find((commit) => commit.hash.substring(0, 7) === abbrev);
+    }
+
+    function isCurrentCommit(commit) {
+      return Array.isArray(commit.refs) && commit.refs.includes("HEAD");
+    }
+
+    function getCurrentCommitHash(commits) {
+      return commits.find(isCurrentCommit)?.hash || "";
+    }
+
+    function ensureCommitRowHitbox(commitGroup, width) {
+      let hitbox = Array.from(commitGroup.children).find((node) => node.classList.contains("commit-row-hitbox"));
+      const commitTranslate = getTranslate(commitGroup);
+
+      if (!hitbox) {
+        hitbox = document.createElementNS(SVG_NS, "rect");
+        hitbox.classList.add("commit-row-hitbox");
+        commitGroup.insertBefore(hitbox, commitGroup.firstChild);
+      }
+
+      hitbox.setAttribute("x", String(-commitTranslate.x - COMMIT_ROW_HORIZONTAL_INSET));
+      hitbox.setAttribute("y", String(COMMIT_DOT_RADIUS - COMMIT_ROW_HEIGHT / 2));
+      hitbox.setAttribute("width", String(width));
+      hitbox.setAttribute("height", String(COMMIT_ROW_HEIGHT));
+      hitbox.setAttribute("rx", "5");
+
+      return hitbox;
+    }
+
+    function decorateCommitRows(index) {
+      const state = graphStates[index];
+      const container = getGraphContainer(index);
+      const svg = container.querySelector("svg");
+      const commits = state.commits.length ? state.commits : state.graph.commits || [];
+
+      if (!svg || !commits.length) {
+        return;
+      }
+
+      const width = getCommitRowsWidth(container, svg);
+
+      for (const text of container.querySelectorAll("svg text")) {
+        const messageGroup = text.parentElement;
+        const firstMessageChild = messageGroup && messageGroup.firstElementChild;
+
+        if (!messageGroup || firstMessageChild?.tagName.toLowerCase() === "rect") {
+          continue;
+        }
+
+        const commit = getCommitForMessage(text, commits);
+        const innerGroup = messageGroup.parentElement;
+        const commitGroup = innerGroup && innerGroup.parentElement;
+
+        if (!commit || !commitGroup) {
+          continue;
+        }
+
+        const hitbox = ensureCommitRowHitbox(commitGroup, width);
+        commitGroup.classList.add("commit-row");
+        commitGroup.dataset.hash = commit.hash;
+        commitGroup.setAttribute("role", "button");
+        commitGroup.setAttribute("tabindex", "0");
+        commitGroup.setAttribute("aria-label", "Show diff for " + commit.hash.substring(0, 12) + " " + commit.subject);
+
+        if (!commitGroup.dataset.commitRowDecorated) {
+          commitGroup.dataset.commitRowDecorated = "true";
+          commitGroup.addEventListener("pointerover", () => commitGroup.classList.add("hover"));
+          commitGroup.addEventListener("pointerout", (event) => {
+            if (!commitGroup.contains(event.relatedTarget)) {
+              commitGroup.classList.remove("hover");
+            }
+          });
+          commitGroup.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              showDiff(state.graph, index, commit);
+            }
+          });
+          hitbox.addEventListener("click", (event) => {
+            event.stopPropagation();
+            showDiff(state.graph, index, commit);
+          });
+        }
+
+        if (isCurrentCommit(commit)) {
+          state.currentHash = commit.hash;
+        }
+      }
+
+      updateCommitRowStates(index);
+    }
+
+    function enhanceGraphRows(index) {
+      centerBranchLabelsVertically(index);
+      decorateCommitRows(index);
+    }
+
+    function scheduleGraphEnhancements(index) {
+      window.requestAnimationFrame(() => {
+        enhanceGraphRows(index);
+        window.requestAnimationFrame(() => enhanceGraphRows(index));
+      });
+      window.setTimeout(() => enhanceGraphRows(index), 80);
     }
 
     function setGraphStatus(index, message, { error = false, canLoad = false } = {}) {
@@ -590,14 +802,22 @@ export function buildGraphHtml({
       container.replaceChildren();
       state.gitgraph = GitgraphJS.createGitgraph(container, {
         template: GitgraphJS.templateExtend(GitgraphJS.TemplateName.Metro, {
-          branch: { spacing: 52 },
-          commit: {
-            spacing: 70,
-            dot: {
-              strokeColor: "#ffffff",
-              strokeWidth: 3,
+          branch: {
+            spacing: 24,
+            label: {
+              borderRadius: 4,
+              font: "normal 10px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
             },
-            message: { font: "normal 12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" },
+          },
+          commit: {
+            spacing: 30,
+            dot: {
+              // GitGraph's dot size is a radius; 10 renders as a 20px dot.
+              size: COMMIT_DOT_RADIUS,
+              strokeColor: "#ffffff",
+              strokeWidth: 2,
+            },
+            message: { font: "normal 16px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" },
           },
         }),
       });
@@ -621,6 +841,7 @@ export function buildGraphHtml({
       }));
 
       gitgraph.import(commits);
+      scheduleGraphEnhancements(index);
       state.rendered = true;
       ensureLoadSentinel(index);
       setGraphStatus(
@@ -673,6 +894,9 @@ export function buildGraphHtml({
       const checkoutButton = viewer.querySelector(".checkout-commit");
       const checkoutStatus = viewer.querySelector(".checkout-status");
       const diff = graph.diffs && graph.diffs[commit.hash];
+
+      graphStates[index].selectedHash = commit.hash;
+      updateCommitRowStates(index);
 
       title.textContent = commit.hash.substring(0, 12) + " " + commit.subject;
       meta.textContent = commit.author.name + " <" + commit.author.email + ">";
@@ -731,6 +955,7 @@ export function buildGraphHtml({
     async function checkoutSelectedCommit(button) {
       const hash = button.dataset.hash;
       const label = button.dataset.label;
+      const graphIndex = Number(button.dataset.graphIndex);
       const status = button.closest(".diff-viewer").querySelector(".checkout-status");
 
       if (!confirm("Checkout " + hash.substring(0, 12) + " in " + label + " as detached HEAD?")) {
@@ -747,7 +972,7 @@ export function buildGraphHtml({
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             token: INTERACTIVE.token,
-            graphIndex: Number(button.dataset.graphIndex),
+            graphIndex,
             hash,
           }),
         });
@@ -758,6 +983,8 @@ export function buildGraphHtml({
         }
 
         status.textContent = result.message;
+        graphStates[graphIndex].currentHash = hash;
+        updateCommitRowStates(graphIndex);
       } catch (error) {
         status.classList.add("error");
         status.textContent = error && error.message ? error.message : String(error);
@@ -868,6 +1095,7 @@ export function buildGraphHtml({
         }));
 
         gitgraph.import(commits);
+        scheduleGraphEnhancements(index);
         state.rendered = true;
       } catch (error) {
         showError(container, error && error.message ? error.message : String(error));
