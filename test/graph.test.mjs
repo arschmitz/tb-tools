@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildGraphHtml,
+  chooseCheckoutBranch,
+  choosePruneBranches,
   checkoutCommit,
   createGraphCommand,
   getCheckoutCommitPage,
@@ -12,7 +14,9 @@ import {
   formatPrettyDiffHtml,
   parseDecorations,
   parseGitLog,
+  pruneCommitBranches,
   pruneMissingParents,
+  rebaseCommit,
   splitPrettyDiffFiles,
   startInteractiveGraphServer,
   truncateDiff,
@@ -52,6 +56,17 @@ test("pruneMissingParents removes parents outside the displayed commit window", 
     { hash: "child", parents: ["parent"] },
     { hash: "parent", parents: [] },
   ]);
+});
+
+test("chooseCheckoutBranch prefers the current branch when available", () => {
+  assert.equal(chooseCheckoutBranch("topic\nmain\n", "main"), "main");
+  assert.equal(chooseCheckoutBranch("topic\nmain\n", "other"), "topic");
+  assert.equal(chooseCheckoutBranch("", "main"), "");
+});
+
+test("choosePruneBranches ignores the currently checked out branch", () => {
+  assert.deepEqual(choosePruneBranches("topic\nmain\n", "main"), ["topic"]);
+  assert.deepEqual(choosePruneBranches("topic\nmain\n", ""), ["topic", "main"]);
 });
 
 test("truncateDiff caps embedded diff size", () => {
@@ -206,6 +221,7 @@ test("checkoutCommit checks out loaded commits only when the tree is clean", asy
     graph: {
       label: "comm",
       path: "/repo/comm",
+      branch: "main",
       knownHashes: new Set(["abc123"]),
     },
     hash: "abc123",
@@ -218,7 +234,109 @@ test("checkoutCommit checks out loaded commits only when the tree is clean", asy
   assert.equal(result.message, "comm checked out abc123 as detached HEAD.");
   assert.deepEqual(calls.map((call) => call.args), [
     ["status", "--porcelain"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
     ["switch", "--detach", "abc123"],
+  ]);
+});
+
+test("checkoutCommit switches to a local branch when the commit is a branch tip", async () => {
+  const calls = [];
+  const result = await checkoutCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["abc123"]),
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "for-each-ref") {
+        return "topic\nmain\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm checked out branch main at abc123.");
+  assert.equal(result.branch, "main");
+  assert.equal(result.detached, false);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
+    ["switch", "main"],
+  ]);
+});
+
+test("rebaseCommit rebases onto a local branch when the commit is a branch tip", async () => {
+  const calls = [];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["abc123"]),
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "for-each-ref") {
+        return "topic\nmain\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "def456\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm rebased onto branch main.");
+  assert.equal(result.currentHash, "def456");
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
+    ["rebase", "main"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("pruneCommitBranches deletes local branch tips except the current branch", async () => {
+  const calls = [];
+  const result = await pruneCommitBranches({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["abc123"]),
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        return "topic\nmain\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm pruned branch topic at abc123.");
+  assert.deepEqual(result.branches, ["topic"]);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["branch", "--show-current"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
+    ["branch", "-d", "--", "topic"],
   ]);
 });
 
@@ -277,13 +395,20 @@ test("buildGraphHtml creates tabbed GitGraph HTML", () => {
   assert.match(html, /function renderGraph/);
   assert.match(html, /renderGraph\(0\)/);
   assert.match(html, /function showDiff/);
+  assert.match(html, /id="commit-context-menu"/);
+  assert.match(html, /data-action="checkout"/);
+  assert.match(html, /data-action="rebase"/);
+  assert.match(html, /data-action="prune"/);
   assert.match(html, /\.graph svg \{ overflow: visible; \}/);
   assert.match(html, /\.commit-row, \.commit-row \* \{ cursor: pointer; \}/);
   assert.match(html, /\.commit-row\.active \.commit-row-hitbox/);
   assert.match(html, /\.commit-row\.current \.commit-row-hitbox/);
+  assert.match(html, /\.context-menu button\[data-action="prune"\]/);
   assert.match(html, /const COMMIT_DOT_RADIUS = 10/);
   assert.match(html, /function centerBranchLabelsVertically/);
   assert.match(html, /function decorateCommitRows/);
+  assert.match(html, /function showCommitContextMenu/);
+  assert.match(html, /function runCommitAction/);
   assert.match(html, /function isCurrentCommit/);
   assert.match(html, /const labelTranslate = getTranslate\(labelContainer\)/);
   assert.match(html, /graphStates\[index\]\.selectedHash = commit\.hash/);
@@ -291,6 +416,9 @@ test("buildGraphHtml creates tabbed GitGraph HTML", () => {
   assert.match(html, /row\.classList\.toggle\("current", row\.dataset\.hash === currentHash\)/);
   assert.match(html, /graphStates\[graphIndex\]\.currentHash = hash/);
   assert.match(html, /scheduleGraphEnhancements\(index\)/);
+  assert.match(html, /Branch tips will check out the branch/);
+  assert.match(html, /commitGroup\.addEventListener\("contextmenu"/);
+  assert.match(html, /runCommitAction\(button\.dataset\.action, actionState\)/);
   assert.match(html, /onClick: \(\) => showDiff/);
   assert.doesNotMatch(html, /orientation: GitgraphJS\.Orientation\.VerticalReverse/);
   assert.match(html, /branch: \{\n\s+spacing: 24/);
@@ -324,7 +452,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /const INTERACTIVE = /);
   assert.match(html, /"pageSize":25/);
   assert.match(html, /\/api\/graph\/" \+ index \+ "\/commits/);
-  assert.match(html, /\/api\/checkout/);
+  assert.match(html, /\/api\/commit-action/);
   assert.match(html, /\/api\/close/);
   assert.match(html, /\/api\/ping/);
   assert.match(html, /beforeunload/);
@@ -392,6 +520,14 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
         return "diff --git a/file.txt b/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
       }
 
+      if (command.args[0] === "for-each-ref") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "def456\n";
+      }
+
       return "";
     },
   });
@@ -425,7 +561,16 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     body: JSON.stringify({ token: "secret", graphIndex: 0, hash: "abc123" }),
   });
   const checkout = await checkoutResponse.json();
-  assert.equal(checkout.message, "comm checked out abc123 as detached HEAD.");
+  assert.equal(checkout.message, "comm checked out branch main at abc123.");
+
+  const rebaseResponse = await fetch(new URL("api/commit-action", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret", graphIndex: 0, hash: "abc123", action: "rebase" }),
+  });
+  const rebase = await rebaseResponse.json();
+  assert.equal(rebase.message, "comm rebased onto branch main.");
+  assert.equal(rebase.currentHash, "def456");
 
   const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
   const closeResponse = await fetch(new URL("api/close", serverInfo.url), {
@@ -436,7 +581,8 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.equal(closeResponse.ok, true);
   await closePromise;
 
-  assert.equal(calls.some((call) => call.args[0] === "switch"), true);
+  assert.equal(calls.some((call) => call.args[0] === "switch" && call.args[1] === "main"), true);
+  assert.equal(calls.some((call) => call.args[0] === "rebase" && call.args[1] === "main"), true);
 });
 
 test("interactive graph server closes when page heartbeats stop", async (t) => {

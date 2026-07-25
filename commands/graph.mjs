@@ -61,6 +61,27 @@ export function pruneMissingParents(commits) {
   }));
 }
 
+export function chooseCheckoutBranch(refsOutput = "", preferredBranch = "") {
+  const branches = refsOutput
+    .split("\n")
+    .map((branch) => branch.trim())
+    .filter(Boolean);
+
+  if (preferredBranch && preferredBranch !== "(detached)" && branches.includes(preferredBranch)) {
+    return preferredBranch;
+  }
+
+  return branches[0] || "";
+}
+
+export function choosePruneBranches(refsOutput = "", currentBranch = "") {
+  return refsOutput
+    .split("\n")
+    .map((branch) => branch.trim())
+    .filter(Boolean)
+    .filter((branch) => branch !== currentBranch);
+}
+
 function getGitLogArgs(limit, offset = 0) {
   const args = [
     "log",
@@ -327,11 +348,7 @@ export async function getCheckoutGraphData({
   }
 }
 
-export async function checkoutCommit({
-  graph,
-  hash,
-  runCommand = run,
-}) {
+function ensureKnownGraphCommit(graph, hash) {
   if (!graph) {
     throw new Error("Unknown graph checkout.");
   }
@@ -339,7 +356,9 @@ export async function checkoutCommit({
   if (!graph.knownHashes?.has(hash)) {
     throw new Error("Commit has not been loaded by this graph.");
   }
+}
 
+async function ensureCleanGraph(graph, runCommand) {
   const status = await runCommand({
     cmd: "git",
     args: ["status", "--porcelain"],
@@ -349,9 +368,62 @@ export async function checkoutCommit({
   });
 
   if (status.trim()) {
-    const error = new Error(`${graph.label} has local changes. Commit or stash them before checking out another commit.`);
+    const error = new Error(`${graph.label} has local changes. Commit or stash them before changing commits.`);
     error.statusCode = 409;
     throw error;
+  }
+}
+
+async function getLocalBranchesAtCommit(graph, hash, runCommand) {
+  return runCommand({
+    cmd: "git",
+    args: ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", hash, "refs/heads"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+}
+
+async function getCurrentGraphBranch(graph, runCommand) {
+  const branch = await runCommand({
+    cmd: "git",
+    args: ["branch", "--show-current"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+
+  return branch.trim();
+}
+
+export async function checkoutCommit({
+  graph,
+  hash,
+  runCommand = run,
+}) {
+  ensureKnownGraphCommit(graph, hash);
+  await ensureCleanGraph(graph, runCommand);
+
+  const branchRefs = await getLocalBranchesAtCommit(graph, hash, runCommand);
+  const branch = chooseCheckoutBranch(branchRefs, graph.branch);
+
+  if (branch) {
+    await runCommand({
+      cmd: "git",
+      args: ["switch", branch],
+      cwd: graph.path,
+      silent: true,
+    });
+
+    graph.branch = branch;
+    return {
+      label: graph.label,
+      path: graph.path,
+      hash,
+      branch,
+      detached: false,
+      message: `${graph.label} checked out branch ${branch} at ${hash.slice(0, 12)}.`,
+    };
   }
 
   await runCommand({
@@ -361,11 +433,92 @@ export async function checkoutCommit({
     silent: true,
   });
 
+  graph.branch = "(detached)";
   return {
     label: graph.label,
     path: graph.path,
     hash,
+    detached: true,
     message: `${graph.label} checked out ${hash.slice(0, 12)} as detached HEAD.`,
+  };
+}
+
+export async function rebaseCommit({
+  graph,
+  hash,
+  runCommand = run,
+}) {
+  ensureKnownGraphCommit(graph, hash);
+  await ensureCleanGraph(graph, runCommand);
+
+  const branchRefs = await getLocalBranchesAtCommit(graph, hash, runCommand);
+  const branch = chooseCheckoutBranch(branchRefs, graph.branch);
+  const target = branch || hash;
+
+  await runCommand({
+    cmd: "git",
+    args: ["rebase", target],
+    cwd: graph.path,
+    silent: true,
+  });
+
+  const currentHash = (await runCommand({
+    cmd: "git",
+    args: ["rev-parse", "HEAD"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  })).trim();
+
+  return {
+    action: "rebase",
+    label: graph.label,
+    path: graph.path,
+    hash,
+    target,
+    currentHash,
+    message: `${graph.label} rebased onto ${branch ? `branch ${branch}` : hash.slice(0, 12)}.`,
+  };
+}
+
+export async function pruneCommitBranches({
+  graph,
+  hash,
+  runCommand = run,
+}) {
+  ensureKnownGraphCommit(graph, hash);
+  await ensureCleanGraph(graph, runCommand);
+
+  const [currentBranch, branchRefs] = await Promise.all([
+    getCurrentGraphBranch(graph, runCommand),
+    getLocalBranchesAtCommit(graph, hash, runCommand),
+  ]);
+  const branches = choosePruneBranches(branchRefs, currentBranch);
+
+  if (!branches.length) {
+    const error = new Error(currentBranch && branchRefs.split("\n").map((branch) => branch.trim()).includes(currentBranch)
+      ? `Cannot prune ${currentBranch} because it is currently checked out.`
+      : `No local branch tips found at ${hash.slice(0, 12)}.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  for (const branch of branches) {
+    await runCommand({
+      cmd: "git",
+      args: ["branch", "-d", "--", branch],
+      cwd: graph.path,
+      silent: true,
+    });
+  }
+
+  return {
+    action: "prune",
+    label: graph.label,
+    path: graph.path,
+    hash,
+    branches,
+    message: `${graph.label} pruned ${branches.length === 1 ? "branch" : "branches"} ${branches.join(", ")} at ${hash.slice(0, 12)}.`,
   };
 }
 
@@ -380,6 +533,30 @@ export async function checkoutGraphCommit({
     hash,
     runCommand,
   });
+}
+
+export async function runGraphCommitAction({
+  graphs,
+  graphIndex,
+  hash,
+  action,
+  runCommand = run,
+}) {
+  const graph = graphs[Number(graphIndex)];
+
+  switch (action) {
+    case "checkout":
+      return checkoutCommit({ graph, hash, runCommand });
+    case "rebase":
+      return rebaseCommit({ graph, hash, runCommand });
+    case "prune":
+      return pruneCommitBranches({ graph, hash, runCommand });
+    default: {
+      const error = new Error(`Unknown graph action: ${action}`);
+      error.statusCode = 400;
+      throw error;
+    }
+  }
 }
 
 function escapeHtml(value = "") {
@@ -467,6 +644,12 @@ export function buildGraphHtml({
     .commit-row.current .commit-row-hitbox { fill: rgba(245, 158, 11, 0.18); stroke: rgba(180, 83, 9, 0.35); stroke-width: 1; }
     .commit-row.current.hover .commit-row-hitbox { fill: rgba(245, 158, 11, 0.24); }
     .commit-row.current.active .commit-row-hitbox { fill: rgba(245, 158, 11, 0.3); stroke: rgba(31, 95, 159, 0.48); }
+    .context-menu { background: #fff; border: 1px solid #b9c0cc; border-radius: 6px; box-shadow: 0 8px 28px rgba(15, 23, 42, 0.18); color: #20242a; min-width: 160px; padding: 4px; position: fixed; z-index: 5; }
+    .context-menu[hidden] { display: none; }
+    .context-menu-title { color: #59616d; font-size: 12px; max-width: 260px; overflow: hidden; padding: 6px 8px 4px; text-overflow: ellipsis; white-space: nowrap; }
+    .context-menu button { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: pointer; display: block; font: inherit; padding: 7px 8px; text-align: left; width: 100%; }
+    .context-menu button:hover, .context-menu button:focus { background: rgba(31, 95, 159, 0.1); outline: none; }
+    .context-menu button[data-action="prune"] { color: #9b1c1c; }
     .pretty-file { margin: 0 0 10px; }
     .pretty-file h3 { align-items: center; background: linear-gradient(#fafafa, #eaeaea); border: 1px solid #d8d8d8; border-bottom: 0; color: #555; display: flex; font: 13px sans-serif; justify-content: space-between; margin: 0; overflow: hidden; padding: 7px 6px; text-shadow: 0 1px 0 white; }
     .pretty-file .title { margin-left: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -503,6 +686,10 @@ export function buildGraphHtml({
       .commit-row.current .commit-row-hitbox { fill: rgba(251, 191, 36, 0.22); stroke: rgba(251, 191, 36, 0.42); }
       .commit-row.current.hover .commit-row-hitbox { fill: rgba(251, 191, 36, 0.28); }
       .commit-row.current.active .commit-row-hitbox { fill: rgba(251, 191, 36, 0.34); stroke: rgba(75, 158, 255, 0.55); }
+      .context-menu { background: #191d23; border-color: #424b59; color: #f1f3f6; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42); }
+      .context-menu-title { color: #acb4c0; }
+      .context-menu button:hover, .context-menu button:focus { background: rgba(75, 158, 255, 0.16); }
+      .context-menu button[data-action="prune"] { color: #ff9f9f; }
     }
   </style>
 </head>
@@ -512,6 +699,12 @@ export function buildGraphHtml({
     <nav class="tabs">${tabButtons}</nav>
   </header>
   <main>${tabPanels}</main>
+  <div class="context-menu" id="commit-context-menu" hidden role="menu" aria-label="Commit actions">
+    <div class="context-menu-title"></div>
+    <button type="button" role="menuitem" data-action="checkout">Checkout</button>
+    <button type="button" role="menuitem" data-action="rebase">Rebase</button>
+    <button type="button" role="menuitem" data-action="prune">Prune</button>
+  </div>
   <script>${gitgraphScript}</script>
   <script>
     const GRAPHS = ${safeScriptJson(graphs)};
@@ -539,6 +732,8 @@ export function buildGraphHtml({
       selectedHash: "",
       currentHash: getCurrentCommitHash(graph.commits || []),
     }));
+    const contextMenu = document.getElementById("commit-context-menu");
+    let contextMenuState = null;
 
     function showError(container, message) {
       const error = document.createElement("pre");
@@ -655,6 +850,36 @@ export function buildGraphHtml({
       return commits.find(isCurrentCommit)?.hash || "";
     }
 
+    function hideCommitContextMenu() {
+      contextMenu.hidden = true;
+      contextMenuState = null;
+    }
+
+    function showCommitContextMenu(event, index, commit) {
+      if (!INTERACTIVE.enabled) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      contextMenuState = {
+        graphIndex: index,
+        hash: commit.hash,
+        label: graphStates[index].graph.label,
+        subject: commit.subject,
+      };
+      contextMenu.querySelector(".context-menu-title").textContent =
+        commit.hash.substring(0, 12) + " " + commit.subject;
+      contextMenu.hidden = false;
+
+      const x = Math.max(8, Math.min(event.clientX, window.innerWidth - contextMenu.offsetWidth - 8));
+      const y = Math.max(8, Math.min(event.clientY, window.innerHeight - contextMenu.offsetHeight - 8));
+      contextMenu.style.left = x + "px";
+      contextMenu.style.top = y + "px";
+      contextMenu.querySelector("button").focus();
+    }
+
     function ensureCommitRowHitbox(commitGroup, width) {
       let hitbox = Array.from(commitGroup.children).find((node) => node.classList.contains("commit-row-hitbox"));
       const commitTranslate = getTranslate(commitGroup);
@@ -727,6 +952,7 @@ export function buildGraphHtml({
             event.stopPropagation();
             showDiff(state.graph, index, commit);
           });
+          commitGroup.addEventListener("contextmenu", (event) => showCommitContextMenu(event, index, commit));
         }
 
         if (isCurrentCommit(commit)) {
@@ -952,28 +1178,56 @@ export function buildGraphHtml({
       body.textContent = diff.text || "No diff for this commit.";
     }
 
-    async function checkoutSelectedCommit(button) {
-      const hash = button.dataset.hash;
-      const label = button.dataset.label;
-      const graphIndex = Number(button.dataset.graphIndex);
-      const status = button.closest(".diff-viewer").querySelector(".checkout-status");
+    function getCommitActionDetails(action, label, hash) {
+      const shortHash = hash.substring(0, 12);
 
-      if (!confirm("Checkout " + hash.substring(0, 12) + " in " + label + " as detached HEAD?")) {
+      if (action === "checkout") {
+        return {
+          confirm: "Checkout " + shortHash + " in " + label + "? Branch tips will check out the branch; other commits will use detached HEAD.",
+          progress: "Checking out...",
+        };
+      }
+
+      if (action === "rebase") {
+        return {
+          confirm: "Rebase " + label + " onto " + shortHash + "?",
+          progress: "Rebasing...",
+        };
+      }
+
+      if (action === "prune") {
+        return {
+          confirm: "Prune local branch tips at " + shortHash + " in " + label + "?",
+          progress: "Pruning...",
+        };
+      }
+
+      return {
+        confirm: "Run " + action + " on " + shortHash + " in " + label + "?",
+        progress: "Running...",
+      };
+    }
+
+    async function runCommitAction(action, { graphIndex, hash, label }) {
+      const details = getCommitActionDetails(action, label, hash);
+      const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
+
+      if (!confirm(details.confirm)) {
         return;
       }
 
-      button.disabled = true;
       status.classList.remove("error");
-      status.textContent = "Checking out...";
+      status.textContent = details.progress;
 
       try {
-        const response = await fetch("/api/checkout", {
+        const response = await fetch("/api/commit-action", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             token: INTERACTIVE.token,
             graphIndex,
             hash,
+            action,
           }),
         });
         const result = await response.json();
@@ -983,17 +1237,37 @@ export function buildGraphHtml({
         }
 
         status.textContent = result.message;
-        graphStates[graphIndex].currentHash = hash;
+        if (result.currentHash) {
+          graphStates[graphIndex].currentHash = result.currentHash;
+        } else if (action === "checkout") {
+          graphStates[graphIndex].currentHash = hash;
+        }
         updateCommitRowStates(graphIndex);
       } catch (error) {
         status.classList.add("error");
         status.textContent = error && error.message ? error.message : String(error);
+      }
+    }
+
+    async function checkoutSelectedCommit(button) {
+      button.disabled = true;
+
+      try {
+        await runCommitAction("checkout", {
+          graphIndex: Number(button.dataset.graphIndex),
+          hash: button.dataset.hash,
+          label: button.dataset.label,
+        });
       } finally {
         button.disabled = false;
       }
     }
 
     document.addEventListener("click", (event) => {
+      if (!event.target.closest(".context-menu")) {
+        hideCommitContextMenu();
+      }
+
       const checkoutButton = event.target.closest(".checkout-commit");
       if (checkoutButton) {
         checkoutSelectedCommit(checkoutButton);
@@ -1007,6 +1281,26 @@ export function buildGraphHtml({
 
       if (navigator.clipboard) {
         navigator.clipboard.writeText(button.dataset.path);
+      }
+    });
+
+    contextMenu.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-action]");
+
+      if (!button || !contextMenuState) {
+        return;
+      }
+
+      event.stopPropagation();
+      const actionState = contextMenuState;
+      hideCommitContextMenu();
+      runCommitAction(button.dataset.action, actionState);
+    });
+
+    window.addEventListener("scroll", hideCommitContextMenu, { passive: true });
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        hideCommitContextMenu();
       }
     });
 
@@ -1313,6 +1607,20 @@ export async function startInteractiveGraphServer({
           graphs: serverGraphs,
           graphIndex: body.graphIndex,
           hash: body.hash,
+          runCommand,
+        });
+        sendJson(response, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/commit-action") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        const result = await runGraphCommitAction({
+          graphs: serverGraphs,
+          graphIndex: body.graphIndex,
+          hash: body.hash,
+          action: body.action,
           runCommand,
         });
         sendJson(response, 200, { ok: true, ...result });
