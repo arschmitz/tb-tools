@@ -9,6 +9,7 @@ import readme from './commands/readme.mjs';
 import lint from './commands/lint.mjs';
 import rebase from './commands/rebase.mjs';
 import submit from './commands/submit.mjs';
+import statusCommand from './commands/status.mjs';
 import testChanged from './commands/test.mjs';
 import update from './commands/update.mjs';
 import usage from 'command-line-usage';
@@ -249,6 +250,17 @@ Optionally:
     async run () {
       const options = mapBooleanOptions(args(commands.submit.options, { argv }));
       await submit(options, commands.try.options);
+    },
+  },
+  status: {
+    description: "Shows current branch, pending commits, changed files, and detected Bugzilla/Phabricator/Try links.",
+    header: "Status Options",
+    options: [
+      { name: "base", description: "Base ref used to count and list pending commits", defaultValue: "origin/main" },
+    ],
+    async run () {
+      const options = mapBooleanOptions(args(commands.status.options, { argv }));
+      await statusCommand(options);
     },
   },
   test: {

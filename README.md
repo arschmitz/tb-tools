@@ -44,6 +44,7 @@ This file currently contains credentials for phabricator and bugzilla, plus opti
 - [run-rebase](#run-rebase)
 - [run-update](#run-update)
 - [submit](#submit)
+- [status](#status)
 - [test](#test)
 - [try](#try)
 - [update](#update)
@@ -321,6 +322,18 @@ tb submit
 |--preset||mach try preset to load||`tb submit --preset=<value>`
 |--artifact||force artifact builds where possible|true|`tb submit --artifact=false`
 |--comment|-c|Post try link as comment to phab revision|false|`tb submit --comment`
+
+<br/><br/>
+### status
+---
+Shows current branch, pending commits, changed files, and detected Bugzilla/Phabricator/Try links.
+```bash
+tb status
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--base||Base ref used to count and list pending commits|origin/main|`tb status --base=origin/main`
 
 <br/><br/>
 ### test
