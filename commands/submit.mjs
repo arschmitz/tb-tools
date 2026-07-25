@@ -40,7 +40,10 @@ export function createSubmitCommand({
     
     if (testAnswer) {
       try {
-        await testChanged();
+        await testChanged({
+          flavor: options.flavor,
+          pattern: options.pattern,
+        });
       } catch (error) {
         const force = prompts.keyInYNStrict("tests Failed: Do you want to continue? [y/n]:", { guide: false });
 

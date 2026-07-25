@@ -240,7 +240,7 @@ Optionally:
     },
   },
   test: {
-    description: "Checks files changed or added and runs all tests for any components modified, and test files changed.",
+    description: "Runs matching test patterns, or checks files changed or added and runs tests for any components modified.",
     header: 'Test Options',
     async run () {
       const options = mapBooleanOptions(args(commands.test.options, { argv }));
@@ -248,6 +248,7 @@ Optionally:
     },
     options: [
       { name: 'flavor', alias: 'f', description: 'Flavor of tests to run `browser|unit|all`', defaultValue: 'all' },
+      { name: 'pattern', alias: 'p', description: 'Test path or glob pattern to pass to `mach test`', defaultOption: true, multiple: true },
     ]
   },
   try: {
@@ -300,6 +301,15 @@ const sections = [
   {  header: 'Commands', content: optionList },
 ];
 
+function getUsageOptions(options) {
+  return options.map((option) => {
+    const usageOption = { ...option };
+    delete usageOption.defaultOption;
+    delete usageOption.multiple;
+    return usageOption;
+  });
+}
+
 Object.entries(commands).forEach(([name, { description, header, options }]) => {
   if (!description) {
     return;
@@ -315,7 +325,7 @@ Object.entries(commands).forEach(([name, { description, header, options }]) => {
     return;
   }
 
-  sections.push({ header, content: options });
+  sections.push({ header, content: getUsageOptions(options) });
 });
 
 if (command && !["help", "readme"].includes(command)) {

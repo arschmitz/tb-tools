@@ -2,10 +2,8 @@ import path from "path";
 import { getChangedFilePaths } from "../lib/git.mjs";
 import { mach } from "../lib/utils.mjs";
 
-export default async function testChanged({ flavor = "all" } = {}) {
-  const files = await getChangedFilePaths();
-
-  const tests = files.reduce((collection, item) => {
+export function getTestsForChangedFiles(files, { flavor = "all" } = {}) {
+  return files.reduce((collection, item) => {
     if (!item) {
       return collection;
     }
@@ -37,10 +35,38 @@ export default async function testChanged({ flavor = "all" } = {}) {
 
     return collection;
   }, new Set());
+}
 
-  if (!tests.size) {
-    return;
+export function getPatterns(pattern) {
+  if (!pattern) {
+    return [];
   }
 
-  await mach(["test", ...Array.from(tests)].join(" "));
+  const patterns = Array.isArray(pattern) ? pattern : [pattern];
+  return patterns.filter(Boolean);
 }
+
+export function createTestCommand({
+  getChangedFiles = getChangedFilePaths,
+  runMach = mach,
+} = {}) {
+  return async function testChanged({ flavor = "all", pattern } = {}) {
+    const patterns = getPatterns(pattern);
+
+    if (patterns.length) {
+      await runMach(["test", ...patterns]);
+      return;
+    }
+
+    const files = await getChangedFiles();
+    const tests = getTestsForChangedFiles(files, { flavor });
+
+    if (!tests.size) {
+      return;
+    }
+
+    await runMach(["test", ...Array.from(tests)]);
+  };
+}
+
+export default createTestCommand();

@@ -20,8 +20,8 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
     lint: async () => {
       calls.push(["lint"]);
     },
-    testChanged: async () => {
-      calls.push(["testChanged"]);
+    testChanged: async (options) => {
+      calls.push(["testChanged", options]);
     },
     runCommand: async (command) => {
       calls.push(["run", command]);
@@ -33,15 +33,27 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
     postComment: async (comment) => {
       comments.push(comment);
     },
-    prompts: promptsFrom([false, false, true, true]),
+    prompts: promptsFrom([false, true, true, true]),
   });
 
-  await submit({ comment: true }, [{ name: "selector" }]);
+  await submit({
+    comment: true,
+    flavor: "browser",
+    pattern: "mail/**/browser_*.js",
+  }, [{ name: "selector" }]);
 
   assert.deepEqual(calls, [
     ["checkChanges", "Changes found please amend, commit, or stash your changes."],
+    ["testChanged", {
+      flavor: "browser",
+      pattern: "mail/**/browser_*.js",
+    }],
     ["run", { cmd: "moz-phab", args: ["submit"] }],
-    ["try", { comment: false }, [{ name: "selector" }]],
+    ["try", {
+      comment: false,
+      flavor: "browser",
+      pattern: "mail/**/browser_*.js",
+    }, [{ name: "selector" }]],
   ]);
   assert.deepEqual(comments, [{
     message: "try: https://treeherder.mozilla.org/jobs?repo=try&revision=abc",

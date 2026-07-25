@@ -300,6 +300,7 @@ tb submit
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb submit --flavor=all`
+|--pattern|-p|Test path or glob pattern to pass to `mach test`||`tb submit --pattern=<value>`
 |--selector|-s|mach try selector `auto\|fuzzy\|empty\|chooser`|auto|`tb submit --selector=auto`
 |--query|-q|fuzzy selector query||`tb submit --query=<value>`
 |--tasks-regex|-t|auto selector task regex||`tb submit --tasks-regex=<value>`
@@ -310,7 +311,7 @@ tb submit
 <br/><br/>
 ### test
 ---
-Checks files changed or added and runs all tests for any components modified, and test files changed.
+Runs matching test patterns, or checks files changed or added and runs tests for any components modified.
 ```bash
 tb test
 ```
@@ -318,6 +319,7 @@ tb test
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb test --flavor=all`
+|--pattern|-p|Test path or glob pattern to pass to `mach test`||`tb test --pattern=<value>`
 
 <br/><br/>
 ### try
