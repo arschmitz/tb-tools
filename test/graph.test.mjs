@@ -74,11 +74,44 @@ test("truncateDiff caps embedded diff size", () => {
     text: "small diff",
     html: "",
     truncated: false,
+    insertions: 0,
+    deletions: 0,
   });
   assert.deepEqual(truncateDiff("abcdef", 3), {
     text: "abc\n\n[diff truncated at 3 bytes]",
     html: "<pre class=\"info\">[diff truncated at 3 bytes]</pre>",
     truncated: true,
+    insertions: 0,
+    deletions: 0,
+  });
+
+  assert.deepEqual(truncateDiff([
+    "diff --git a/file.txt b/file.txt",
+    "@@ -1,2 +1,3 @@",
+    " unchanged",
+    "-old",
+    "+new",
+    "+extra",
+  ].join("\n"), 1000), {
+    text: [
+      "diff --git a/file.txt b/file.txt",
+      "@@ -1,2 +1,3 @@",
+      " unchanged",
+      "-old",
+      "+new",
+      "+extra",
+    ].join("\n"),
+    html: formatPrettyDiffHtml([
+      "diff --git a/file.txt b/file.txt",
+      "@@ -1,2 +1,3 @@",
+      " unchanged",
+      "-old",
+      "+new",
+      "+extra",
+    ].join("\n")),
+    truncated: false,
+    insertions: 2,
+    deletions: 1,
   });
 });
 
@@ -107,15 +140,64 @@ test("splitPrettyDiffFiles groups patch output by file", () => {
 test("formatPrettyDiffHtml renders pretty-diff style markup", () => {
   const html = formatPrettyDiffHtml([
     "diff --git a/file.txt b/file.txt",
-    "@@ -1 +1 @@",
+    "index 123..456 100644",
+    "--- a/file.txt",
+    "+++ b/file.txt",
+    "@@ -10,2 +20,2 @@",
+    " unchanged",
     "-old <value>",
     "+new & better",
   ].join("\n"));
 
   assert.match(html, /class="pretty-file"/);
-  assert.match(html, /class="delete">-old &lt;value&gt;<\/pre>/);
-  assert.match(html, /class="insert">\+new &amp; better<\/pre>/);
+  assert.match(html, /class="file-heading"/);
+  assert.match(html, /class="file-stats" aria-label="1 addition and 1 deletion"/);
+  assert.match(html, /class="stat-additions">\+1<\/span>/);
+  assert.match(html, /class="stat-deletions">-1<\/span>/);
+  assert.match(html, /class="copy-path" type="button" data-path="file.txt">Copy path<\/button>/);
+  assert.match(html, /<div class="file-diff"><table class="diff-table"><tbody>/);
+  assert.doesNotMatch(html, /diff --git/);
+  assert.doesNotMatch(html, /index 123\.\.456/);
+  assert.doesNotMatch(html, /--- a\/file\.txt/);
+  assert.doesNotMatch(html, /\+\+\+ b\/file\.txt/);
+  assert.match(html, /class="diff-line info"/);
+  assert.match(html, /<span class="line-content">@@ -10,2 \+20,2 @@<\/span>/);
+  assert.match(html, /class="diff-line context"/);
+  assert.match(html, /class="line-number old-line">10<\/td>/);
+  assert.match(html, /class="line-number new-line">20<\/td>/);
+  assert.match(html, /<span class="line-content">unchanged<\/span>/);
+  assert.match(html, /class="diff-line delete"/);
+  assert.match(html, /class="line-number old-line">11<\/td>/);
+  assert.match(html, /class="line-number new-line"><\/td>/);
+  assert.match(html, /<span class="line-marker">-<\/span><span class="line-content">old &lt;value&gt;<\/span>/);
+  assert.match(html, /class="diff-line insert"/);
+  assert.match(html, /class="line-number old-line"><\/td>/);
+  assert.match(html, /class="line-number new-line">21<\/td>/);
+  assert.match(html, /<span class="line-marker">\+<\/span><span class="line-content">new &amp; better<\/span>/);
   assert.match(html, /data-path="file.txt"/);
+
+  const newFileHtml = formatPrettyDiffHtml([
+    "diff --git a/new.txt b/new.txt",
+    "@@ -0,0 +1,2 @@",
+    "+first",
+    "+second",
+  ].join("\n"));
+
+  assert.match(newFileHtml, /class="line-number new-line">1<\/td>/);
+  assert.match(newFileHtml, /class="line-number new-line">2<\/td>/);
+
+  const markerLikeContentHtml = formatPrettyDiffHtml([
+    "diff --git a/marker.txt b/marker.txt",
+    "--- a/marker.txt",
+    "+++ b/marker.txt",
+    "@@ -1 +1 @@",
+    "--- markdown heading",
+    "+++ plus heading",
+  ].join("\n"));
+
+  assert.match(markerLikeContentHtml, /class="file-stats" aria-label="1 addition and 1 deletion"/);
+  assert.match(markerLikeContentHtml, /class="diff-line delete"[^]*<span class="line-marker">-<\/span><span class="line-content">-- markdown heading<\/span>/);
+  assert.match(markerLikeContentHtml, /class="diff-line insert"[^]*<span class="line-marker">\+<\/span><span class="line-content">\+\+ plus heading<\/span>/);
 });
 
 test("getCommitDiffs collects git show output by commit hash", async () => {
@@ -126,7 +208,7 @@ test("getCommitDiffs collects git show output by commit hash", async () => {
     commits: [{ hash: "abc123" }],
     runCommand: async (command) => {
       commands.push(command);
-      return `commit ${command.args.at(-1)}\n\ndiff --git a/file b/file\n`;
+      return `commit ${command.args.at(-1)}\n\ndiff --git a/file b/file\n@@ -1 +1 @@\n-old\n+new\n`;
     },
   });
 
@@ -136,6 +218,8 @@ test("getCommitDiffs collects git show output by commit hash", async () => {
   assert.match(diffs.abc123.text, /diff --git/);
   assert.match(diffs.abc123.html, /pretty-file/);
   assert.equal(diffs.abc123.truncated, false);
+  assert.equal(diffs.abc123.insertions, 1);
+  assert.equal(diffs.abc123.deletions, 1);
 });
 
 test("getCheckoutGraphData collects git log data for a checkout", async () => {
@@ -399,16 +483,28 @@ test("buildGraphHtml creates tabbed GitGraph HTML", () => {
   assert.match(html, /data-action="checkout"/);
   assert.match(html, /data-action="rebase"/);
   assert.match(html, /data-action="prune"/);
+  assert.match(html, /class="diff-stats" hidden aria-label=""/);
   assert.match(html, /\.graph svg \{ overflow: visible; \}/);
   assert.match(html, /\.commit-row, \.commit-row \* \{ cursor: pointer; \}/);
   assert.match(html, /\.commit-row\.active \.commit-row-hitbox/);
   assert.match(html, /\.commit-row\.current \.commit-row-hitbox/);
   assert.match(html, /\.context-menu button\[data-action="prune"\]/);
+  assert.match(html, /\.diff-placeholder/);
+  assert.match(html, /\.diff-table \{ border-collapse: collapse/);
+  assert.match(html, /\.diff-line \{ height: 24px/);
+  assert.match(html, /\.diff-line\.delete \.old-line/);
+  assert.match(html, /\.diff-line\.insert \.line-code/);
+  assert.match(html, /\.file-stats/);
+  assert.match(html, /\.diff-stats/);
+  assert.match(html, /\.line-marker/);
+  assert.match(html, /\.line-number/);
   assert.match(html, /const COMMIT_DOT_RADIUS = 10/);
   assert.match(html, /function centerBranchLabelsVertically/);
   assert.match(html, /function decorateCommitRows/);
   assert.match(html, /function showCommitContextMenu/);
   assert.match(html, /function runCommitAction/);
+  assert.match(html, /function setDiffStats/);
+  assert.match(html, /setDiffStats\(stats, result\)/);
   assert.match(html, /function isCurrentCommit/);
   assert.match(html, /const labelTranslate = getTranslate\(labelContainer\)/);
   assert.match(html, /graphStates\[index\]\.selectedHash = commit\.hash/);
@@ -547,6 +643,8 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   const diffResponse = await fetch(new URL("api/graph/0/diff/abc123?token=secret", serverInfo.url));
   const diff = await diffResponse.json();
   assert.match(diff.html, /pretty-file/);
+  assert.equal(diff.insertions, 1);
+  assert.equal(diff.deletions, 1);
 
   const pingResponse = await fetch(new URL("api/ping", serverInfo.url), {
     method: "POST",

@@ -137,6 +137,162 @@ export function splitPrettyDiffFiles(diff) {
   return Object.keys(files).length ? files : null;
 }
 
+function parseDiffHunkHeader(line) {
+  const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    oldLine: Number(match[1]),
+    newLine: Number(match[2]),
+  };
+}
+
+function isOldFileMarker(line) {
+  return /^--- /.test(line);
+}
+
+function isNewFileMarker(line) {
+  return /^\+\+\+ /.test(line);
+}
+
+function isDiffMetadataLine(line) {
+  return (
+    line.startsWith("diff --") ||
+    line.startsWith("index ") ||
+    isOldFileMarker(line) ||
+    isNewFileMarker(line) ||
+    line.startsWith("new file mode ") ||
+    line.startsWith("deleted file mode ") ||
+    line.startsWith("old mode ") ||
+    line.startsWith("new mode ") ||
+    line.startsWith("similarity index ") ||
+    line.startsWith("dissimilarity index ") ||
+    line.startsWith("rename from ") ||
+    line.startsWith("rename to ") ||
+    line.startsWith("copy from ") ||
+    line.startsWith("copy to ")
+  );
+}
+
+function getDiffLineNumbers(line, state) {
+  const hunk = parseDiffHunkHeader(line);
+
+  if (hunk) {
+    state.oldLine = hunk.oldLine;
+    state.newLine = hunk.newLine;
+    return { oldLine: "", newLine: "" };
+  }
+
+  const inHunk = state.oldLine !== null && state.newLine !== null;
+
+  if (!inHunk) {
+    return { oldLine: "", newLine: "" };
+  }
+
+  if (line.startsWith("+")) {
+    return { oldLine: "", newLine: state.newLine++ };
+  }
+
+  if (line.startsWith("-")) {
+    return { oldLine: state.oldLine++, newLine: "" };
+  }
+
+  if (line.startsWith(" ")) {
+    return {
+      oldLine: state.oldLine++,
+      newLine: state.newLine++,
+    };
+  }
+
+  return { oldLine: "", newLine: "" };
+}
+
+function getDiffLineClass(line, state) {
+  const inHunk = state.oldLine !== null && state.newLine !== null;
+
+  if (!inHunk && isDiffMetadataLine(line)) {
+    return "file";
+  }
+
+  if (line.startsWith("@@")) {
+    return "info";
+  }
+
+  if (line.startsWith("+")) {
+    return "insert";
+  }
+
+  if (line.startsWith("-")) {
+    return "delete";
+  }
+
+  if (line.startsWith(" ")) {
+    return "context";
+  }
+
+  return "file";
+}
+
+function shouldRenderDiffLine(line, state) {
+  const inHunk = state.oldLine !== null && state.newLine !== null;
+
+  return inHunk || line.startsWith("@@") || !isDiffMetadataLine(line);
+}
+
+function countDiffChanges(lines) {
+  let inHunk = false;
+
+  return lines.reduce((counts, line) => {
+    if (parseDiffHunkHeader(line)) {
+      inHunk = true;
+    } else if (line.startsWith("+") && (inHunk || !isNewFileMarker(line))) {
+      counts.insertions++;
+    } else if (line.startsWith("-") && (inHunk || !isOldFileMarker(line))) {
+      counts.deletions++;
+    }
+
+    return counts;
+  }, { insertions: 0, deletions: 0 });
+}
+
+function formatChangeCountLabel(insertions, deletions) {
+  const additionLabel = insertions === 1 ? "addition" : "additions";
+  const deletionLabel = deletions === 1 ? "deletion" : "deletions";
+
+  return `${insertions} ${additionLabel} and ${deletions} ${deletionLabel}`;
+}
+
+export function getDiffChangeCounts(diff) {
+  const files = splitPrettyDiffFiles(diff);
+
+  if (!files) {
+    return { insertions: 0, deletions: 0 };
+  }
+
+  return Object.values(files).reduce((totals, lines) => {
+    const { insertions, deletions } = countDiffChanges(lines);
+
+    totals.insertions += insertions;
+    totals.deletions += deletions;
+
+    return totals;
+  }, { insertions: 0, deletions: 0 });
+}
+
+function formatDiffLineContent(line, className) {
+  if (className === "insert" || className === "delete" || className === "context") {
+    const marker = className === "context" ? " " : line.charAt(0);
+    const content = line.slice(1);
+
+    return `<span class="line-marker">${escapeDiffHtml(marker)}</span><span class="line-content">${escapeDiffHtml(content)}</span>`;
+  }
+
+  return `<span class="line-marker"></span><span class="line-content">${escapeDiffHtml(line)}</span>`;
+}
+
 function escapeDiffHtml(value = "") {
   return String(value)
     .replace(/\$/g, "$$$$")
@@ -153,28 +309,41 @@ export function formatPrettyDiffHtml(diff) {
     return "";
   }
 
-  const diffClasses = {
-    d: "file",
-    i: "file",
-    "@": "info",
-    "-": "delete",
-    "+": "insert",
-    " ": "context",
-  };
-
   return Object.entries(files).map(([file, lines]) => {
-    const diffLines = lines.map((line) => {
-      const type = line.charAt(0);
-      const className = diffClasses[type] || "context";
-      return `<pre class="${className}">${escapeDiffHtml(line)}</pre>`;
-    }).join("\n");
+    const { insertions, deletions } = countDiffChanges(lines);
+    const changeCountLabel = formatChangeCountLabel(insertions, deletions);
+    const lineNumberState = { oldLine: null, newLine: null };
+    const diffLines = lines.reduce((rendered, line) => {
+      if (!shouldRenderDiffLine(line, lineNumberState)) {
+        return rendered;
+      }
+
+      const { oldLine, newLine } = getDiffLineNumbers(line, lineNumberState);
+      const className = getDiffLineClass(line, lineNumberState);
+
+      rendered.push(`<tr class="diff-line ${className}">
+          <td class="line-number old-line">${oldLine}</td>
+          <td class="line-number new-line">${newLine}</td>
+          <td class="line-code">${formatDiffLineContent(line, className)}</td>
+        </tr>`);
+      return rendered;
+    }, []).join("\n");
 
     return `<section class="pretty-file">
       <h3>
-        <span class="title">${escapeDiffHtml(file)}</span>
-        <button class="copy-path" type="button" data-path="${escapeHtml(file)}">copy path</button>
+        <span class="file-heading">
+          <span class="file-icon" aria-hidden="true"></span>
+          <span class="title">${escapeDiffHtml(file)}</span>
+        </span>
+        <span class="file-actions">
+          <span class="file-stats" aria-label="${changeCountLabel}">
+            <span class="stat-additions">+${insertions}</span>
+            <span class="stat-deletions">-${deletions}</span>
+          </span>
+          <button class="copy-path" type="button" data-path="${escapeHtml(file)}">Copy path</button>
+        </span>
       </h3>
-      <div class="file-diff">${diffLines}</div>
+      <div class="file-diff"><table class="diff-table"><tbody>${diffLines}</tbody></table></div>
     </section>`;
   }).join("\n");
 }
@@ -182,12 +351,14 @@ export function formatPrettyDiffHtml(diff) {
 export function truncateDiff(diff, maxDiffBytes = DEFAULT_MAX_DIFF_BYTES) {
   const maxBytes = Number(maxDiffBytes);
   const fullHtml = formatPrettyDiffHtml(diff);
+  const changeCounts = getDiffChangeCounts(diff);
 
   if (!maxBytes || maxBytes < 1 || Buffer.byteLength(diff, "utf8") <= maxBytes) {
     return {
       text: diff,
       html: fullHtml,
       truncated: false,
+      ...changeCounts,
     };
   }
 
@@ -197,6 +368,7 @@ export function truncateDiff(diff, maxDiffBytes = DEFAULT_MAX_DIFF_BYTES) {
     text: truncatedText,
     html: `${formatPrettyDiffHtml(truncatedText)}<pre class="info">[diff truncated at ${maxBytes} bytes]</pre>`,
     truncated: true,
+    ...changeCounts,
   };
 }
 
@@ -223,6 +395,8 @@ export async function getCommitDiffs({
       diffs[commit.hash] = {
         text: "",
         truncated: false,
+        insertions: 0,
+        deletions: 0,
         error: String(error?.message || error),
       };
     }
@@ -593,10 +767,14 @@ export function buildGraphHtml({
           <div class="diff-header">
             <strong class="diff-title">No commit selected</strong>
             <span class="diff-meta"></span>
+            <span class="diff-stats" hidden aria-label="">
+              <span class="stat-additions"></span>
+              <span class="stat-deletions"></span>
+            </span>
             <button class="checkout-commit" type="button" hidden>Checkout</button>
             <span class="checkout-status"></span>
           </div>
-          <pre class="diff-body">Select a commit in the graph.</pre>
+          <div class="diff-body"><pre class="diff-placeholder">Select a commit in the graph.</pre></div>
         </aside>
       </div>
     </section>`
@@ -608,7 +786,25 @@ export function buildGraphHtml({
   <meta charset="utf-8">
   <title>TB Tools Branch Graph</title>
   <style>
-    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --diff-border: #d0d7de;
+      --diff-header-bg: #f6f8fa;
+      --diff-bg: #ffffff;
+      --diff-code: #24292f;
+      --diff-muted: #57606a;
+      --diff-gutter-bg: #f6f8fa;
+      --diff-gutter-border: #d8dee4;
+      --diff-file-line-bg: #f6f8fa;
+      --diff-hunk-bg: #ddf4ff;
+      --diff-hunk-code: #0969da;
+      --diff-delete-bg: #ffebe9;
+      --diff-delete-gutter: #ffd7d5;
+      --diff-insert-bg: #e6ffec;
+      --diff-insert-gutter: #ccffd8;
+      --diff-hover-bg: #f6f8fa;
+    }
     body { margin: 0; background: #f6f7f9; color: #20242a; }
     header { padding: 12px 16px 8px; border-bottom: 1px solid #d6dae1; background: #fff; position: sticky; top: 0; z-index: 1; }
     h1 { font-size: 18px; margin: 0 0 8px; }
@@ -627,12 +823,14 @@ export function buildGraphHtml({
     .diff-header { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; padding: 8px 10px; border-bottom: 1px solid #d6dae1; }
     .diff-title { font-size: 13px; }
     .diff-meta { color: #59616d; font-size: 12px; }
+    .diff-stats { display: flex; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; gap: 6px; white-space: nowrap; }
+    .diff-stats[hidden] { display: none; }
     .checkout-commit, .load-more { border: 1px solid #1f5f9f; border-radius: 4px; background: #1f5f9f; color: #fff; cursor: pointer; font-size: 12px; padding: 4px 8px; }
     .checkout-commit:disabled, .load-more:disabled { cursor: wait; opacity: 0.65; }
     .checkout-status, .graph-status { color: #59616d; font-size: 12px; }
     .checkout-status.error, .graph-status.error { color: #9b1c1c; }
-    .diff-body, .error { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.38; white-space: pre-wrap; }
     .diff-body { margin: 0; padding: 10px; tab-size: 2; }
+    .diff-placeholder, .error { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.38; margin: 0; white-space: pre-wrap; }
     .load-sentinel { block-size: 1px; inline-size: 100%; }
     .graph svg { overflow: visible; }
     .commit-row, .commit-row * { cursor: pointer; }
@@ -650,35 +848,79 @@ export function buildGraphHtml({
     .context-menu button { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: pointer; display: block; font: inherit; padding: 7px 8px; text-align: left; width: 100%; }
     .context-menu button:hover, .context-menu button:focus { background: rgba(31, 95, 159, 0.1); outline: none; }
     .context-menu button[data-action="prune"] { color: #9b1c1c; }
-    .pretty-file { margin: 0 0 10px; }
-    .pretty-file h3 { align-items: center; background: linear-gradient(#fafafa, #eaeaea); border: 1px solid #d8d8d8; border-bottom: 0; color: #555; display: flex; font: 13px sans-serif; justify-content: space-between; margin: 0; overflow: hidden; padding: 7px 6px; text-shadow: 0 1px 0 white; }
-    .pretty-file .title { margin-left: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .copy-path { border: 1px solid #c4c8d0; border-radius: 4px; background: #fff; color: #20242a; cursor: pointer; font-size: 12px; padding: 4px 8px; }
-    .file-diff { border: 1px solid #d8d8d8; overflow: auto; padding: 0.25em 0; }
-    .file-diff pre { margin: 0; text-indent: 0.5em; }
-    .file { color: #8b949e; }
-    .delete { background-color: #fdd; }
-    .insert { background-color: #dfd; }
-    .info { color: #a0b; }
+    .pretty-file { background: var(--diff-bg); border: 1px solid var(--diff-border); border-radius: 6px; margin: 0 0 12px; overflow: hidden; }
+    .pretty-file h3 { align-items: center; background: var(--diff-header-bg); border-bottom: 1px solid var(--diff-border); color: var(--diff-code); display: flex; font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; gap: 12px; justify-content: space-between; margin: 0; min-height: 32px; overflow: hidden; padding: 8px 10px; }
+    .file-heading { align-items: center; display: flex; gap: 8px; min-width: 0; }
+    .file-icon { border: 1px solid var(--diff-muted); border-radius: 2px; box-sizing: border-box; flex: 0 0 auto; height: 14px; opacity: 0.72; position: relative; width: 11px; }
+    .file-icon::after { border-top: 1px solid var(--diff-muted); content: ""; left: 2px; position: absolute; right: 2px; top: 4px; }
+    .pretty-file .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-actions { align-items: center; display: flex; flex: 0 0 auto; gap: 8px; }
+    .file-stats { display: flex; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; gap: 6px; white-space: nowrap; }
+    .stat-additions { color: #1a7f37; }
+    .stat-deletions { color: #cf222e; }
+    .copy-path { background: var(--diff-header-bg); border: 1px solid var(--diff-border); border-radius: 6px; color: var(--diff-code); cursor: pointer; font-size: 12px; padding: 4px 8px; }
+    .copy-path:hover, .copy-path:focus { background: var(--diff-hover-bg); outline: none; }
+    .file-diff { background: var(--diff-bg); overflow: auto; }
+    .diff-table { border-collapse: collapse; border-spacing: 0; table-layout: auto; width: max-content; min-width: 100%; }
+    .diff-line { height: 24px; }
+    .line-number { background: var(--diff-gutter-bg); box-sizing: border-box; color: var(--diff-muted); font: 12px/24px ui-monospace, SFMono-Regular, Menlo, monospace; min-width: 44px; padding: 0 10px; text-align: right; user-select: none; vertical-align: top; white-space: nowrap; width: 44px; }
+    .new-line { border-right: 1px solid var(--diff-gutter-border); }
+    .line-code { background: var(--diff-bg); color: var(--diff-code); font: 14px/24px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 24px; vertical-align: top; white-space: pre; width: 100%; }
+    .line-marker { display: inline-block; text-align: center; user-select: none; width: 1ch; }
+    .line-content { display: inline; }
+    .diff-line.file .line-number, .diff-line.file .line-code { background: var(--diff-file-line-bg); color: var(--diff-muted); }
+    .diff-line.info .line-number, .diff-line.info .line-code { background: var(--diff-hunk-bg); color: var(--diff-hunk-code); }
+    .diff-line.delete .line-marker { color: #cf222e; }
+    .diff-line.delete .old-line { background: var(--diff-delete-gutter); }
+    .diff-line.delete .new-line, .diff-line.delete .line-code { background: var(--diff-delete-bg); }
+    .diff-line.insert .line-marker { color: #1a7f37; }
+    .diff-line.insert .old-line, .diff-line.insert .new-line { background: var(--diff-insert-gutter); }
+    .diff-line.insert .line-code { background: var(--diff-insert-bg); }
+    .diff-line.context:hover .line-number, .diff-line.context:hover .line-code { background: var(--diff-hover-bg); }
+    .diff-line.delete:hover .old-line { background: #ffc7c2; }
+    .diff-line.delete:hover .new-line, .diff-line.delete:hover .line-code { background: #ffdfdc; }
+    .diff-line.insert:hover .old-line, .diff-line.insert:hover .new-line { background: #bef5cb; }
+    .diff-line.insert:hover .line-code { background: #dafbe1; }
+    .file, .info, .delete, .insert { color: inherit; }
     .error { color: #9b1c1c; }
     @media (max-width: 980px) {
       .workspace { grid-template-columns: 1fr; }
       .diff-viewer { position: static; max-height: none; }
     }
     @media (prefers-color-scheme: dark) {
+      :root {
+        --diff-border: #30363d;
+        --diff-header-bg: #161b22;
+        --diff-bg: #0d1117;
+        --diff-code: #e6edf3;
+        --diff-muted: #7d8590;
+        --diff-gutter-bg: #161b22;
+        --diff-gutter-border: #30363d;
+        --diff-file-line-bg: #161b22;
+        --diff-hunk-bg: #112d4e;
+        --diff-hunk-code: #79c0ff;
+        --diff-delete-bg: #490202;
+        --diff-delete-gutter: #67060c;
+        --diff-insert-bg: #04260f;
+        --diff-insert-gutter: #033a16;
+        --diff-hover-bg: #161b22;
+      }
       body { background: #111418; color: #f1f3f6; }
       header, .summary, .graph, .diff-viewer, .tab { background: #191d23; color: #f1f3f6; border-color: #323844; }
       .summary span, .diff-meta { color: #acb4c0; }
       .diff-header { border-color: #323844; }
-      .pretty-file h3 { background: linear-gradient(#252b35, #1f242d); border-color: #323844; color: #d7dce4; text-shadow: none; }
-      .copy-path { background: #111418; border-color: #424b59; color: #f1f3f6; }
+      .stat-additions { color: #3fb950; }
+      .stat-deletions { color: #f85149; }
+      .copy-path { color: var(--diff-code); }
+      .diff-line.delete .line-marker { color: #f85149; }
+      .diff-line.insert .line-marker { color: #3fb950; }
       .checkout-commit, .load-more { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
       .checkout-status, .graph-status { color: #acb4c0; }
       .checkout-status.error, .graph-status.error { color: #ff9f9f; }
-      .file-diff { border-color: #323844; }
-      .delete { background-color: #5a2026; }
-      .insert { background-color: #1f4b2b; }
-      .info { color: #d19cff; }
+      .diff-line.delete:hover .old-line { background: #78191e; }
+      .diff-line.delete:hover .new-line, .diff-line.delete:hover .line-code { background: #5c0b0f; }
+      .diff-line.insert:hover .old-line, .diff-line.insert:hover .new-line { background: #0f5323; }
+      .diff-line.insert:hover .line-code { background: #06361a; }
       .tab.active { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
       .commit-row.hover .commit-row-hitbox, .commit-row:focus-visible .commit-row-hitbox { fill: rgba(75, 158, 255, 0.12); }
       .commit-row.active .commit-row-hitbox { fill: rgba(75, 158, 255, 0.2); stroke: rgba(75, 158, 255, 0.42); }
@@ -1112,10 +1354,47 @@ export function buildGraphHtml({
       }
     }
 
+    function setDiffText(body, text) {
+      const placeholder = document.createElement("pre");
+      placeholder.className = "diff-placeholder";
+      placeholder.textContent = text;
+      body.replaceChildren(placeholder);
+    }
+
+    function setDiffHtml(body, html) {
+      body.innerHTML = html;
+    }
+
+    function formatDiffChangeCountLabel(insertions, deletions) {
+      const additionLabel = insertions === 1 ? "addition" : "additions";
+      const deletionLabel = deletions === 1 ? "deletion" : "deletions";
+
+      return insertions + " " + additionLabel + " and " + deletions + " " + deletionLabel;
+    }
+
+    function setDiffStats(stats, diff) {
+      const insertions = Number(diff && diff.insertions);
+      const deletions = Number(diff && diff.deletions);
+
+      if (!Number.isFinite(insertions) || !Number.isFinite(deletions)) {
+        stats.hidden = true;
+        stats.setAttribute("aria-label", "");
+        stats.querySelector(".stat-additions").textContent = "";
+        stats.querySelector(".stat-deletions").textContent = "";
+        return;
+      }
+
+      stats.hidden = false;
+      stats.setAttribute("aria-label", formatDiffChangeCountLabel(insertions, deletions));
+      stats.querySelector(".stat-additions").textContent = "+" + insertions;
+      stats.querySelector(".stat-deletions").textContent = "-" + deletions;
+    }
+
     async function showDiff(graph, index, commit) {
       const viewer = document.getElementById("diff-" + index);
       const title = viewer.querySelector(".diff-title");
       const meta = viewer.querySelector(".diff-meta");
+      const stats = viewer.querySelector(".diff-stats");
       const body = viewer.querySelector(".diff-body");
       const checkoutButton = viewer.querySelector(".checkout-commit");
       const checkoutStatus = viewer.querySelector(".checkout-status");
@@ -1133,9 +1412,10 @@ export function buildGraphHtml({
       checkoutButton.dataset.label = graph.label;
       checkoutStatus.classList.remove("error");
       checkoutStatus.textContent = "";
+      setDiffStats(stats, null);
 
       if (INTERACTIVE.enabled) {
-        body.textContent = "Loading diff...";
+        setDiffText(body, "Loading diff...");
 
         try {
           const response = await fetch(
@@ -1148,34 +1428,37 @@ export function buildGraphHtml({
             throw new Error(result.error || response.statusText);
           }
 
+          setDiffStats(stats, result);
           if (result.html) {
-            body.innerHTML = result.html;
+            setDiffHtml(body, result.html);
           } else {
-            body.textContent = result.text || "No diff for this commit.";
+            setDiffText(body, result.text || "No diff for this commit.");
           }
         } catch (error) {
-          body.textContent = error && error.message ? error.message : String(error);
+          setDiffStats(stats, null);
+          setDiffText(body, error && error.message ? error.message : String(error));
         }
 
         return;
       }
 
       if (!diff) {
-        body.textContent = "Diff data was not embedded for this commit.";
+        setDiffText(body, "Diff data was not embedded for this commit.");
         return;
       }
 
       if (diff.error) {
-        body.textContent = diff.error;
+        setDiffText(body, diff.error);
         return;
       }
 
+      setDiffStats(stats, diff);
       if (diff.html) {
-        body.innerHTML = diff.html;
+        setDiffHtml(body, diff.html);
         return;
       }
 
-      body.textContent = diff.text || "No diff for this commit.";
+      setDiffText(body, diff.text || "No diff for this commit.");
     }
 
     function getCommitActionDetails(action, label, hash) {
