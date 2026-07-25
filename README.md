@@ -41,6 +41,7 @@ This file currently contains credentials for phabricator and bugzilla, plus opti
 - [lint](#lint)
 - [open](#open)
 - [patch](#patch)
+- [preflight](#preflight)
 - [rebase](#rebase)
 - [run](#run)
 - [rust-check](#rust-check)
@@ -283,6 +284,30 @@ tb patch
 |--checkpoint||Create a rollback checkpoint before applying the patch|true|`tb patch --checkpoint=false`
 |--rollback||Prompt to roll back if patching fails|true|`tb patch --rollback=false`
 |--skipDependencies||Pass --skip-dependencies to moz-phab patch|true|`tb patch --skipDependencies=false`
+
+<br/><br/>
+### preflight
+---
+Runs a submit-readiness workflow: status, lint, tests, and optional diff or try.
+```bash
+tb preflight
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--base||Base ref used while showing status|origin/main|`tb preflight --base=origin/main`
+|--skipLint||Skip lint|false|`tb preflight --skipLint`
+|--skipTest||Skip tests|false|`tb preflight --skipTest`
+|--diff||Open a pretty diff after lint and tests|false|`tb preflight --diff`
+|--try||Push a mach try run after lint and tests|false|`tb preflight --try`
+|--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb preflight --flavor=all`
+|--pattern|-p|Test path or glob pattern to pass to `mach test`||`tb preflight --pattern=<value>`
+|--selector|-s|mach try selector `auto\|fuzzy\|empty\|chooser`|auto|`tb preflight --selector=auto`
+|--query|-q|fuzzy selector query||`tb preflight --query=<value>`
+|--tasks-regex|-t|auto selector task regex||`tb preflight --tasks-regex=<value>`
+|--preset||mach try preset to load||`tb preflight --preset=<value>`
+|--artifact||force artifact builds where possible|true|`tb preflight --artifact=false`
+|--comment|-c|Post try link as comment to phab revision|false|`tb preflight --comment`
 
 <br/><br/>
 ### rebase

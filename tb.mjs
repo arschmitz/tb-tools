@@ -18,6 +18,7 @@ import { comment } from './lib/phab.mjs';
 import { DEFAULT_LANDO_REPO } from './lib/lando.mjs';
 import cleanupCommand from './commands/cleanup.mjs';
 import openCommand from './commands/open.mjs';
+import preflightCommand from './commands/preflight.mjs';
 import {
   checkDir,
   mapBooleanOptions,
@@ -235,6 +236,29 @@ const commands = {
     async run () {
       const options = mapBooleanOptions(args(commands.patch.options, { argv }));
       await patchCommand(options);
+    },
+  },
+  preflight: {
+    description: "Runs a submit-readiness workflow: status, lint, tests, and optional diff or try.",
+    header: "Preflight Options",
+    options: [
+      { name: "base", description: "Base ref used while showing status", defaultValue: "origin/main" },
+      { name: "skipLint", description: "Skip lint", defaultValue: "false" },
+      { name: "skipTest", description: "Skip tests", defaultValue: "false" },
+      { name: "diff", description: "Open a pretty diff after lint and tests", defaultValue: "false" },
+      { name: "try", description: "Push a mach try run after lint and tests", defaultValue: "false" },
+      { name: 'flavor', alias: 'f', description: 'Flavor of tests to run `browser|unit|all`', defaultValue: 'all' },
+      { name: 'pattern', alias: 'p', description: 'Test path or glob pattern to pass to `mach test`', defaultOption: true, multiple: true },
+      { name: 'selector', alias: 's', description: 'mach try selector `auto|fuzzy|empty|chooser`', defaultValue: "auto" },
+      { name: 'query', alias: 'q', description: 'fuzzy selector query' },
+      { name: 'tasks-regex', alias: 't', description: 'auto selector task regex' },
+      { name: 'preset', description: 'mach try preset to load' },
+      { name: 'artifact', description: 'force artifact builds where possible', defaultValue: 'true' },
+      { name: 'comment', alias: 'c', description: 'Post try link as comment to phab revision', defaultValue: "false" },
+    ],
+    async run () {
+      const options = mapBooleanOptions(args(commands.preflight.options, { argv }));
+      await preflightCommand(options);
     },
   },
   readme: {
