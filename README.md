@@ -31,6 +31,7 @@ This file currently contains credentials for phabricator and bugzilla, plus opti
 - [comment](#comment)
 - [commit](#commit)
 - [create](#create)
+- [cleanup](#cleanup)
 - [diff](#diff)
 - [build-rebase](#build-rebase)
 - [build-update](#build-update)
@@ -118,6 +119,23 @@ tb create
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--update|-u|Update code before creating branch|true|`tb create --update=false`
+
+<br/><br/>
+### cleanup
+---
+Lists and optionally deletes tb-tools checkpoint refs, merged Bug branches, and tb-tools stashes.
+```bash
+tb cleanup
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--base||Base ref used to find merged Bug branches|origin/main|`tb cleanup --base=origin/main`
+|--refs||Include refs/tb-tools checkpoint refs|true|`tb cleanup --refs=false`
+|--branches||Include merged Bug-N branches|true|`tb cleanup --branches=false`
+|--stashes||Include stashes created by tb-tools|true|`tb cleanup --stashes=false`
+|--dryRun||Only print cleanup candidates|false|`tb cleanup --dryRun`
+|--yes|-y|Delete cleanup candidates without prompting|false|`tb cleanup --yes`
 
 <br/><br/>
 ### diff

@@ -16,6 +16,7 @@ import update from './commands/update.mjs';
 import usage from 'command-line-usage';
 import { comment } from './lib/phab.mjs';
 import { DEFAULT_LANDO_REPO } from './lib/lando.mjs';
+import cleanupCommand from './commands/cleanup.mjs';
 import {
   checkDir,
   mapBooleanOptions,
@@ -96,6 +97,22 @@ const commands = {
     options: [
       { name: "update", alias: "u", description: "Update code before creating branch", defaultValue: "true" },
     ]
+  },
+  cleanup: {
+    description: "Lists and optionally deletes tb-tools checkpoint refs, merged Bug branches, and tb-tools stashes.",
+    header: "Cleanup Options",
+    options: [
+      { name: "base", description: "Base ref used to find merged Bug branches", defaultValue: "origin/main" },
+      { name: "refs", description: "Include refs/tb-tools checkpoint refs", defaultValue: "true" },
+      { name: "branches", description: "Include merged Bug-N branches", defaultValue: "true" },
+      { name: "stashes", description: "Include stashes created by tb-tools", defaultValue: "true" },
+      { name: "dryRun", description: "Only print cleanup candidates", defaultValue: "false" },
+      { name: "yes", alias: "y", description: "Delete cleanup candidates without prompting", defaultValue: "false" },
+    ],
+    async run () {
+      const options = mapBooleanOptions(args(commands.cleanup.options, { argv }));
+      await cleanupCommand(options);
+    },
   },
   diff: {
     description: "Opens a pretty HTML view of `git diff` output, or publishes it as a gist.",
