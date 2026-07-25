@@ -23,6 +23,7 @@ import {
 import { amend, commit, handleConflict } from './lib/git.mjs';
 import rustCheck from './commands/rust-check.mjs';
 import create from './commands/create.mjs';
+import diffCommand from './commands/diff.mjs';
 import fs from "fs";
 import path from "path";
 
@@ -92,6 +93,17 @@ const commands = {
     header: "Create Options",
     options: [
       { name: "update", alias: "u", description: "Update code before creating branch", defaultValue: "true" },
+    ]
+  },
+  diff: {
+    description: "Opens a pretty HTML view of `git diff` output, or publishes it as a gist.",
+    header: "Diff Options",
+    run: async () => {
+      await diffCommand(argv);
+    },
+    options: [
+      { name: "gist", alias: "g", description: "Publish the diff to a GitHub gist instead of opening a local HTML view", defaultValue: "false" },
+      { name: "public", description: "Publish a public gist. Implies --gist", defaultValue: "false" },
     ]
   },
   "build-rebase": {

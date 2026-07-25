@@ -31,6 +31,7 @@ This file currently contains credentials for phabricator and bugzilla, plus opti
 - [comment](#comment)
 - [commit](#commit)
 - [create](#create)
+- [diff](#diff)
 - [build-rebase](#build-rebase)
 - [build-update](#build-update)
 - [bump](#bump)
@@ -115,6 +116,19 @@ tb create
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--update|-u|Update code before creating branch|true|`tb create --update=false`
+
+<br/><br/>
+### diff
+---
+Opens a pretty HTML view of `git diff` output, or publishes it as a gist.
+```bash
+tb diff
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--gist|-g|Publish the diff to a GitHub gist instead of opening a local HTML view|false|`tb diff --gist`
+|--public||Publish a public gist. Implies --gist|false|`tb diff --public`
 
 <br/><br/>
 ### build-rebase

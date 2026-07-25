@@ -25,6 +25,7 @@
     "ora": "^8.2.0",
     "ospath": "^1.2.2",
     "prettier": "^3.5.3",
+    "pretty-diff": "^1.1.0",
     "readline-sync": "^1.4.10"
   },
   "devDependencies": {
