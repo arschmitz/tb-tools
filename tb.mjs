@@ -118,7 +118,7 @@ const commands = {
     },
   },
   diff: {
-    description: "Opens a pretty HTML view of `git diff` output, or publishes it as a gist.",
+    description: "Opens a GitHub-style, syntax-highlighted HTML view of `git diff` output, or publishes it as a gist.",
     header: "Diff Options",
     run: async () => {
       await diffCommand(argv);

@@ -299,7 +299,7 @@ function countDiffChanges(lines) {
   }, { insertions: 0, deletions: 0 });
 }
 
-function formatChangeCountLabel(insertions, deletions) {
+export function formatChangeCountLabel(insertions, deletions) {
   const additionLabel = insertions === 1 ? "addition" : "additions";
   const deletionLabel = deletions === 1 ? "deletion" : "deletions";
 
@@ -822,6 +822,10 @@ function safeScriptJson(value) {
   return JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
 }
 
+export function getGraphHtmlStyles() {
+  return buildGraphHtml({ graphs: [], gitgraphScript: "" }).match(/<style>([\s\S]*?)<\/style>/)?.[1] || "";
+}
+
 export function buildGraphHtml({
   graphs,
   gitgraphScript,
@@ -838,8 +842,20 @@ export function buildGraphHtml({
         <span>${escapeHtml(graph.branch || "")}</span>
         <span>${graph.commitCount} commit(s)</span>
       </div>
-      <div class="workspace">
+      <div class="workspace" data-index="${index}">
         <div class="graph" id="graph-${index}"></div>
+        <div
+          class="pane-resizer"
+          role="separator"
+          aria-label="Resize graph and diff panes"
+          aria-orientation="vertical"
+          aria-controls="graph-${index} diff-${index}"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="54"
+          tabindex="0"
+          data-index="${index}"
+        ></div>
         <aside class="diff-viewer" id="diff-${index}">
           <div class="diff-header">
             <strong class="diff-title">No commit selected</strong>
@@ -893,10 +909,15 @@ export function buildGraphHtml({
     .panel.active { display: block; }
     .summary { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; padding: 8px 10px; margin-bottom: 10px; background: #fff; border: 1px solid #d6dae1; border-radius: 8px; }
     .summary span { color: #59616d; font-size: 12px; }
-    .workspace { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(400px, 46vw); gap: 10px; align-items: start; }
+    .workspace { --graph-pane-width: 54%; display: grid; grid-template-columns: minmax(320px, var(--graph-pane-width)) 12px minmax(320px, 1fr); align-items: start; }
     .graph, .diff-viewer { background: #fff; border: 1px solid #d6dae1; border-radius: 8px; overflow: auto; }
     .graph { padding: 10px; min-height: 220px; }
     .diff-viewer { max-height: calc(100vh - 112px); position: sticky; top: 78px; }
+    .pane-resizer { align-items: center; align-self: stretch; cursor: col-resize; display: flex; justify-content: center; min-height: 220px; position: sticky; top: 78px; touch-action: none; user-select: none; height: calc(100vh - 112px); }
+    .pane-resizer::before { background: #c7ced9; border-radius: 999px; content: ""; display: block; height: 100%; max-height: calc(100vh - 132px); min-height: 140px; transition: background 120ms ease, box-shadow 120ms ease, width 120ms ease; width: 4px; }
+    .pane-resizer:hover::before, .pane-resizer:focus-visible::before, .pane-resizer.dragging::before { background: #1f5f9f; box-shadow: 0 0 0 3px rgba(31, 95, 159, 0.14); width: 5px; }
+    .pane-resizer:focus-visible { outline: none; }
+    body.is-resizing-panes { cursor: col-resize; user-select: none; }
     .diff-header { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; padding: 8px 10px; border-bottom: 1px solid #d6dae1; }
     .diff-title { font-size: 13px; }
     .diff-meta { color: #59616d; font-size: 12px; }
@@ -972,6 +993,7 @@ export function buildGraphHtml({
     .error { color: #9b1c1c; }
     @media (max-width: 980px) {
       .workspace { grid-template-columns: 1fr; }
+      .pane-resizer { display: none; }
       .diff-viewer { position: static; max-height: none; }
     }
     @media (prefers-color-scheme: dark) {
@@ -995,6 +1017,8 @@ export function buildGraphHtml({
       body { background: #111418; color: #f1f3f6; }
       header, .summary, .graph, .diff-viewer, .tab { background: #191d23; color: #f1f3f6; border-color: #323844; }
       .summary span, .diff-meta { color: #acb4c0; }
+      .pane-resizer::before { background: #424b59; }
+      .pane-resizer:hover::before, .pane-resizer:focus-visible::before, .pane-resizer.dragging::before { background: #4b9eff; box-shadow: 0 0 0 3px rgba(75, 158, 255, 0.18); }
       .diff-header { border-color: #323844; }
       .stat-additions { color: #3fb950; }
       .stat-deletions { color: #f85149; }
@@ -1056,6 +1080,9 @@ export function buildGraphHtml({
     const COMMIT_DOT_RADIUS = 10;
     const COMMIT_ROW_HEIGHT = 28;
     const COMMIT_ROW_HORIZONTAL_INSET = 4;
+    const PANE_MIN_WIDTH = 320;
+    const PANE_RESIZE_KEY_STEP = 32;
+    const PANE_WIDTH_STORAGE_PREFIX = "tb-tools:branch-graph:pane-width:";
 
     const graphStates = GRAPHS.map((graph) => ({
       graph,
@@ -1073,6 +1100,7 @@ export function buildGraphHtml({
     }));
     const contextMenu = document.getElementById("commit-context-menu");
     let contextMenuState = null;
+    const pendingPaneEnhancements = new Set();
 
     function showError(container, message) {
       const error = document.createElement("pre");
@@ -1092,6 +1120,169 @@ export function buildGraphHtml({
 
     function getGraphContainer(index) {
       return document.getElementById("graph-" + index);
+    }
+
+    function getWorkspace(index) {
+      return document.querySelector('.workspace[data-index="' + index + '"]');
+    }
+
+    function getPaneStorageKey(index) {
+      const graph = graphStates[index].graph;
+
+      return PANE_WIDTH_STORAGE_PREFIX + graph.label + ":" + graph.path;
+    }
+
+    function getPaneWidthLimits(workspace) {
+      const resizer = workspace.querySelector(".pane-resizer");
+      const totalWidth = Math.max(
+        0,
+        workspace.getBoundingClientRect().width - (resizer ? resizer.getBoundingClientRect().width : 0)
+      );
+      const minWidth = Math.min(PANE_MIN_WIDTH, Math.floor(totalWidth / 2));
+
+      return {
+        min: minWidth,
+        max: Math.max(minWidth, totalWidth - minWidth),
+        total: totalWidth,
+      };
+    }
+
+    function updatePaneResizerValue(index, width, totalWidth) {
+      const resizer = getWorkspace(index)?.querySelector(".pane-resizer");
+
+      if (!resizer || !totalWidth) {
+        return;
+      }
+
+      const percent = Math.round((width / totalWidth) * 100);
+      resizer.setAttribute("aria-valuenow", String(percent));
+      resizer.setAttribute("aria-valuetext", percent + "% graph pane width");
+    }
+
+    function schedulePaneEnhancement(index) {
+      if (pendingPaneEnhancements.has(index)) {
+        return;
+      }
+
+      pendingPaneEnhancements.add(index);
+      window.requestAnimationFrame(() => {
+        pendingPaneEnhancements.delete(index);
+        enhanceGraphRows(index);
+      });
+    }
+
+    function setGraphPaneWidth(index, width, { persist = true } = {}) {
+      const workspace = getWorkspace(index);
+
+      if (!workspace || window.matchMedia("(max-width: 980px)").matches) {
+        return;
+      }
+
+      const limits = getPaneWidthLimits(workspace);
+      const clampedWidth = Math.min(limits.max, Math.max(limits.min, width));
+
+      workspace.style.setProperty("--graph-pane-width", clampedWidth + "px");
+      updatePaneResizerValue(index, clampedWidth, limits.total);
+      schedulePaneEnhancement(index);
+
+      if (!persist) {
+        return;
+      }
+
+      try {
+        localStorage.setItem(getPaneStorageKey(index), String(Math.round(clampedWidth)));
+      } catch {
+        // Private browsing or file restrictions can make storage unavailable.
+      }
+    }
+
+    function restoreGraphPaneWidth(index) {
+      const workspace = getWorkspace(index);
+
+      if (!workspace || window.matchMedia("(max-width: 980px)").matches) {
+        return;
+      }
+
+      try {
+        const storedWidth = Number(localStorage.getItem(getPaneStorageKey(index)));
+
+        if (Number.isFinite(storedWidth) && storedWidth > 0) {
+          setGraphPaneWidth(index, storedWidth, { persist: false });
+          return;
+        }
+      } catch {
+        // Keep the default CSS split if storage is unavailable.
+      }
+
+      const graphPane = workspace.querySelector(".graph");
+      const limits = getPaneWidthLimits(workspace);
+
+      updatePaneResizerValue(index, graphPane.getBoundingClientRect().width, limits.total);
+    }
+
+    function startPaneResize(event) {
+      if (event.button !== 0 || window.matchMedia("(max-width: 980px)").matches) {
+        return;
+      }
+
+      event.preventDefault();
+
+      const resizer = event.currentTarget;
+      const index = Number(resizer.dataset.index);
+      const graphPane = getGraphContainer(index);
+      const startX = event.clientX;
+      const startWidth = graphPane.getBoundingClientRect().width;
+      const pointerId = event.pointerId;
+
+      resizer.classList.add("dragging");
+      document.body.classList.add("is-resizing-panes");
+      resizer.setPointerCapture(pointerId);
+
+      const handlePointerMove = (moveEvent) => {
+        setGraphPaneWidth(index, startWidth + moveEvent.clientX - startX);
+      };
+      const stopResize = () => {
+        resizer.classList.remove("dragging");
+        document.body.classList.remove("is-resizing-panes");
+        resizer.removeEventListener("pointermove", handlePointerMove);
+        resizer.removeEventListener("pointerup", stopResize);
+        resizer.removeEventListener("pointercancel", stopResize);
+
+        if (resizer.hasPointerCapture(pointerId)) {
+          resizer.releasePointerCapture(pointerId);
+        }
+      };
+
+      resizer.addEventListener("pointermove", handlePointerMove);
+      resizer.addEventListener("pointerup", stopResize);
+      resizer.addEventListener("pointercancel", stopResize);
+    }
+
+    function resizePaneFromKeyboard(event) {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        return;
+      }
+
+      const index = Number(event.currentTarget.dataset.index);
+      const workspace = getWorkspace(index);
+
+      if (!workspace || window.matchMedia("(max-width: 980px)").matches) {
+        return;
+      }
+
+      event.preventDefault();
+
+      const limits = getPaneWidthLimits(workspace);
+      const currentWidth = getGraphContainer(index).getBoundingClientRect().width;
+      const step = event.shiftKey ? PANE_RESIZE_KEY_STEP * 4 : PANE_RESIZE_KEY_STEP;
+
+      if (event.key === "Home") {
+        setGraphPaneWidth(index, limits.min);
+      } else if (event.key === "End") {
+        setGraphPaneWidth(index, limits.max);
+      } else {
+        setGraphPaneWidth(index, currentWidth + (event.key === "ArrowRight" ? step : -step));
+      }
     }
 
     function getTranslate(node) {
@@ -1780,14 +1971,28 @@ export function buildGraphHtml({
       document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
       document.querySelector('.tab[data-index="' + index + '"]').classList.add("active");
       document.querySelector('.panel[data-index="' + index + '"]').classList.add("active");
+      restoreGraphPaneWidth(index);
       renderGraph(index);
+      scheduleGraphEnhancements(index);
     }
 
     document.querySelectorAll(".tab").forEach((tab) => {
       tab.addEventListener("click", () => showTab(Number(tab.dataset.index)));
     });
 
+    document.querySelectorAll(".pane-resizer").forEach((resizer) => {
+      resizer.addEventListener("pointerdown", startPaneResize);
+      resizer.addEventListener("keydown", resizePaneFromKeyboard);
+    });
+
     window.addEventListener("scroll", trackScrollDirection, { passive: true });
+    window.addEventListener("resize", () => {
+      const activePanel = document.querySelector(".panel.active");
+
+      if (activePanel) {
+        restoreGraphPaneWidth(Number(activePanel.dataset.index));
+      }
+    }, { passive: true });
 
     if (INTERACTIVE.enabled) {
       function sendCloseSignal() {
@@ -1822,6 +2027,7 @@ export function buildGraphHtml({
       window.addEventListener("beforeunload", sendCloseSignal, { once: true });
     }
 
+    restoreGraphPaneWidth(0);
     renderGraph(0);
   </script>
 </body>

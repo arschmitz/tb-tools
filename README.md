@@ -143,7 +143,7 @@ tb cleanup
 <br/><br/>
 ### diff
 ---
-Opens a pretty HTML view of `git diff` output, or publishes it as a gist.
+Opens a GitHub-style, syntax-highlighted HTML view of `git diff` output, or publishes it as a gist.
 ```bash
 tb diff
 ```

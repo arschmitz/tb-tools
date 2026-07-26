@@ -494,7 +494,16 @@ test("buildGraphHtml creates tabbed GitGraph HTML", () => {
   assert.match(html, /data-action="checkout"/);
   assert.match(html, /data-action="rebase"/);
   assert.match(html, /data-action="prune"/);
+  assert.match(html, /class="workspace" data-index="0"/);
+  assert.match(html, /class="pane-resizer"/);
+  assert.match(html, /role="separator"/);
+  assert.match(html, /aria-orientation="vertical"/);
+  assert.match(html, /aria-controls="graph-0 diff-0"/);
   assert.match(html, /class="diff-stats" hidden aria-label=""/);
+  assert.match(html, /\.workspace \{ --graph-pane-width: 54%; display: grid/);
+  assert.match(html, /\.pane-resizer \{[^}]*cursor: col-resize/);
+  assert.match(html, /\.pane-resizer:hover::before/);
+  assert.match(html, /body\.is-resizing-panes/);
   assert.match(html, /\.graph svg \{ overflow: visible; \}/);
   assert.match(html, /\.commit-row, \.commit-row \* \{ cursor: pointer; \}/);
   assert.match(html, /\.commit-row\.active \.commit-row-hitbox/);
@@ -516,6 +525,10 @@ test("buildGraphHtml creates tabbed GitGraph HTML", () => {
   assert.match(html, /function decorateCommitRows/);
   assert.match(html, /function showCommitContextMenu/);
   assert.match(html, /function runCommitAction/);
+  assert.match(html, /function startPaneResize/);
+  assert.match(html, /function resizePaneFromKeyboard/);
+  assert.match(html, /restoreGraphPaneWidth\(0\)/);
+  assert.match(html, /resizer\.addEventListener\("pointerdown", startPaneResize\)/);
   assert.match(html, /function setDiffStats/);
   assert.match(html, /setDiffStats\(stats, result\)/);
   assert.match(html, /function isCurrentCommit/);
