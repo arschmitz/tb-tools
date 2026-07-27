@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import {
   amendCommitMessage,
   amendCurrentCommit,
+  attachGraphTryRunsToCommits,
   answerSubmitSessionPrompt,
-  buildGraphHtml,
   chooseCheckoutBranch,
   choosePruneBranches,
   chooseRebaseBranch,
@@ -15,6 +19,8 @@ import {
   getGraphCommitMessage,
   getGraphCommitIntegrationStatus,
   getGraphCurrentCommitMessage,
+  getGraphOriginMainStatus,
+  getGraphTryRunsForCommit,
   getCheckoutCommitPage,
   getCheckoutGraphData,
   getCheckoutGraphMetadata,
@@ -22,21 +28,50 @@ import {
   getWorkingTreeCommits,
   getWorkingTreeDiff,
   getGraphOutputPath,
-  formatPrettyDiffHtml,
   isWorkingTreeCommitHash,
   markGraphBugForCheckin,
+  normalizeGraphTryOptions,
+  normalizeGraphTryStore,
   parseDecorations,
   parseGitLog,
   pruneCommitBranches,
   pruneMissingParents,
   rebaseCommit,
+  recordGraphTryRun,
+  runGraphTrySubmission,
   getInteractiveYesNoPrompt,
+  runGraphMachActionSession,
+  runGraphRepositoryUpdate,
   runInteractiveSubmitCommand,
-  splitPrettyDiffFiles,
   startInteractiveGraphServer,
   truncateDiff,
+  unshelfGraphShelves,
+  updateGraphCheckout,
   waitForInteractiveServerClose,
 } from "../commands/graph.mjs";
+import {
+  formatPrettyDiffHtml,
+  splitPrettyDiffFiles,
+} from "../commands/graph/diff-renderer.mjs";
+import { buildGraphHtml } from "../commands/graph/templates.mjs";
+
+const GRAPH_CLIENT_TEST_ASSETS = [
+  { source: "config.js", output: "graph-client/config.js" },
+  { source: "commit-model.js", output: "graph-client/commit-model.js" },
+  { source: "dom.js", output: "graph-client/dom.js" },
+  { source: "pane-resizer.js", output: "graph-client/pane-resizer.js" },
+  { source: "lane-renderer.js", output: "graph-client/lane-renderer.js" },
+  { source: "diff-viewer.js", output: "graph-client/diff-viewer.js" },
+  { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
+  { source: "commit-actions.js", output: "graph-client/commit-actions.js" },
+  { source: "init.js", output: "graph-client/init.js" },
+];
+
+function readGraphClientScripts() {
+  return GRAPH_CLIENT_TEST_ASSETS
+    .map(({ source }) => readFileSync(path.join(process.cwd(), "commands/graph/client", source), "utf8"))
+    .join("\n");
+}
 
 async function waitForSubmitSession(url, predicate) {
   for (let index = 0; index < 50; index++) {
@@ -51,6 +86,21 @@ async function waitForSubmitSession(url, predicate) {
   }
 
   throw new Error("Timed out waiting for submit session.");
+}
+
+async function waitForMachSession(url, predicate) {
+  for (let index = 0; index < 50; index++) {
+    const response = await fetch(url);
+    const session = await response.json();
+
+    if (predicate(session)) {
+      return session;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error("Timed out waiting for mach session.");
 }
 
 async function waitForSubmitSessionLike(session, predicate) {
@@ -75,7 +125,7 @@ test("parseDecorations expands HEAD arrows and tags", () => {
   assert.deepEqual(parseDecorations("origin/HEAD -> origin/main"), ["origin/main"]);
 });
 
-test("parseGitLog converts git log records into GitGraph import data", () => {
+test("parseGitLog converts git log records into graph data", () => {
   const output = "\x1eabc123\x1fparent1 parent2\x1fHEAD -> main, tag: v1.0.0\x1fAlice\x1falice@example.com\x1f1710000000\x1fFix the thing\n";
 
   assert.deepEqual(parseGitLog(output), [{
@@ -99,6 +149,168 @@ test("pruneMissingParents removes parents outside the displayed commit window", 
     { hash: "child", parents: ["parent"] },
     { hash: "parent", parents: [] },
   ]);
+});
+
+test("normalizeGraphTryOptions mirrors the supported mach try option surface", () => {
+  assert.deepEqual(normalizeGraphTryOptions({
+    selector: "fuzzy",
+    query: "linux64 debug",
+    preset: "smoke",
+    artifact: false,
+    comment: true,
+  }), {
+    selector: "fuzzy",
+    query: "linux64 debug",
+    preset: "smoke",
+    artifact: false,
+    comment: true,
+  });
+  assert.deepEqual(normalizeGraphTryOptions({
+    selector: "surprise",
+    tasksRegex: "browser",
+  }), {
+    selector: "auto",
+    "tasks-regex": "browser",
+    artifact: true,
+    comment: false,
+  });
+});
+
+test("graph try runs are stored by stable patch id and attach after a rebase", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-try-store-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const graph = { label: "comm", path: "/repo/comm" };
+  const runCommand = async (command) => {
+    if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+      return storePath;
+    }
+
+    if (command.cmd === "sh") {
+      return "stable-patch-id abc123\n";
+    }
+
+    return "";
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await recordGraphTryRun({
+    graph,
+    runCommand,
+    tryRun: {
+      id: "run-1",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=one",
+      createdAt: "2026-07-27T12:00:00.000Z",
+      hash: "abc123",
+      patchId: "stable-patch-id",
+      subject: "Bug 123 - Try this",
+      label: "comm",
+    },
+  });
+
+  await recordGraphTryRun({
+    graph,
+    runCommand,
+    tryRun: {
+      id: "run-2",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=two",
+      createdAt: "2026-07-27T12:05:00.000Z",
+      hash: "abc123",
+      patchId: "stable-patch-id",
+      subject: "Bug 123 - Try this",
+      label: "comm",
+    },
+  });
+
+  const [commit] = await attachGraphTryRunsToCommits({
+    graph,
+    runCommand,
+    commits: [{
+      hash: "def456",
+      parents: [],
+      refs: ["HEAD"],
+      subject: "Bug 123 - Try this",
+    }],
+  });
+
+  assert.equal(commit.tryRuns.length, 2);
+  assert.equal(commit.tryRuns[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=two");
+  assert.equal(commit.tryRuns[1].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=one");
+
+  const normalized = normalizeGraphTryStore({
+    runsByPatchId: {
+      "stable-patch-id": [commit.tryRuns[0]],
+    },
+  });
+  assert.equal(normalized.runs[0].patchId, "stable-patch-id");
+});
+
+test("runGraphTrySubmission records mach try output for the current commit", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-try-run-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const calls = [];
+  const graph = { label: "comm", path: "/repo/comm" };
+  const runCommand = async (command) => {
+    calls.push(command);
+
+    if (command.cmd.endsWith("mach")) {
+      return "Created try push: https://treeherder.mozilla.org/jobs?repo=try&revision=abc\n";
+    }
+
+    if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      return "main\n";
+    }
+
+    if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+      return storePath;
+    }
+
+    if (command.args[0] === "rev-parse") {
+      return "abc123\n";
+    }
+
+    if (command.args[0] === "diff" || command.args[0] === "ls-files") {
+      return "";
+    }
+
+    if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+      return "Bug 123 - Try me. r=#reviewers\n";
+    }
+
+    if (command.cmd === "sh") {
+      return "stable-patch-id abc123\n";
+    }
+
+    return "";
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  const session = { output: "" };
+  const result = await runGraphTrySubmission({
+    graph,
+    session,
+    runCommand,
+    options: {
+      selector: "fuzzy",
+      query: "linux64 debug",
+      preset: "smoke",
+      artifact: false,
+    },
+  });
+
+  assert.equal(result.tryUrl, "https://treeherder.mozilla.org/jobs?repo=try&revision=abc");
+  assert.equal(result.tryRun.patchId, "stable-patch-id");
+  assert.equal(result.tryRun.subject, "Bug 123 - Try me. r=#reviewers");
+  assert.match(session.output, /\$ \.\.\/mach try fuzzy --query linux64 debug --preset smoke --no-artifact/);
+  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "try fuzzy --query linux64 debug --preset smoke --no-artifact"), true);
+
+  const runs = await getGraphTryRunsForCommit({
+    graph,
+    runCommand,
+    commit: { hash: "rebased456", subject: "Bug 123 - Try me" },
+  });
+  assert.equal(runs[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=abc");
 });
 
 test("chooseCheckoutBranch prefers the current branch when available", () => {
@@ -255,6 +467,58 @@ test("runInteractiveSubmitCommand routes child yes/no prompts through submit ses
   assert.match(session.output, /\$ moz-phab submit/);
   assert.match(session.output, /> yes/);
   assert.match(session.output, /Submitted https:\/\/phabricator\.services\.mozilla\.com\/D123456/);
+});
+
+test("runGraphMachActionSession keeps run active when mach exits but the process group remains", async (t) => {
+  const originalKill = process.kill;
+  const killChecks = [];
+  const session = {
+    action: "run",
+    status: "running",
+    phase: "",
+    message: "",
+    output: "",
+    child: null,
+    childPid: null,
+    cancelRequested: false,
+  };
+
+  process.kill = (pid, signal) => {
+    killChecks.push([pid, signal]);
+
+    if (pid === -4321 && signal === 0) {
+      return true;
+    }
+
+    return originalKill(pid, signal);
+  };
+  t.after(() => {
+    process.kill = originalKill;
+  });
+
+  await runGraphMachActionSession({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+    },
+    action: "run",
+    session,
+    runCommand: async (command) => {
+      if (command.args[0] === "run") {
+        session.childPid = 4321;
+      }
+
+      return `${command.args[0]} complete\n`;
+    },
+  });
+
+  assert.equal(session.status, "running");
+  assert.equal(session.phase, "running");
+  assert.equal(session.message, "Thunderbird running.");
+  assert.equal(session.childPid, 4321);
+  assert.deepEqual(killChecks, [[-4321, 0]]);
+  assert.match(session.output, /\$ \.\.\/mach build/);
+  assert.match(session.output, /\$ \.\.\/mach run/);
 });
 
 test("splitPrettyDiffFiles groups patch output by file", () => {
@@ -537,6 +801,7 @@ test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", as
 
   assert.deepEqual(calls.map((call) => call.args), [
     ["log", "-1", "--format=%B", "abc123"],
+    ["rev-parse", "--git-path", "tb-tools-try-runs.json"],
   ]);
   assert.deepEqual(bugCalls, ["123456"]);
   assert.deepEqual(phabCalls, [{
@@ -612,7 +877,9 @@ test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected 
 
   assert.deepEqual(calls.map((call) => call.args), [
     ["log", "-1", "--format=%B", "abc123"],
+    ["rev-parse", "--git-path", "tb-tools-try-runs.json"],
     ["log", "-1", "--format=%B", "abc123"],
+    ["rev-parse", "--git-path", "tb-tools-try-runs.json"],
   ]);
   assert.deepEqual(updates, [[
     "123456",
@@ -1327,6 +1594,330 @@ test("rebaseCommit refuses when the current checkout is inside the selected stac
   );
 });
 
+test("updateGraphCheckout switches to updated main for plain updates", async () => {
+  const calls = [];
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "topic",
+  };
+  const result = await updateGraphCheckout({
+    graph,
+    mode: "update",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "updated123\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm updated main from origin/main.");
+  assert.equal(result.branch, "main");
+  assert.equal(result.currentHash, "updated123");
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["fetch", "origin", "main"],
+    ["switch", "main"],
+    ["pull", "--ff-only", "origin", "main"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("updateGraphCheckout rebases local branch commits onto origin main", async () => {
+  const calls = [];
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "topic",
+  };
+  const result = await updateGraphCheckout({
+    graph,
+    mode: "rebase",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch") {
+        return "topic\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "root111\nchild222\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "rebased333\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm fetched origin/main and rebased 2 local commits.");
+  assert.equal(result.branch, "topic");
+  assert.equal(result.rebasedCount, 2);
+  assert.deepEqual(result.commits, ["root111", "child222"]);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["fetch", "origin", "main"],
+    ["branch", "--show-current"],
+    ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
+    ["rebase", "--update-refs", "origin/main", "topic"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("updateGraphCheckout rebases the containing branch for a detached checkout", async () => {
+  const calls = [];
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "(detached)",
+  };
+  const result = await updateGraphCheckout({
+    graph,
+    mode: "rebase",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch") {
+        return calls.filter((call) => call.args[0] === "branch").length === 1
+          ? ""
+          : "topic\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return calls.filter((call) => call.args[0] === "rev-parse").length === 1
+          ? "current123\n"
+          : "rebased333\n";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        return "topic\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "current123\nchild222\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.branch, "topic");
+  assert.equal(result.rebasedCount, 2);
+  assert.deepEqual(result.commits, ["current123", "child222"]);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["fetch", "origin", "main"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "current123", "refs/heads"],
+    ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
+    ["rebase", "--update-refs", "origin/main", "topic"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("runGraphRepositoryUpdate reports dirty checkouts before changing anything", async () => {
+  const calls = [];
+  const graphs = [{
+    label: "comm",
+    path: "/repo/comm",
+  }];
+
+  await assert.rejects(
+    runGraphRepositoryUpdate({
+      graphs,
+      mode: "update",
+      runCommand: async (command) => {
+        calls.push(command);
+        return " M file.txt\n";
+      },
+    }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.deepEqual(error.dirty, [{
+        index: 0,
+        label: "comm",
+        path: "/repo/comm",
+        status: "M file.txt",
+      }]);
+      return /Uncommitted changes/.test(error.message);
+    }
+  );
+
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+  ]);
+});
+
+test("runGraphRepositoryUpdate can shelf dirty changes before updating", async () => {
+  const calls = [];
+  const graphs = [{
+    label: "comm",
+    path: "/repo/comm",
+  }];
+  const result = await runGraphRepositoryUpdate({
+    graphs,
+    mode: "update",
+    dirtyAction: "shelf",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return " M file.txt\n";
+      }
+
+      if (command.args[0] === "stash") {
+        return "Saved working directory and index state On topic: tb-tools graph update: comm\n";
+      }
+
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "updated123\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.dirtyAction, "shelf");
+  assert.equal(result.shelves.length, 1);
+  assert.deepEqual(result.shelves[0], {
+    graphIndex: 0,
+    label: "comm",
+    path: "/repo/comm",
+    stashRef: "stash@{0}",
+    message: "Saved working directory and index state On topic: tb-tools graph update: comm",
+  });
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["stash", "push", "--include-untracked", "-m", "tb-tools graph update: comm"],
+    ["fetch", "origin", "main"],
+    ["switch", "main"],
+    ["pull", "--ff-only", "origin", "main"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("runGraphRepositoryUpdate can amend dirty changes before rebasing", async () => {
+  const calls = [];
+  const graphs = [{
+    label: "comm",
+    path: "/repo/comm",
+  }];
+  const result = await runGraphRepositoryUpdate({
+    graphs,
+    mode: "rebase",
+    dirtyAction: "amend",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return " M file.txt\n";
+      }
+
+      if (command.args[0] === "branch") {
+        return "topic\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "root111\nchild222\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "rebased333\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.dirtyAction, "amend");
+  assert.equal(result.dirtyResults[0].message, "comm amended uncommitted changes into the current commit.");
+  assert.equal(result.results[0].rebasedCount, 2);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["add", "-A"],
+    ["commit", "--amend", "--no-edit"],
+    ["fetch", "origin", "main"],
+    ["branch", "--show-current"],
+    ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
+    ["rebase", "--update-refs", "origin/main", "topic"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("getGraphOriginMainStatus compares local origin main with remote origin main", async () => {
+  const calls = [];
+  const result = await getGraphOriginMainStatus({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "rev-parse") {
+        return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+      }
+
+      if (command.args[0] === "ls-remote") {
+        return "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/heads/main\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.label, "comm");
+  assert.equal(result.branch, "main");
+  assert.equal(result.state, "stale");
+  assert.equal(result.upToDate, false);
+  assert.equal(result.localHash, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  assert.equal(result.remoteHash, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["rev-parse", "--verify", "refs/remotes/origin/main"],
+    ["ls-remote", "--heads", "origin", "main"],
+  ]);
+});
+
+test("unshelfGraphShelves pops requested graph shelves", async () => {
+  const calls = [];
+  const result = await unshelfGraphShelves({
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+    }],
+    shelves: [{
+      graphIndex: 0,
+      stashRef: "stash@{0}",
+    }],
+    runCommand: async (command) => {
+      calls.push(command);
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "Unshelved 1 checkout.");
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["stash", "pop", "stash@{0}"],
+  ]);
+});
+
 test("pruneCommitBranches drops a commit from the current branch history", async () => {
   const calls = [];
   const result = await pruneCommitBranches({
@@ -1454,7 +2045,6 @@ test("checkoutCommit refuses dirty working trees", async () => {
 
 test("buildGraphHtml creates tabbed lane graph HTML", () => {
   const html = buildGraphHtml({
-    gitgraphScript: "window.GitgraphJS = {};",
     graphs: [
       {
         label: "comm",
@@ -1485,17 +2075,25 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
       },
     ],
   });
+  const client = readGraphClientScripts();
 
-  assert.match(html, /TB Tools Branch Graph/);
+  assert.match(html, /Thunderbird Desktop Console/);
+  assert.match(html, /id="graph-config"/);
+  assert.match(html, /<script type="module" src="graph-client\/init\.js"><\/script>/);
+  assert.doesNotMatch(html, /function renderGraph/);
+  assert.doesNotMatch(html, /window\.[A-Z][A-Za-z]+JS/);
   assert.match(html, /1 uncommitted change set/);
   assert.match(html, /data-index="0"/);
   assert.match(html, /data-index="1"/);
+  assert.match(html, /class="header-row"/);
+  assert.match(html, /class="title-row"/);
+  assert.match(html, /class="toolbar-row"/);
   assert.match(html, /class="summary" data-index="0"/);
   assert.match(html, /class="summary-branch"/);
   assert.match(html, /class="summary-working-tree"/);
-  assert.match(html, /function renderGraph/);
-  assert.match(html, /renderGraph\(0\)/);
-  assert.match(html, /function showDiff/);
+  assert.match(client, /function renderGraph/);
+  assert.match(client, /renderGraph\(0\)/);
+  assert.match(client, /function showDiff/);
   assert.match(html, /id="commit-context-menu"/);
   assert.match(html, /data-action="checkout"/);
   assert.match(html, /data-action="rebase"/);
@@ -1510,6 +2108,9 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /class="submit-prompt"/);
   assert.match(html, /class="submit-links" hidden/);
   assert.match(html, /class="submit-output"/);
+  assert.match(html, /id="try-dialog"/);
+  assert.match(html, /class="try-selector"/);
+  assert.match(html, /class="try-tasks-regex"/);
   assert.match(html, /class="workspace" data-index="0"/);
   assert.match(html, /class="pane-resizer"/);
   assert.match(html, /role="separator"/);
@@ -1517,6 +2118,25 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /aria-controls="graph-0 diff-0"/);
   assert.match(html, /class="diff-stats" hidden aria-label=""/);
   assert.match(html, /\.workspace \{ --graph-pane-width: 54%; display: grid/);
+  assert.match(html, /\.title-row \{/);
+  assert.match(html, /\.toolbar-row \{/);
+  assert.match(html, /\.update-actions \{/);
+  assert.match(html, /\.graph-options-menu \{/);
+  assert.match(html, /\.graph-submenu \{/);
+  assert.match(html, /\.command-status-bar \{/);
+  assert.match(html, /\.command-status-bar\[hidden\] \{ display: none; \}/);
+  assert.match(html, /\.command-status-primary \{/);
+  assert.match(html, /\.command-status-tools \{/);
+  assert.match(html, /body\.has-command-status main/);
+  assert.match(html, /\.command-status-bar\.busy \.command-status-dot/);
+  assert.match(html, /\.command-elapsed \{/);
+  assert.match(html, /\.command-status-close \{/);
+  assert.match(html, /\.mach-cancel\[hidden\], \.mach-output-toggle\[hidden\], \.command-status-close\[hidden\] \{ display: none; \}/);
+  assert.match(html, /\.mach-output-panel \{/);
+  assert.match(html, /\.mach-output-toggle\[hidden\]/);
+  assert.match(html, /\.origin-main-status \{/);
+  assert.match(html, /\.origin-main-badge\.current/);
+  assert.match(html, /\.update-status\.error/);
   assert.match(html, /\.pane-resizer \{[^}]*cursor: col-resize/);
   assert.match(html, /\.pane-resizer:hover::before/);
   assert.match(html, /body\.is-resizing-panes/);
@@ -1526,6 +2146,8 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /\.commit-hash, \.commit-message \{ dominant-baseline: central/);
   assert.match(html, /\.branch-label-bg \{ stroke-width: 1/);
   assert.match(html, /\.branch-label-text \{ dominant-baseline: central/);
+  assert.doesNotMatch(html, /\.commit-try-link/);
+  assert.doesNotMatch(html, /\.commit-try-bg/);
   assert.match(html, /\.commit-row, \.commit-row \* \{ cursor: pointer; \}/);
   assert.match(html, /\.commit-row\.active \.commit-row-hitbox/);
   assert.match(html, /\.commit-row\.working-tree \.commit-row-hitbox/);
@@ -1537,12 +2159,17 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /\.submit-dialog \{/);
   assert.match(html, /\.submit-links a/);
   assert.match(html, /\.submit-output \{/);
+  assert.match(html, /\.try-dialog \{/);
+  assert.match(html, /\.try-grid \{/);
   assert.match(html, /\.diff-placeholder/);
   assert.match(html, /\.diff-message \{/);
   assert.match(html, /\.diff-message a \{ color: #0969da; text-decoration: none; \}/);
   assert.match(html, /\.diff-message\[hidden\] \{ display: none; \}/);
   assert.match(html, /\.integration-status \{/);
   assert.match(html, /\.status-badge \{/);
+  assert.match(html, /\.status-badge\.try/);
+  assert.match(html, /\.try-run-toggle/);
+  assert.match(html, /\.try-run-history\[hidden\]/);
   assert.match(html, /\.status-badge\.open/);
   assert.match(html, /\.status-badge\.error/);
   assert.match(html, /\.checkin-needed-button/);
@@ -1556,101 +2183,126 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /\.line-number/);
   assert.match(html, /\.line-content \.hljs-keyword/);
   assert.match(html, /\.line-content \.hljs-string/);
-  assert.match(html, /const COMMIT_DOT_RADIUS = 10/);
-  assert.match(html, /const LANE_SPACING = 20/);
-  assert.match(html, /const COMMIT_HASH_WIDTH = 116/);
-  assert.match(html, /function normalizeBranchRef/);
-  assert.match(html, /function getCommitBranchRefs/);
-  assert.match(html, /function getPrioritizedCommitBranchRefs/);
-  assert.match(html, /function getBranchColor/);
-  assert.match(html, /function addBranchLabels/);
-  assert.match(html, /function getLaneRows/);
-  assert.match(html, /function renderLaneGraph/);
-  assert.match(html, /function drawLaneContinuations/);
-  assert.match(html, /function addLaneCommitRow/);
-  assert.match(html, /fill: branchColor/);
-  assert.match(html, /drawLanePath\(svg, index/);
-  assert.match(html, /function centerBranchLabelsVertically/);
-  assert.match(html, /function decorateCommitRows/);
-  assert.match(html, /function showCommitContextMenu/);
-  assert.match(html, /function runCommitAction/);
-  assert.match(html, /function openAmendDialog/);
-  assert.match(html, /function submitAmendDialog/);
-  assert.match(html, /function openSubmitDialog/);
-  assert.match(html, /function renderSubmitSession/);
-  assert.match(html, /function answerSubmitPrompt/);
-  assert.match(html, /submitOutput\.textContent = session\.output \|\| ""/);
-  assert.match(html, /function isWorkingTreeCommit/);
-  assert.match(html, /function getSnapshotFingerprint/);
-  assert.match(html, /function refreshGraphFromServer/);
-  assert.match(html, /function pollGraphUpdates/);
-  assert.match(html, /function selectCommitActionResult/);
-  assert.match(html, /function loadSelectedCommitMessage/);
-  assert.match(html, /function loadSelectedCommitIntegrationStatus/);
-  assert.match(html, /function renderCommitIntegrationStatus/);
-  assert.match(html, /function clearIntegrationStatus/);
-  assert.match(html, /function isAcceptedPhabricatorStatus/);
-  assert.match(html, /function markBugForCheckin/);
-  assert.match(html, /function setCommitMessage/);
-  assert.match(html, /function getCommitMessageLinkUrl/);
-  assert.match(html, /function getLinkedCommitMessageNodes/);
-  assert.match(html, /const BUGZILLA_BUG_URL = "https:\/\/bugzilla\.mozilla\.org\/show_bug\.cgi\?id="/);
-  assert.match(html, /const PHABRICATOR_REVISION_URL = "https:\/\/phabricator\.services\.mozilla\.com\/D"/);
-  assert.match(html, /const COMMIT_MESSAGE_LINK_PATTERN = /);
-  assert.match(html, /document\.createTextNode/);
-  assert.match(html, /document\.createElement\("a"\)/);
-  assert.match(html, /BUGZILLA_BUG_URL \+ bugMatch\[1\]/);
-  assert.match(html, /PHABRICATOR_REVISION_URL \+ phabMatch\[1\]/);
-  assert.match(html, /link\.target = "_blank"/);
-  assert.match(html, /link\.rel = "noreferrer"/);
-  assert.match(html, /function formatCommitTitle/);
-  assert.match(html, /Current staged, unstaged, and untracked changes/);
-  assert.match(html, /!INTERACTIVE\.enabled \|\| isWorkingTreeCommit\(commit\)/);
-  assert.match(html, /amendButton\.hidden = !INTERACTIVE\.enabled/);
-  assert.match(html, /function startPaneResize/);
-  assert.match(html, /function resizePaneFromKeyboard/);
-  assert.match(html, /restoreGraphPaneWidth\(0\)/);
-  assert.match(html, /resizer\.addEventListener\("pointerdown", startPaneResize\)/);
-  assert.match(html, /function setDiffStats/);
-  assert.match(html, /setDiffStats\(stats, result\)/);
-  assert.match(html, /function isCurrentCommit/);
-  assert.match(html, /const labelTranslate = getTranslate\(labelContainer\)/);
-  assert.match(html, /graphStates\[index\]\.selectedHash = commit\.hash/);
-  assert.match(html, /const commits = placeWorkingTreeCommits\(graph\.commits \? \[\.\.\.graph\.commits\] : \[\]\)/);
-  assert.match(html, /currentHash: getCurrentCommitHash\(commits\)/);
-  assert.match(html, /row\.classList\.toggle\("current", row\.dataset\.hash === currentHash\)/);
-  assert.match(html, /graphStates\[graphIndex\]\.currentHash = hash/);
-  assert.match(html, /\/api\/graph\/" \+ index \+ "\/snapshot/);
-  assert.match(html, /setInterval\(pollGraphUpdates, INTERACTIVE\.pollIntervalMs\)/);
-  assert.match(html, /\/api\/graph\/" \+ graphIndex \+ "\/message\/" \+ encodeURIComponent\(hash\)/);
-  assert.match(html, /\/api\/graph\/" \+ index \+ "\/message\/" \+ encodeURIComponent\(commit\.hash\)/);
-  assert.match(html, /\/api\/graph\/" \+ index \+ "\/integration\/" \+ encodeURIComponent\(commit\.hash\)/);
-  assert.match(html, /loadSelectedCommitMessage\(index, commit, commitMessage\)/);
-  assert.match(html, /loadSelectedCommitIntegrationStatus\(index, commit, integrationStatus\)/);
-  assert.match(html, /!result\.bug\.error && isAcceptedPhabricatorStatus\(result\.phabricator\)/);
-  assert.match(html, /\/api\/bugzilla\/checkin/);
-  assert.match(html, /event\.target\.closest\("\.checkin-needed-button"\)/);
-  assert.match(html, /\/api\/amend-message/);
-  assert.match(html, /amendButton\.textContent = isWorkingTreeCommit\(commit\) \? "Amend" : "Amend Message"/);
-  assert.match(html, /submitButton\.hidden = !INTERACTIVE\.enabled \|\| isWorkingTreeCommit\(commit\) \|\| !isCurrentCommit\(commit\)/);
-  assert.match(html, /hash: amendDialogState\.hash/);
-  assert.match(html, /expectedChangeId: amendDialogState\.changeId/);
-  assert.match(html, /includeChanges: amendDialogState\.includeChanges/);
-  assert.match(html, /selectCommitActionResult\(graphIndex, result\.rewrittenHash \|\| result\.currentHash, result\.message\)/);
-  assert.match(html, /\/api\/submit/);
-  assert.match(html, /\/api\/submit\/" \+ encodeURIComponent\(submitDialogState\.sessionId\)/);
-  assert.match(html, /button\.dataset\.answer === "true"/);
-  assert.match(html, /scheduleGraphEnhancements\(index\)/);
-  assert.match(html, /Branch tips will check out the branch/);
-  assert.match(html, /commitGroup\.addEventListener\("contextmenu"/);
-  assert.match(html, /runCommitAction\(button\.dataset\.action, actionState\)/);
-  assert.doesNotMatch(html, /orientation: GitgraphJS\.Orientation\.VerticalReverse/);
-  assert.match(html, /renderLaneGraph\(index, pruneLoadedParents\(state\.commits\)\)/);
+  assert.match(client, /const COMMIT_DOT_RADIUS = 10/);
+  assert.match(client, /const LANE_SPACING = 20/);
+  assert.match(client, /const COMMIT_HASH_WIDTH = 116/);
+  assert.match(client, /function normalizeBranchRef/);
+  assert.match(client, /function getCommitBranchRefs/);
+  assert.match(client, /function getPrioritizedCommitBranchRefs/);
+  assert.match(client, /function getBranchColor/);
+  assert.match(client, /function addBranchLabels/);
+  assert.match(client, /function getLaneRows/);
+  assert.match(client, /function renderLaneGraph/);
+  assert.match(client, /function drawLaneContinuations/);
+  assert.match(client, /function addLaneCommitRow/);
+  assert.doesNotMatch(client, /function addCommitTryRunLabel/);
+  assert.match(client, /fill: branchColor/);
+  assert.match(client, /drawLanePath\(svg, index/);
+  assert.match(client, /function centerBranchLabelsVertically/);
+  assert.match(client, /function decorateCommitRows/);
+  assert.match(client, /function showCommitContextMenu/);
+  assert.match(client, /function runCommitAction/);
+  assert.match(client, /function openAmendDialog/);
+  assert.match(client, /function submitAmendDialog/);
+  assert.match(client, /function openSubmitDialog/);
+  assert.match(client, /function renderSubmitSession/);
+  assert.match(client, /function answerSubmitPrompt/);
+  assert.match(client, /submitOutput\.textContent = session\.output \|\| ""/);
+  assert.match(client, /function isWorkingTreeCommit/);
+  assert.match(client, /function getSnapshotFingerprint/);
+  assert.match(client, /function refreshGraphFromServer/);
+  assert.match(client, /function pollGraphUpdates/);
+  assert.match(client, /function runGraphUpdate/);
+  assert.match(client, /function promptForDirtyUpdateAction/);
+  assert.match(client, /function unshelfGraphUpdateChanges/);
+  assert.match(client, /function startGraphMachAction/);
+  assert.match(client, /function openTryDialog/);
+  assert.match(client, /function submitTryDialog/);
+  assert.match(client, /function pollGraphTrySession/);
+  assert.match(client, /function cancelGraphMachAction/);
+  assert.match(client, /function setMachOutputPanel/);
+  assert.match(client, /function dismissCommandStatus/);
+  assert.match(client, /setCommandStatusBarActive\(busy, \{ visible \}\)/);
+  assert.match(client, /closeButton\.hidden = busy \|\| !visible/);
+  assert.match(client, /function refreshOriginMainStatus/);
+  assert.match(client, /function promptForPostUpdateMachAction/);
+  assert.match(client, /function selectCommitActionResult/);
+  assert.match(client, /function loadSelectedCommitMessage/);
+  assert.match(client, /function loadSelectedCommitIntegrationStatus/);
+  assert.match(client, /function renderCommitIntegrationStatus/);
+  assert.match(client, /function createTryRunStatus/);
+  assert.match(client, /function clearIntegrationStatus/);
+  assert.match(client, /function isAcceptedPhabricatorStatus/);
+  assert.match(client, /function markBugForCheckin/);
+  assert.match(client, /function setCommitMessage/);
+  assert.match(client, /function getCommitMessageLinkUrl/);
+  assert.match(client, /function getLinkedCommitMessageNodes/);
+  assert.match(client, /const BUGZILLA_BUG_URL = "https:\/\/bugzilla\.mozilla\.org\/show_bug\.cgi\?id="/);
+  assert.match(client, /const PHABRICATOR_REVISION_URL = "https:\/\/phabricator\.services\.mozilla\.com\/D"/);
+  assert.match(client, /const COMMIT_MESSAGE_LINK_PATTERN = /);
+  assert.match(client, /document\.createTextNode/);
+  assert.match(client, /document\.createElement\("a"\)/);
+  assert.match(client, /BUGZILLA_BUG_URL \+ bugMatch\[1\]/);
+  assert.match(client, /PHABRICATOR_REVISION_URL \+ phabMatch\[1\]/);
+  assert.match(client, /link\.target = "_blank"/);
+  assert.match(client, /link\.rel = "noreferrer"/);
+  assert.match(client, /function formatCommitTitle/);
+  assert.match(client, /Current staged, unstaged, and untracked changes/);
+  assert.match(client, /if \(!INTERACTIVE\.enabled\)/);
+  assert.match(client, /renderCommitIntegrationStatus\(container, \{ tryRuns: commit\.tryRuns \|\| \[\] \}/);
+  assert.match(client, /amendButton\.hidden = !INTERACTIVE\.enabled/);
+  assert.match(client, /function startPaneResize/);
+  assert.match(client, /function resizePaneFromKeyboard/);
+  assert.match(client, /restoreGraphPaneWidth\(0\)/);
+  assert.match(client, /resizer\.addEventListener\("pointerdown", startPaneResize\)/);
+  assert.match(client, /function setDiffStats/);
+  assert.match(client, /setDiffStats\(stats, result\)/);
+  assert.match(client, /function isCurrentCommit/);
+  assert.match(client, /const labelTranslate = getTranslate\(labelContainer\)/);
+  assert.match(client, /graphStates\[index\]\.selectedHash = commit\.hash/);
+  assert.match(client, /const commits = placeWorkingTreeCommits\(graph\.commits \? \[\.\.\.graph\.commits\] : \[\]\)/);
+  assert.match(client, /currentHash: getCurrentCommitHash\(commits\)/);
+  assert.match(client, /row\.classList\.toggle\("current", row\.dataset\.hash === currentHash\)/);
+  assert.match(client, /graphStates\[graphIndex\]\.currentHash = hash/);
+  assert.match(client, /\/api\/graph\/" \+ index \+ "\/snapshot/);
+  assert.match(client, /setInterval\(pollGraphUpdates, INTERACTIVE\.pollIntervalMs\)/);
+  assert.match(client, /\/api\/graph\/" \+ graphIndex \+ "\/message\/" \+ encodeURIComponent\(hash\)/);
+  assert.match(client, /\/api\/graph\/" \+ index \+ "\/message\/" \+ encodeURIComponent\(commit\.hash\)/);
+  assert.match(client, /\/api\/graph\/" \+ index \+ "\/integration\/" \+ encodeURIComponent\(commit\.hash\)/);
+  assert.match(client, /loadSelectedCommitMessage\(index, commit, commitMessage\)/);
+  assert.match(client, /loadSelectedCommitIntegrationStatus\(index, commit, integrationStatus\)/);
+  assert.match(client, /!result\.bug\.error && isAcceptedPhabricatorStatus\(result\.phabricator\)/);
+  assert.match(client, /\/api\/bugzilla\/checkin/);
+  assert.match(client, /event\.target\.closest\("\.checkin-needed-button"\)/);
+  assert.match(client, /\/api\/amend-message/);
+  assert.match(client, /amendButton\.textContent = isWorkingTreeCommit\(commit\) \? "Amend" : "Amend Message"/);
+  assert.match(client, /submitButton\.hidden = !INTERACTIVE\.enabled \|\| isWorkingTreeCommit\(commit\) \|\| !isCurrentCommit\(commit\)/);
+  assert.match(client, /hash: uiState\.amendDialogState\.hash/);
+  assert.match(client, /expectedChangeId: uiState\.amendDialogState\.changeId/);
+  assert.match(client, /includeChanges: uiState\.amendDialogState\.includeChanges/);
+  assert.match(client, /selectCommitActionResult\(graphIndex, result\.rewrittenHash \|\| result\.currentHash, result\.message\)/);
+  assert.match(client, /\/api\/submit/);
+  assert.match(client, /\/api\/try/);
+  assert.match(client, /\/api\/update-graphs/);
+  assert.match(client, /\/api\/unshelf-graphs/);
+  assert.match(client, /\/api\/mach-action/);
+  assert.match(client, /\/api\/origin-main-status/);
+  assert.match(client, /\/api\/submit\/" \+ encodeURIComponent\(uiState\.submitDialogState\.sessionId\)/);
+  assert.match(client, /button\.dataset\.answer === "true"/);
+  assert.match(client, /scheduleGraphEnhancements\(index\)/);
+  assert.match(client, /Branch tips will check out the branch/);
+  assert.match(client, /commitGroup\.addEventListener\("contextmenu"/);
+  assert.match(client, /runCommitAction\(button\.dataset\.action, actionState\)/);
+  assert.doesNotMatch(client, /window\.[A-Z][A-Za-z]+JS/);
+  assert.match(client, /renderLaneGraph\(index, pruneLoadedParents\(state\.commits\)\)/);
+  assert.doesNotMatch(html, /class="update-actions"/);
+  assert.doesNotMatch(html, /class="origin-main-status"/);
+  assert.doesNotMatch(html, /class="graph-options"/);
+  assert.doesNotMatch(html, /class="command-status-bar"/);
 });
 
 test("buildGraphHtml supports interactive loading and checkout callbacks", () => {
   const html = buildGraphHtml({
-    gitgraphScript: "window.GitgraphJS = {};",
     interactive: {
       enabled: true,
       pageSize: 25,
@@ -1665,22 +2317,73 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
       diffs: {},
     }],
   });
+  const client = readGraphClientScripts();
 
-  assert.match(html, /const INTERACTIVE = /);
+  assert.match(html, /id="graph-config"/);
   assert.match(html, /"pageSize":25/);
-  assert.match(html, /\/api\/graph\/" \+ index \+ "\/commits/);
-  assert.match(html, /\/api\/commit-action/);
-  assert.match(html, /snapshotLimit: getLoadedGitCommitLimit\(graphStates\[graphIndex\]\)/);
-  assert.match(html, /applyGraphSnapshot\(graphIndex, result\.snapshot, \{ force: true \}\)/);
-  assert.match(html, /\/api\/close/);
-  assert.match(html, /\/api\/ping/);
-  assert.match(html, /beforeunload/);
+  assert.match(html, /<script type="module" src="graph-client\/init\.js"><\/script>/);
+  assert.doesNotMatch(html, /function renderGraph/);
+  assert.match(client, /const INTERACTIVE = /);
+  assert.match(html, /<title>Thunderbird Desktop Console<\/title>/);
+  assert.match(html, /<h1>Thunderbird Desktop Console<\/h1>/);
+  assert.match(html, /<h1>Thunderbird Desktop Console<\/h1>\s*<div class="origin-main-status"/);
+  assert.match(html, /class="origin-main-badge checking">Thunderbird: checking<\/span>/);
+  assert.ok(html.indexOf('<div class="graph-options">') > html.indexOf('<div class="header-row">'));
+  assert.ok(html.indexOf('<div class="graph-options">') < html.indexOf('<div class="toolbar-row">'));
+  assert.match(html, /<div class="toolbar-row">\s*<nav class="tabs">/);
+  assert.match(html, /class="update-actions"/);
+  assert.match(html, /<\/nav>\s*<div class="update-actions" role="toolbar"/);
+  assert.ok(html.indexOf('<div class="update-actions"') > html.indexOf('<div class="toolbar-row">'));
+  assert.match(html, /data-mode="update">Update<\/button>/);
+  assert.match(html, /data-mode="rebase">Update and Rebase<\/button>/);
+  assert.doesNotMatch(html, /class="mach-action" type="button" data-action="build">Build<\/button>/);
+  assert.match(html, /data-action="run">Run<\/button>/);
+  assert.match(html, /class="graph-menu-button" type="button" aria-label="More actions"/);
+  assert.match(html, /id="graph-options-menu" role="menu" aria-label="More actions" hidden/);
+  assert.match(html, /class="graph-menu-command" type="button" role="menuitem" data-menu-action="build">Build<\/button>/);
+  assert.match(html, /class="graph-menu-command graph-submenu-trigger"[^>]+data-menu-action="lint">Lint<\/button>/);
+  assert.match(html, /class="graph-submenu" role="menu" aria-label="Lint options"/);
+  assert.match(html, /data-menu-action="lint-all">All<\/button>/);
+  assert.match(html, /data-menu-action="lint-outgoing">Outgoing<\/button>/);
+  assert.match(html, /data-menu-action="lint-new">New<\/button>/);
+  assert.match(html, /data-menu-action="pull-patch">Pull patch<\/button>/);
+  assert.match(html, /data-menu-action="test">Test<\/button>/);
+  assert.match(html, /data-menu-action="try">Try<\/button>/);
+  assert.match(html, /\.graph-submenu \{ display: none; position: absolute; right: calc\(100% - 1px\); top: 0; \}/);
+  assert.match(html, /class="origin-main-status" role="status" aria-label="origin\/main freshness"/);
+  assert.match(html, /class="command-status-bar" role="region" aria-label="Command status" hidden/);
+  assert.match(html, /class="command-status-primary"/);
+  assert.match(html, /class="command-status-tools"/);
+  assert.match(html, /class="update-status" role="status" hidden><\/span>/);
+  assert.match(html, /class="command-elapsed" aria-label="Elapsed time"><\/span>/);
+  assert.match(html, /class="mach-cancel" type="button" hidden>Cancel Build<\/button>/);
+  assert.match(html, /class="command-status-close" type="button" hidden aria-label="Dismiss command status">&times;<\/button>/);
+  assert.match(html, /class="mach-output-toggle" type="button" hidden aria-expanded="false">Output<\/button>/);
+  assert.match(html, /class="mach-output-panel" hidden/);
+  assert.match(html, /<dialog class="try-dialog" id="try-dialog">/);
+  assert.match(html, /<option value="fuzzy">fuzzy<\/option>/);
+  assert.match(html, /Post try link to Phabricator/);
+  assert.match(client, /\/api\/graph\/" \+ index \+ "\/commits/);
+  assert.match(client, /\/api\/commit-action/);
+  assert.match(client, /\/api\/update-graphs/);
+  assert.match(client, /\/api\/unshelf-graphs/);
+  assert.match(client, /\/api\/mach-action/);
+  assert.match(client, /\/api\/origin-main-status/);
+  assert.match(client, /snapshotLimits: getSnapshotLimits\(\)/);
+  assert.match(client, /await promptForPostUpdateMachAction\(\)/);
+  assert.match(client, /await startGraphMachAction\("run"\)/);
+  assert.match(client, /clearInterval\(originMainStatusPoll\)/);
+  assert.match(client, /snapshotLimit: getLoadedGitCommitLimit\(graphStates\[graphIndex\]\)/);
+  assert.match(client, /applyGraphSnapshot\(graphIndex, result\.snapshot, \{ force: true \}\)/);
+  assert.match(client, /\/api\/close/);
+  assert.match(client, /\/api\/ping/);
+  assert.match(client, /beforeunload/);
   assert.match(html, /checkout-commit/);
   assert.match(html, /amend-commit/);
   assert.match(html, /submit-commit/);
-  assert.match(html, /IntersectionObserver/);
-  assert.match(html, /load-sentinel/);
-  assert.doesNotMatch(html, /window\.innerHeight \+ window\.scrollY/);
+  assert.match(client, /IntersectionObserver/);
+  assert.match(client, /load-sentinel/);
+  assert.doesNotMatch(client, /window\.innerHeight \+ window\.scrollY/);
 });
 
 test("getGraphOutputPath defaults to a temp HTML file", () => {
@@ -1700,17 +2403,34 @@ test("graph command writes and opens a tabbed graph", async () => {
       commits: [],
       diffs: {},
     }),
-    readBundle: async () => "window.GitgraphJS = {};",
+    readBundle: async (file, encoding) => {
+      calls.push(["readBundle", path.basename(file), encoding]);
+      return "client asset";
+    },
     makeDir: async (dir, options) => calls.push(["mkdir", dir, options]),
-    write: async (file, html) => calls.push(["write", file, /comm/.test(html) && /firefox/.test(html)]),
+    write: async (file, contents) => {
+      calls.push([
+        "write",
+        file,
+        contents === "client asset" ||
+          (/comm/.test(contents) && /firefox/.test(contents) && /graph-client\/init\.js/.test(contents)),
+      ]);
+    },
     open: async (file) => calls.push(["open", file]),
   });
 
   const outputPath = await graph({ limit: 5, output: "/tmp/graph.html" });
 
   assert.equal(outputPath, "/tmp/graph.html");
-  assert.deepEqual(calls, [
+  assert.deepEqual(calls.slice(0, 2), [
     ["mkdir", "/tmp", { recursive: true }],
+    ["mkdir", "/tmp/graph-client", { recursive: true }],
+  ]);
+  assert.deepEqual(calls.slice(2, -2), GRAPH_CLIENT_TEST_ASSETS.flatMap(({ source, output }) => [
+    ["readBundle", source, "utf8"],
+    ["write", `/tmp/${output}`, true],
+  ]));
+  assert.deepEqual(calls.slice(-2), [
     ["write", "/tmp/graph.html", true],
     ["open", "/tmp/graph.html"],
   ]);
@@ -1759,6 +2479,10 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     runCommand: async (command) => {
       calls.push(command);
 
+      if (command.cmd.endsWith("mach")) {
+        return `${command.args[0]} complete\n`;
+      }
+
       if (command.args[0] === "log" && command.args.includes("--format=%B")) {
         return "Bug 123456 - Fix the thing\n\nDifferential Revision: https://phabricator.services.mozilla.com/D987654\n";
       }
@@ -1779,6 +2503,14 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
         return "main\n";
       }
 
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+      }
+
+      if (command.args[0] === "ls-remote") {
+        return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/main\n";
+      }
+
       if (command.args[0] === "rev-parse") {
         return "def456\n";
       }
@@ -1795,6 +2527,11 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
 
   const pageResponse = await fetch(serverInfo.url);
   assert.equal(await pageResponse.text(), "<!doctype html><p>graph</p>");
+
+  const assetResponse = await fetch(new URL("assets/graph-client/init.js", serverInfo.url));
+  assert.equal(assetResponse.ok, true);
+  assert.match(assetResponse.headers.get("content-type"), /application\/javascript/);
+  assert.match(await assetResponse.text(), /function renderGraph/);
 
   const commitsResponse = await fetch(new URL("api/graph/0/commits?offset=0&limit=1&token=secret", serverInfo.url));
   const commits = await commitsResponse.json();
@@ -1849,6 +2586,12 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   });
   assert.equal(pingResponse.ok, true);
 
+  const originMainStatusResponse = await fetch(new URL("api/origin-main-status?token=secret&force=1", serverInfo.url));
+  const originMainStatus = await originMainStatusResponse.json();
+  assert.equal(originMainStatus.statuses[0].label, "comm");
+  assert.equal(originMainStatus.statuses[0].state, "current");
+  assert.equal(originMainStatus.statuses[0].upToDate, true);
+
   const checkoutResponse = await fetch(new URL("api/checkout", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1870,6 +2613,40 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.equal(rebase.snapshot.branch, "main");
   assert.equal(rebase.snapshot.commits[0].hash, "abc123");
 
+  const updateResponse = await fetch(new URL("api/update-graphs", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret", mode: "update", snapshotLimits: [1] }),
+  });
+  const update = await updateResponse.json();
+  assert.equal(update.ok, true);
+  assert.equal(update.results[0].message, "comm updated main from origin/main.");
+  assert.equal(update.snapshots[0].branch, "main");
+  assert.equal(update.snapshots[0].commits[0].hash, "abc123");
+
+  const machResponse = await fetch(new URL("api/mach-action", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret", action: "run" }),
+  });
+  const machStart = await machResponse.json();
+  assert.equal(machStart.ok, true);
+  assert.equal(machStart.action, "run");
+  assert.equal(machStart.label, "comm");
+  assert.equal(machStart.status, "running");
+
+  const machSession = await waitForMachSession(
+    new URL(`api/mach-action/${machStart.id}?token=secret`, serverInfo.url),
+    (item) => item.status === "complete"
+  );
+  assert.equal(machSession.message, "Run finished.");
+  assert.equal(machSession.phase, "");
+  assert.equal(machSession.canCancel, false);
+  assert.match(machSession.output, /\$ \.\.\/mach build/);
+  assert.match(machSession.output, /build complete/);
+  assert.match(machSession.output, /\$ \.\.\/mach run/);
+  assert.match(machSession.output, /run complete/);
+
   const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
   const closeResponse = await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
@@ -1880,6 +2657,11 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   await closePromise;
 
   assert.equal(calls.some((call) => call.args[0] === "switch" && call.args[1] === "main"), true);
+  assert.equal(calls.some((call) => call.args[0] === "fetch" && call.args[1] === "origin" && call.args[2] === "main"), true);
+  assert.equal(calls.some((call) => call.args[0] === "pull" && call.args[1] === "--ff-only"), true);
+  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.cwd === "/repo/comm" && call.args.join(" ") === "build"), true);
+  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.cwd === "/repo/comm" && call.args.join(" ") === "run"), true);
+  assert.equal(calls.some((call) => call.cmd === "osascript" || call.cmd === "pkill"), false);
   assert.equal(calls.some((call) => call.args[0] === "switch" && call.args[1] === "--detach"), true);
   assert.equal(calls.some((call) => call.args[0] === "cherry-pick" && call.args[1] === "--no-commit"), true);
   assert.equal(calls.some((call) => call.args[0] === "commit" && call.args[1] === "-C"), true);
@@ -1984,7 +2766,171 @@ test("interactive graph server amends current commit with edited message and ref
   await closePromise;
 });
 
+test("interactive graph server cancels an active build session", async (t) => {
+  let releaseBuild;
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    runCommand: async (command) => {
+      if (command.cmd.endsWith("mach") && command.args[0] === "build") {
+        return new Promise((resolve) => {
+          releaseBuild = () => resolve("build stopped\n");
+        });
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    releaseBuild?.();
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/mach-action", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret", action: "build" }),
+  });
+  const start = await startResponse.json();
+  assert.equal(start.ok, true);
+
+  const statusUrl = new URL(`api/mach-action/${start.id}?token=secret`, serverInfo.url);
+  const running = await waitForMachSession(statusUrl, (item) => item.phase === "building");
+  assert.equal(running.canCancel, true);
+
+  const cancelResponse = await fetch(new URL(`api/mach-action/${start.id}/cancel`, serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  const canceled = await cancelResponse.json();
+  assert.equal(canceled.status, "canceled");
+  assert.equal(canceled.message, "Build canceled.");
+  assert.equal(canceled.canCancel, false);
+
+  releaseBuild();
+  await waitForMachSession(statusUrl, (item) => item.status === "canceled");
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph server starts a try session and refreshes try links", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-server-try-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const calls = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cmd.endsWith("mach")) {
+        return "Created try push: https://treeherder.mozilla.org/jobs?repo=try&revision=server\n";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+        return storePath;
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123\n";
+      }
+
+      if (command.args[0] === "diff" || command.args[0] === "ls-files") {
+        return "";
+      }
+
+      if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+        return "Bug 123 - Server try. r=#reviewers\n";
+      }
+
+      if (command.args[0] === "log") {
+        return "\x1eabc123\x1f\x1fHEAD -> main\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 123 - Server try\n";
+      }
+
+      if (command.cmd === "sh") {
+        return "server-patch-id abc123\n";
+      }
+
+      return "";
+    },
+  });
+
+  t.after(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/try", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      options: {
+        selector: "auto",
+        "tasks-regex": "browser",
+        artifact: true,
+      },
+      snapshotLimit: 1,
+    }),
+  });
+  const start = await startResponse.json();
+  assert.equal(start.ok, true);
+  assert.equal(start.status, "running");
+
+  const session = await waitForMachSession(
+    new URL(`api/try/${start.id}?token=secret`, serverInfo.url),
+    (item) => item.status === "complete"
+  );
+  assert.equal(session.tryRun.url, "https://treeherder.mozilla.org/jobs?repo=try&revision=server");
+  assert.equal(session.snapshot.commits[0].tryRuns[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=server");
+  assert.match(session.output, /\$ \.\.\/mach try auto --tasks-regex browser --artifact/);
+  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "try auto --tasks-regex browser --artifact"), true);
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
 test("interactive graph server submits current commit through browser prompts", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-submit-try-"));
+  const storePath = path.join(tempDir, "try-runs.json");
   const calls = [];
   const comments = [];
   const serverInfo = await startInteractiveGraphServer({
@@ -2021,6 +2967,10 @@ test("interactive graph server submits current commit through browser prompts", 
         return "main\n";
       }
 
+      if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+        return storePath;
+      }
+
       if (command.args[0] === "rev-parse") {
         return "abc123\n";
       }
@@ -2033,6 +2983,10 @@ test("interactive graph server submits current commit through browser prompts", 
         return "\x1eabc123\x1f\x1fHEAD -> main\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 123 - Submit me\n";
       }
 
+      if (command.cmd === "sh") {
+        return "submit-patch-id abc123\n";
+      }
+
       if (command.args[0] === "diff" || command.args[0] === "ls-files") {
         return "";
       }
@@ -2040,7 +2994,8 @@ test("interactive graph server submits current commit through browser prompts", 
       return "";
     },
   });
-  t.after(() => {
+  t.after(async () => {
+    await rm(tempDir, { recursive: true, force: true });
     if (serverInfo.server.listening) {
       serverInfo.server.close();
     }
@@ -2094,6 +3049,7 @@ test("interactive graph server submits current commit through browser prompts", 
   ]);
   assert.equal(session.snapshot.branch, "main");
   assert.equal(session.snapshot.commits[0].hash, "abc123");
+  assert.equal(session.snapshot.commits[0].tryRuns[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=abc");
   assert.deepEqual(comments, [{
     message: "try: https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
     resolve: true,
@@ -2178,14 +3134,19 @@ test("graph command serves interactive mode without writing static output", asyn
       commits: [],
       diffs: {},
     }),
-    readBundle: async () => "window.GitgraphJS = {};",
     makeDir: async () => calls.push(["mkdir"]),
     write: async () => calls.push(["write"]),
     open: async (url) => calls.push(["open", url]),
     makeToken: () => "secret",
     log: () => {},
     startServer: async ({ html, token, pageSize }) => {
-      calls.push(["server", /const INTERACTIVE/.test(html), token, pageSize]);
+      calls.push([
+        "server",
+        /id="graph-config"/.test(html),
+        /\/assets\/graph-client\/init\.js/.test(html),
+        token,
+        pageSize,
+      ]);
       return {
         url: "http://127.0.0.1:1234/",
         server: {},
@@ -2198,7 +3159,7 @@ test("graph command serves interactive mode without writing static output", asyn
 
   assert.equal(url, "http://127.0.0.1:1234/");
   assert.deepEqual(calls, [
-    ["server", true, "secret", 25],
+    ["server", true, true, "secret", 25],
     ["open", "http://127.0.0.1:1234/"],
     ["wait", {}],
   ]);

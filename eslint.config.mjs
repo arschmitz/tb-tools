@@ -8,4 +8,11 @@ export default defineConfig([
   { files: ["**/*.js"], languageOptions: { sourceType: "script" } },
   { files: ["**/*.{js,mjs,cjs}"], languageOptions: { globals: globals.node } },
   { files: ["**/*.{js,mjs,cjs}"], plugins: { js }, extends: ["js/recommended"] },
+  {
+    files: ["commands/graph/client/**/*.js"],
+    languageOptions: {
+      sourceType: "module",
+      globals: globals.browser,
+    },
+  },
 ]);

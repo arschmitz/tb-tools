@@ -129,7 +129,7 @@ const commands = {
     ]
   },
   graph: {
-    description: "Generates and opens a tabbed branch graph for comm and the Firefox parent checkout. Interactive mode can show Bugzilla/Phabricator status, mark accepted patches for checkin, checkout, rebase, prune, amend, and submit the current commit.",
+    description: "Generates and opens a tabbed branch graph for comm and the Firefox parent checkout. Interactive mode can show origin/main freshness, Bugzilla/Phabricator status, tracked try runs, mark accepted patches for checkin, checkout, rebase, prune, amend, submit the current commit, submit configurable mach try runs, update or rebase both checkouts onto origin/main, and build or build+run Thunderbird with a dismissible bottom command status bar and toggleable output panel.",
     header: "Graph Options",
     options: [
       { name: "limit", alias: "l", description: "Maximum commits to include per checkout", defaultValue: "80" },
@@ -139,7 +139,7 @@ const commands = {
       { name: "firefox", description: "Include the Firefox parent checkout tab", defaultValue: "true" },
       { name: "diffs", description: "Embed per-commit diffs for click-to-view", defaultValue: "true" },
       { name: "maxDiffBytes", description: "Maximum embedded diff bytes per commit", defaultValue: "200000" },
-      { name: "interactive", alias: "i", description: "Serve an interactive graph with paged commits, server-loaded diffs, live polling, checkout callbacks, Bugzilla/Phabricator status badges, accepted-patch checkin-needed marking, and current-commit submit prompts", defaultValue: "false" },
+      { name: "interactive", alias: "i", description: "Serve an interactive graph with paged commits, server-loaded diffs, live polling, origin/main freshness badges, checkout callbacks, update/rebase buttons with post-update build/run prompts, build/run controls with a dismissible bottom command status bar and toggleable output, Bugzilla/Phabricator status badges, accepted-patch checkin-needed marking, tracked try-run links, configurable mach try submission, and current-commit submit prompts", defaultValue: "false" },
       { name: "pageSize", description: "Commit page size for interactive infinite loading", defaultValue: "80" },
       { name: "port", description: "Localhost port for interactive mode. Use 0 for a random free port", defaultValue: "0" },
     ],
@@ -223,9 +223,14 @@ const commands = {
     },
   },
   lint: {
-    description: 'run commlint on all files',
+    description: 'Runs commlint on the current local commit and uncommitted changes by default.',
+    header: "Lint Options",
+    options: [
+      { name: "all", description: "Run commlint on all standard comm directories", defaultValue: "false" },
+    ],
     async run () {
-      await lint();
+      const options = mapBooleanOptions(args(commands.lint.options, { argv }));
+      await lint(options);
     },
   },
   open: {

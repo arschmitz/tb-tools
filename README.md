@@ -156,7 +156,7 @@ tb diff
 <br/><br/>
 ### graph
 ---
-Generates and opens a tabbed branch graph for comm and the Firefox parent checkout. Interactive mode can show Bugzilla/Phabricator status, mark accepted patches for checkin, checkout, rebase, prune, amend, and submit the current commit.
+Generates and opens a tabbed branch graph for comm and the Firefox parent checkout. Interactive mode can show origin/main freshness, Bugzilla/Phabricator status, tracked try runs, mark accepted patches for checkin, checkout, rebase, prune, amend, submit the current commit, submit configurable mach try runs, update or rebase both checkouts onto origin/main, and build or build+run Thunderbird with a dismissible bottom command status bar and toggleable output panel.
 ```bash
 tb graph
 ```
@@ -170,7 +170,7 @@ tb graph
 |--firefox||Include the Firefox parent checkout tab|true|`tb graph --firefox=false`
 |--diffs||Embed per-commit diffs for click-to-view|true|`tb graph --diffs=false`
 |--maxDiffBytes||Maximum embedded diff bytes per commit|200000|`tb graph --maxDiffBytes=200000`
-|--interactive|-i|Serve an interactive graph with paged commits, server-loaded diffs, live polling, checkout callbacks, Bugzilla/Phabricator status badges, accepted-patch checkin-needed marking, and current-commit submit prompts|false|`tb graph --interactive`
+|--interactive|-i|Serve an interactive graph with paged commits, server-loaded diffs, live polling, origin/main freshness badges, checkout callbacks, update/rebase buttons with post-update build/run prompts, build/run controls with a dismissible bottom command status bar and toggleable output, Bugzilla/Phabricator status badges, accepted-patch checkin-needed marking, tracked try-run links, configurable mach try submission, and current-commit submit prompts|false|`tb graph --interactive`
 |--pageSize||Commit page size for interactive infinite loading|80|`tb graph --pageSize=80`
 |--port||Localhost port for interactive mode. Use 0 for a random free port|0|`tb graph --port=0`
 
@@ -267,12 +267,16 @@ tb land
 <br/><br/>
 ### lint
 ---
-run commlint on all files
+Runs commlint on the current local commit and uncommitted changes by default.
 ```bash
 tb lint
 ```
 <br/><br/>
 ![Screen recording of lint.](/images/lint.gif)
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--all||Run commlint on all standard comm directories|false|`tb lint --all`
 
 <br/><br/>
 ### open
