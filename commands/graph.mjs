@@ -8,8 +8,15 @@ import { fileURLToPath } from "node:url";
 import hljs from "highlight.js";
 import openUrl from "open";
 import { run } from "../lib/utils.mjs";
-import { comment as defaultComment } from "../lib/phab.mjs";
+import { getBug as defaultGetBug, updateBug as defaultUpdateBug } from "../lib/bugzilla.mjs";
+import defaultPhab, { comment as defaultComment } from "../lib/phab.mjs";
 import { DEFAULT_BRANCH } from "../lib/git.mjs";
+import {
+  getBugIdFromText,
+  getBugUrl,
+  getPhabRevisionFromText,
+  getPhabUrl,
+} from "../lib/workflow.mjs";
 import { createSubmitCommand } from "./submit.mjs";
 import { createTestCommand } from "./test.mjs";
 import { createTryCommand } from "./try.mjs";
@@ -19,6 +26,7 @@ const RECORD_SEPARATOR = "\x1e";
 const DEFAULT_MAX_DIFF_BYTES = 200000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_SUBMIT_OUTPUT_LIMIT = 160000;
+const CHECKIN_NEEDED_KEYWORD = "checkin-needed-tb";
 const WORKING_TREE_CHANGES_HASH = "uncommitted-changes";
 const GRAPH_SUBMIT_OPTIONS = {
   artifact: true,
@@ -1447,6 +1455,238 @@ async function getCurrentGraphBase(graph, runCommand) {
   };
 }
 
+function getFirstBugFromResponse(response, bugId) {
+  if (Array.isArray(response?.bugs)) {
+    return response.bugs.find((bug) => String(bug.id) === String(bugId)) || response.bugs[0] || null;
+  }
+
+  if (response?.id) {
+    return response;
+  }
+
+  return null;
+}
+
+function normalizeBugStatus(response, bugId) {
+  const bug = getFirstBugFromResponse(response, bugId);
+
+  if (!bug) {
+    return {
+      id: bugId,
+      url: getBugUrl(bugId),
+      error: "Bug not found.",
+    };
+  }
+
+  const keywords = Array.isArray(bug.keywords) ? bug.keywords : [];
+
+  return {
+    id: String(bug.id || bugId),
+    url: getBugUrl(bug.id || bugId),
+    status: bug.status || "",
+    resolution: bug.resolution || "",
+    summary: bug.summary || "",
+    assignedTo: bug.assigned_to || "",
+    isOpen: typeof bug.is_open === "boolean" ? bug.is_open : undefined,
+    keywords,
+    hasCheckinNeeded: keywords.includes(CHECKIN_NEEDED_KEYWORD),
+  };
+}
+
+function normalizePhabricatorStatus(response, revision) {
+  const id = revision.replace(/^D/i, "");
+  const item = Array.isArray(response?.result)
+    ? response.result.find((revisionItem) => String(revisionItem.id) === String(id)) || response.result[0]
+    : response?.result || response;
+
+  if (!item) {
+    return {
+      revision,
+      url: getPhabUrl(revision),
+      error: "Revision not found.",
+    };
+  }
+
+  return {
+    revision: `D${item.id || id}`,
+    url: item.uri || getPhabUrl(`D${item.id || id}`),
+    status: item.status || "",
+    statusName: item.statusName || item.fields?.status?.name || "",
+    title: item.title || item.fields?.title || "",
+  };
+}
+
+function isAcceptedPhabricatorStatus(phabricator) {
+  if (!phabricator || phabricator.error) {
+    return false;
+  }
+
+  const status = `${phabricator.statusName || ""} ${phabricator.status || ""}`.toLowerCase();
+
+  return /\baccepted\b/.test(status) || /status-accepted/.test(status);
+}
+
+function getGraphCommitIntegrationHaystack({ graph, hash, message }) {
+  const commit = (graph.commits || []).find((item) => (
+    item.hash === hash ||
+    (hash === "HEAD" && isCheckedOutCommit(item)) ||
+    (isWorkingTreeCommitHash(hash) && isWorkingTreeCommitHash(item.hash))
+  ));
+
+  return [
+    message,
+    commit?.subject,
+    ...(commit?.refs || []),
+  ].filter(Boolean).join("\n");
+}
+
+async function getBugzillaStatus({
+  bugId,
+  getBug = defaultGetBug,
+}) {
+  if (!bugId) {
+    return null;
+  }
+
+  try {
+    return normalizeBugStatus(await getBug(bugId), bugId);
+  } catch (error) {
+    return {
+      id: bugId,
+      url: getBugUrl(bugId),
+      error: String(error?.message || error),
+    };
+  }
+}
+
+async function getPhabricatorStatus({
+  revision,
+  phab = defaultPhab,
+}) {
+  if (!revision) {
+    return null;
+  }
+
+  const id = revision.replace(/^D/i, "");
+
+  try {
+    return normalizePhabricatorStatus(await phab({
+      route: "differential.query",
+      params: { ids: [Number(id)] },
+    }), revision);
+  } catch (error) {
+    return {
+      revision,
+      url: getPhabUrl(revision),
+      error: String(error?.message || error),
+    };
+  }
+}
+
+export async function getGraphCommitIntegrationStatus({
+  graph,
+  hash,
+  runCommand = run,
+  getBug = defaultGetBug,
+  phab = defaultPhab,
+}) {
+  if (!graph) {
+    const error = new Error("Unknown graph checkout.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const message = await getGraphCommitMessage({
+    graph,
+    hash,
+    runCommand,
+  });
+  const haystack = getGraphCommitIntegrationHaystack({ graph, hash, message });
+  let bugId = getBugIdFromText(haystack);
+  const phabRevision = getPhabRevisionFromText(haystack);
+  const [bug, phabricator] = await Promise.all([
+    getBugzillaStatus({ bugId, getBug }),
+    getPhabricatorStatus({ revision: phabRevision, phab }),
+  ]);
+  let effectiveBug = bug;
+
+  if (!bugId && phabricator && !phabricator.error) {
+    bugId = getBugIdFromText(phabricator.title);
+    effectiveBug = await getBugzillaStatus({ bugId, getBug });
+  }
+
+  return {
+    bugId,
+    phabRevision,
+    bug: effectiveBug,
+    phabricator,
+  };
+}
+
+export async function markGraphBugForCheckin({
+  graph,
+  hash,
+  bugId,
+  runCommand = run,
+  getBug = defaultGetBug,
+  updateBug = defaultUpdateBug,
+  phab = defaultPhab,
+}) {
+  const before = await getGraphCommitIntegrationStatus({
+    graph,
+    hash,
+    runCommand,
+    getBug,
+    phab,
+  });
+  const targetBugId = String(bugId || before.bugId || before.bug?.id || "").trim();
+
+  if (!targetBugId) {
+    const error = new Error("No Bugzilla bug detected for this commit.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!isAcceptedPhabricatorStatus(before.phabricator)) {
+    const error = new Error("Only accepted Phabricator patches can be marked for checkin.");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (!before.bug?.hasCheckinNeeded) {
+    await updateBug(targetBugId, {
+      keywords: {
+        add: [CHECKIN_NEEDED_KEYWORD],
+      },
+    });
+  }
+
+  const integration = before.bug?.hasCheckinNeeded
+    ? before
+    : await getGraphCommitIntegrationStatus({
+      graph,
+      hash,
+      runCommand,
+      getBug,
+      phab,
+    });
+
+  if (integration.bug && String(integration.bug.id) === targetBugId) {
+    integration.bug.keywords = Array.from(new Set([
+      ...(integration.bug.keywords || []),
+      CHECKIN_NEEDED_KEYWORD,
+    ]));
+    integration.bug.hasCheckinNeeded = true;
+  }
+
+  return {
+    ...integration,
+    message: before.bug?.hasCheckinNeeded
+      ? `Bug ${targetBugId} already has ${CHECKIN_NEEDED_KEYWORD}.`
+      : `Bug ${targetBugId} marked for checkin.`,
+  };
+}
+
 function parseGraphStatusFile(line) {
   if (!line) {
     return "";
@@ -2246,6 +2486,7 @@ export function buildGraphHtml({
             <strong class="diff-title">No commit selected</strong>
             <span class="diff-meta"></span>
             <pre class="diff-message" hidden></pre>
+            <div class="integration-status" hidden></div>
             <span class="diff-stats" hidden aria-label="">
               <span class="stat-additions"></span>
               <span class="stat-deletions"></span>
@@ -2313,6 +2554,24 @@ export function buildGraphHtml({
     .diff-message a { color: #0969da; text-decoration: none; }
     .diff-message a:hover, .diff-message a:focus { text-decoration: underline; }
     .diff-message[hidden] { display: none; }
+    .integration-status { align-items: center; color: #59616d; display: flex; flex: 0 0 100%; flex-wrap: wrap; font-size: 12px; gap: 6px; min-width: 0; }
+    .integration-status[hidden] { display: none; }
+    .status-badge { align-items: center; border: 1px solid #d0d7de; border-radius: 999px; color: #24292f; display: inline-flex; font-size: 12px; gap: 5px; line-height: 1.2; max-width: 100%; min-width: 0; padding: 3px 8px; text-decoration: none; }
+    .status-badge:hover, .status-badge:focus { background: #f6f8fa; text-decoration: none; }
+    .status-badge strong { font-weight: 600; white-space: nowrap; }
+    .status-badge .status-value { color: #57606a; white-space: nowrap; }
+    .status-badge .status-detail { color: #57606a; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-badge.open { border-color: #2da44e; background: #dafbe1; color: #116329; }
+    .status-badge.closed, .status-badge.accepted { border-color: #8250df; background: #fbefff; color: #6639ba; }
+    .status-badge.warning { border-color: #bf8700; background: #fff8c5; color: #7d4e00; }
+    .status-badge.error { border-color: #f1a5a5; background: #ffebe9; color: #9b1c1c; }
+    .status-badge.open .status-value, .status-badge.open .status-detail { color: #116329; }
+    .status-badge.closed .status-value, .status-badge.closed .status-detail, .status-badge.accepted .status-value, .status-badge.accepted .status-detail { color: #6639ba; }
+    .status-badge.warning .status-value, .status-badge.warning .status-detail { color: #7d4e00; }
+    .status-badge.error .status-value, .status-badge.error .status-detail { color: #9b1c1c; }
+    .checkin-needed-button { align-items: center; background: #1f883d; border: 1px solid #1f883d; border-radius: 999px; color: #fff; cursor: pointer; display: inline-flex; font-size: 12px; line-height: 1.2; padding: 3px 8px; white-space: nowrap; }
+    .checkin-needed-button:hover, .checkin-needed-button:focus { background: #1a7f37; border-color: #1a7f37; }
+    .checkin-needed-button:disabled { background: #dafbe1; border-color: #2da44e; color: #116329; cursor: default; }
     .diff-stats { display: flex; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; gap: 6px; white-space: nowrap; }
     .diff-stats[hidden] { display: none; }
     .checkout-commit, .amend-commit, .submit-commit, .load-more { border: 1px solid #1f5f9f; border-radius: 4px; background: #1f5f9f; color: #fff; cursor: pointer; font-size: 12px; padding: 4px 8px; }
@@ -2447,9 +2706,23 @@ export function buildGraphHtml({
       }
       body { background: #111418; color: #f1f3f6; }
       header, .summary, .graph, .diff-viewer, .tab { background: #191d23; color: #f1f3f6; border-color: #323844; }
-      .summary span, .diff-meta { color: #acb4c0; }
+      .summary span, .diff-meta, .integration-status { color: #acb4c0; }
       .diff-message { border-color: #323844; color: #f1f3f6; }
       .diff-message a { color: #79c0ff; }
+      .status-badge { background: #191d23; border-color: #424b59; color: #e6edf3; }
+      .status-badge:hover, .status-badge:focus { background: #161b22; }
+      .status-badge .status-value, .status-badge .status-detail { color: #acb4c0; }
+      .status-badge.open { background: #072b15; border-color: #2ea043; color: #7ee787; }
+      .status-badge.closed, .status-badge.accepted { background: #28133f; border-color: #8957e5; color: #d2a8ff; }
+      .status-badge.warning { background: #341a00; border-color: #9e6a03; color: #f2cc60; }
+      .status-badge.error { background: #3d1114; border-color: #da3633; color: #ff9f9f; }
+      .status-badge.open .status-value, .status-badge.open .status-detail { color: #7ee787; }
+      .status-badge.closed .status-value, .status-badge.closed .status-detail, .status-badge.accepted .status-value, .status-badge.accepted .status-detail { color: #d2a8ff; }
+      .status-badge.warning .status-value, .status-badge.warning .status-detail { color: #f2cc60; }
+      .status-badge.error .status-value, .status-badge.error .status-detail { color: #ff9f9f; }
+      .checkin-needed-button { background: #238636; border-color: #238636; color: #fff; }
+      .checkin-needed-button:hover, .checkin-needed-button:focus { background: #2ea043; border-color: #2ea043; }
+      .checkin-needed-button:disabled { background: #072b15; border-color: #2ea043; color: #7ee787; }
       .pane-resizer::before { background: #424b59; }
       .pane-resizer:hover::before, .pane-resizer:focus-visible::before, .pane-resizer.dragging::before { background: #4b9eff; box-shadow: 0 0 0 3px rgba(75, 158, 255, 0.18); }
       .diff-header { border-color: #323844; }
@@ -3632,6 +3905,8 @@ export function buildGraphHtml({
       setCommitMessage(viewer.querySelector(".diff-message"), "");
       viewer.querySelector(".checkout-commit").hidden = true;
       viewer.querySelector(".amend-commit").hidden = true;
+      viewer.querySelector(".submit-commit").hidden = true;
+      clearIntegrationStatus(viewer.querySelector(".integration-status"));
       viewer.querySelector(".checkout-status").textContent = "";
       setDiffStats(viewer.querySelector(".diff-stats"), null);
       setDiffText(viewer.querySelector(".diff-body"), message);
@@ -3711,6 +3986,245 @@ export function buildGraphHtml({
       }
 
       return nodes;
+    }
+
+    function clearIntegrationStatus(container) {
+      if (!container) {
+        return;
+      }
+
+      container.hidden = true;
+      container.replaceChildren();
+    }
+
+    function getBugStatusClass(bug) {
+      if (bug.error) {
+        return "error";
+      }
+
+      const status = String(bug.status || "").toLowerCase();
+      const resolution = String(bug.resolution || "").toLowerCase();
+
+      if (bug.isOpen === true || ["unconfirmed", "new", "assigned", "reopened"].includes(status)) {
+        return "open";
+      }
+
+      if (bug.isOpen === false || resolution && resolution !== "---" || ["resolved", "verified", "closed"].includes(status)) {
+        return "closed";
+      }
+
+      return "";
+    }
+
+    function getPhabricatorStatusClass(revision) {
+      if (revision.error) {
+        return "error";
+      }
+
+      const status = String(revision.statusName || revision.status || "").toLowerCase();
+
+      if (/accepted|closed|landed/.test(status)) {
+        return "accepted";
+      }
+
+      if (/abandoned|rejected/.test(status)) {
+        return "warning";
+      }
+
+      if (/review|draft|open|planned/.test(status)) {
+        return "open";
+      }
+
+      return "";
+    }
+
+    function isAcceptedPhabricatorStatus(revision) {
+      if (!revision || revision.error) {
+        return false;
+      }
+
+      const status = String((revision.statusName || "") + " " + (revision.status || "")).toLowerCase();
+
+      return /\\baccepted\\b/.test(status) || /status-accepted/.test(status);
+    }
+
+    function getBugStatusText(bug) {
+      return [bug.status, bug.resolution && bug.resolution !== "---" ? bug.resolution : ""]
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    function createStatusBadge({ label, url, status, detail, className = "" }) {
+      const badge = url ? document.createElement("a") : document.createElement("span");
+      badge.className = ["status-badge", className].filter(Boolean).join(" ");
+
+      if (url) {
+        badge.href = url;
+        badge.target = "_blank";
+        badge.rel = "noreferrer";
+      }
+
+      const labelNode = document.createElement("strong");
+      labelNode.textContent = label;
+      badge.append(labelNode);
+
+      if (status) {
+        const statusNode = document.createElement("span");
+        statusNode.className = "status-value";
+        statusNode.textContent = status;
+        badge.append(statusNode);
+      }
+
+      if (detail) {
+        const detailNode = document.createElement("span");
+        detailNode.className = "status-detail";
+        detailNode.textContent = detail;
+        badge.append(detailNode);
+      }
+
+      return badge;
+    }
+
+    function createCheckinNeededButton({ bug, index, commit }) {
+      const button = document.createElement("button");
+      button.className = "checkin-needed-button";
+      button.type = "button";
+      button.dataset.graphIndex = String(index);
+      button.dataset.hash = commit.hash;
+      button.dataset.bugId = bug.id;
+      button.textContent = bug.hasCheckinNeeded ? "Marked for checkin" : "Mark for checkin";
+      button.disabled = Boolean(bug.hasCheckinNeeded);
+
+      return button;
+    }
+
+    function renderCommitIntegrationStatus(container, result, { index, commit }) {
+      const badges = [];
+
+      if (result.bug) {
+        badges.push(createStatusBadge({
+          label: "Bug " + result.bug.id,
+          url: result.bug.url,
+          status: result.bug.error ? "Unavailable" : getBugStatusText(result.bug),
+          detail: result.bug.error || result.bug.summary,
+          className: getBugStatusClass(result.bug),
+        }));
+
+        if (!result.bug.error && isAcceptedPhabricatorStatus(result.phabricator)) {
+          badges.push(createCheckinNeededButton({
+            bug: result.bug,
+            index,
+            commit,
+          }));
+        }
+      }
+
+      if (result.phabricator) {
+        badges.push(createStatusBadge({
+          label: result.phabricator.revision,
+          url: result.phabricator.url,
+          status: result.phabricator.error ? "Unavailable" : result.phabricator.statusName || result.phabricator.status,
+          detail: result.phabricator.error || result.phabricator.title,
+          className: getPhabricatorStatusClass(result.phabricator),
+        }));
+      }
+
+      if (!badges.length) {
+        clearIntegrationStatus(container);
+        return;
+      }
+
+      container.replaceChildren(...badges);
+      container.hidden = false;
+    }
+
+    async function loadSelectedCommitIntegrationStatus(index, commit, container) {
+      if (!INTERACTIVE.enabled || isWorkingTreeCommit(commit)) {
+        clearIntegrationStatus(container);
+        return;
+      }
+
+      container.hidden = false;
+      container.textContent = "Loading linked Bugzilla and Phabricator status...";
+
+      try {
+        const response = await fetch(
+          "/api/graph/" + index + "/integration/" + encodeURIComponent(commit.hash) +
+            "?token=" + encodeURIComponent(INTERACTIVE.token)
+        );
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || response.statusText);
+        }
+
+        if (graphStates[index].selectedHash !== commit.hash) {
+          return;
+        }
+
+        renderCommitIntegrationStatus(container, result, { index, commit });
+      } catch (error) {
+        if (graphStates[index].selectedHash === commit.hash) {
+          container.replaceChildren(createStatusBadge({
+            label: "Integrations",
+            status: "Unavailable",
+            detail: error && error.message ? error.message : String(error),
+            className: "error",
+          }));
+          container.hidden = false;
+        }
+      }
+    }
+
+    async function markBugForCheckin(button) {
+      const graphIndex = Number(button.dataset.graphIndex);
+      const hash = button.dataset.hash;
+      const bugId = button.dataset.bugId;
+      const viewer = document.getElementById("diff-" + graphIndex);
+      const status = viewer.querySelector(".checkout-status");
+      const container = viewer.querySelector(".integration-status");
+
+      if (!confirm("Add checkin-needed-tb to Bug " + bugId + "?")) {
+        return;
+      }
+
+      button.disabled = true;
+      button.textContent = "Marking...";
+      status.classList.remove("error");
+      status.textContent = "Marking Bug " + bugId + " for checkin...";
+
+      try {
+        const response = await fetch("/api/bugzilla/checkin", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            token: INTERACTIVE.token,
+            graphIndex,
+            hash,
+            bugId,
+          }),
+        });
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || response.statusText);
+        }
+
+        if (graphStates[graphIndex].selectedHash === hash) {
+          const commit = graphStates[graphIndex].commits.find((item) => item.hash === hash);
+
+          if (commit) {
+            renderCommitIntegrationStatus(container, result, { index: graphIndex, commit });
+          }
+        }
+
+        status.textContent = result.message || "Bug " + bugId + " marked for checkin.";
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "Mark for checkin";
+        status.classList.add("error");
+        status.textContent = error && error.message ? error.message : String(error);
+      }
     }
 
     async function loadSelectedCommitMessage(index, commit, messageElement) {
@@ -3859,6 +4373,7 @@ export function buildGraphHtml({
       const title = viewer.querySelector(".diff-title");
       const meta = viewer.querySelector(".diff-meta");
       const commitMessage = viewer.querySelector(".diff-message");
+      const integrationStatus = viewer.querySelector(".integration-status");
       const stats = viewer.querySelector(".diff-stats");
       const body = viewer.querySelector(".diff-body");
       const checkoutButton = viewer.querySelector(".checkout-commit");
@@ -3873,6 +4388,7 @@ export function buildGraphHtml({
       title.textContent = formatCommitTitle(commit);
       meta.textContent = formatCommitMeta(commit);
       setCommitMessage(commitMessage, "");
+      clearIntegrationStatus(integrationStatus);
       checkoutButton.hidden = !INTERACTIVE.enabled || isWorkingTreeCommit(commit);
       checkoutButton.disabled = false;
       checkoutButton.dataset.graphIndex = String(index);
@@ -3898,6 +4414,7 @@ export function buildGraphHtml({
       if (INTERACTIVE.enabled) {
         setDiffText(body, "Loading diff...");
         loadSelectedCommitMessage(index, commit, commitMessage);
+        loadSelectedCommitIntegrationStatus(index, commit, integrationStatus);
 
         try {
           const response = await fetch(
@@ -4337,6 +4854,12 @@ export function buildGraphHtml({
         return;
       }
 
+      const checkinButton = event.target.closest(".checkin-needed-button");
+      if (checkinButton) {
+        markBugForCheckin(checkinButton);
+        return;
+      }
+
       const button = event.target.closest(".copy-path");
       if (!button) {
         return;
@@ -4573,6 +5096,16 @@ function validateToken(token, expectedToken) {
   }
 }
 
+function mergeGraphCommits(existingCommits = [], nextCommits = []) {
+  const commits = new Map(existingCommits.map((commit) => [commit.hash, commit]));
+
+  for (const commit of nextCommits) {
+    commits.set(commit.hash, commit);
+  }
+
+  return Array.from(commits.values());
+}
+
 function formatDurationLabel(milliseconds) {
   const seconds = Math.ceil(Number(milliseconds || 0) / 1000);
   const unit = seconds === 1 ? "second" : "seconds";
@@ -4591,13 +5124,17 @@ export async function startInteractiveGraphServer({
   heartbeatIntervalMs = 2000,
   heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
   runCommand = run,
+  getBug = defaultGetBug,
+  updateBug = defaultUpdateBug,
+  phab = defaultPhab,
   postComment = defaultComment,
   serverFactory = createServer,
 }) {
   const serverGraphs = graphs.map((graph) => ({
     ...graph,
-    knownHashes: new Set(),
-    workingTreeCount: 0,
+    commits: graph.commits || [],
+    knownHashes: new Set((graph.commits || []).map((commit) => commit.hash)),
+    workingTreeCount: graph.workingTreeCount || 0,
   }));
   const submitSessions = new Map();
   const sockets = new Set();
@@ -4640,7 +5177,8 @@ export async function startInteractiveGraphServer({
     graph.branch = snapshot.branch;
     graph.workingTreeCount = snapshot.workingTreeCount || 0;
     graph.commitCount = snapshot.commitCount || 0;
-    graph.knownHashes = new Set(snapshot.commits.map((commit) => commit.hash));
+    graph.commits = snapshot.commits || [];
+    graph.knownHashes = new Set(graph.commits.map((commit) => commit.hash));
 
     return snapshot;
   }
@@ -4690,6 +5228,7 @@ export async function startInteractiveGraphServer({
         });
 
         graph.workingTreeCount = page.workingTreeCount || graph.workingTreeCount || 0;
+        graph.commits = mergeGraphCommits(graph.commits, page.commits);
         page.commits.forEach((commit) => graph.knownHashes.add(commit.hash));
         sendJson(response, 200, { ok: true, ...page });
         return;
@@ -4758,6 +5297,63 @@ export async function startInteractiveGraphServer({
           runCommand,
         });
         sendJson(response, 200, { ok: true, message });
+        return;
+      }
+
+      const integrationMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/integration\/(.+)$/);
+      if (request.method === "GET" && integrationMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        const graph = serverGraphs[Number(integrationMatch[1])];
+        const hash = decodeURIComponent(integrationMatch[2]);
+
+        if (!graph) {
+          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          return;
+        }
+
+        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD" && !graph.knownHashes.has(hash)) {
+          sendJson(response, 404, { ok: false, error: "Commit has not been loaded by this graph." });
+          return;
+        }
+
+        const integration = await getGraphCommitIntegrationStatus({
+          graph,
+          hash,
+          runCommand,
+          getBug,
+          phab,
+        });
+        sendJson(response, 200, { ok: true, ...integration });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/bugzilla/checkin") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+        const graph = serverGraphs[Number(body.graphIndex)];
+        const hash = String(body.hash || "");
+
+        if (!graph) {
+          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          return;
+        }
+
+        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD" && !graph.knownHashes.has(hash)) {
+          sendJson(response, 404, { ok: false, error: "Commit has not been loaded by this graph." });
+          return;
+        }
+
+        const result = await markGraphBugForCheckin({
+          graph,
+          hash,
+          bugId: body.bugId,
+          runCommand,
+          getBug,
+          updateBug,
+          phab,
+        });
+        sendJson(response, 200, { ok: true, ...result });
         return;
       }
 

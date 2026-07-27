@@ -13,6 +13,7 @@ import {
   checkoutCommit,
   createGraphCommand,
   getGraphCommitMessage,
+  getGraphCommitIntegrationStatus,
   getGraphCurrentCommitMessage,
   getCheckoutCommitPage,
   getCheckoutGraphData,
@@ -23,6 +24,7 @@ import {
   getGraphOutputPath,
   formatPrettyDiffHtml,
   isWorkingTreeCommitHash,
+  markGraphBugForCheckin,
   parseDecorations,
   parseGitLog,
   pruneCommitBranches,
@@ -484,6 +486,190 @@ test("getGraphCommitMessage reads the full selected commit message", async () =>
   assert.deepEqual(calls.map((call) => call.args), [
     ["log", "-1", "--format=%B", "abc123"],
   ]);
+});
+
+test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", async () => {
+  const calls = [];
+  const bugCalls = [];
+  const phabCalls = [];
+  const result = await getGraphCommitIntegrationStatus({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      commits: [{
+        hash: "abc123",
+        refs: ["phab-D987654"],
+        subject: "Fix thing",
+      }],
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+      return "Body text without integration links.\n";
+    },
+    getBug: async (id) => {
+      bugCalls.push(id);
+      return {
+        bugs: [{
+          id,
+          status: "ASSIGNED",
+          resolution: "---",
+          summary: "Fix thing",
+          assigned_to: "alice@example.com",
+          is_open: true,
+          keywords: [],
+        }],
+      };
+    },
+    phab: async (request) => {
+      phabCalls.push(request);
+      return {
+        result: [{
+          id: 987654,
+          uri: "https://phabricator.services.mozilla.com/D987654",
+          status: "status-review",
+          statusName: "Needs Review",
+          title: "Bug 123456 - Fix thing",
+        }],
+      };
+    },
+  });
+
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["log", "-1", "--format=%B", "abc123"],
+  ]);
+  assert.deepEqual(bugCalls, ["123456"]);
+  assert.deepEqual(phabCalls, [{
+    route: "differential.query",
+    params: { ids: [987654] },
+  }]);
+  assert.equal(result.bugId, "123456");
+  assert.equal(result.phabRevision, "D987654");
+  assert.deepEqual(result.bug, {
+    id: "123456",
+    url: "https://bugzilla.mozilla.org/show_bug.cgi?id=123456",
+    status: "ASSIGNED",
+    resolution: "---",
+    summary: "Fix thing",
+    assignedTo: "alice@example.com",
+    isOpen: true,
+    keywords: [],
+    hasCheckinNeeded: false,
+  });
+  assert.deepEqual(result.phabricator, {
+    revision: "D987654",
+    url: "https://phabricator.services.mozilla.com/D987654",
+    status: "status-review",
+    statusName: "Needs Review",
+    title: "Bug 123456 - Fix thing",
+  });
+});
+
+test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected bug", async () => {
+  const calls = [];
+  const updates = [];
+  let marked = false;
+  const result = await markGraphBugForCheckin({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      commits: [{
+        hash: "abc123",
+        refs: ["phab-D987654"],
+        subject: "Bug 123456 - Fix thing",
+      }],
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+      return "Bug 123456 - Fix thing. r=#reviewers\n";
+    },
+    getBug: async (id) => ({
+      bugs: [{
+        id,
+        status: "NEW",
+        resolution: "---",
+        summary: "Fix thing",
+        is_open: true,
+        keywords: marked ? ["checkin-needed-tb"] : [],
+      }],
+    }),
+    updateBug: async (id, update) => {
+      updates.push([id, update]);
+      marked = true;
+      return {};
+    },
+    phab: async () => ({
+      result: [{
+        id: 987654,
+        uri: "https://phabricator.services.mozilla.com/D987654",
+        status: "status-accepted",
+        statusName: "Accepted",
+        title: "Bug 123456 - Fix thing",
+      }],
+    }),
+  });
+
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["log", "-1", "--format=%B", "abc123"],
+    ["log", "-1", "--format=%B", "abc123"],
+  ]);
+  assert.deepEqual(updates, [[
+    "123456",
+    {
+      keywords: {
+        add: ["checkin-needed-tb"],
+      },
+    },
+  ]]);
+  assert.equal(result.message, "Bug 123456 marked for checkin.");
+  assert.equal(result.bug.hasCheckinNeeded, true);
+  assert.deepEqual(result.bug.keywords, ["checkin-needed-tb"]);
+});
+
+test("markGraphBugForCheckin refuses patches that are not accepted", async () => {
+  const updates = [];
+
+  await assert.rejects(
+    markGraphBugForCheckin({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+        commits: [{
+          hash: "abc123",
+          refs: ["phab-D987654"],
+          subject: "Bug 123456 - Fix thing",
+        }],
+      },
+      hash: "abc123",
+      runCommand: async () => "Bug 123456 - Fix thing. r=#reviewers\n",
+      getBug: async (id) => ({
+        bugs: [{
+          id,
+          status: "NEW",
+          resolution: "---",
+          summary: "Fix thing",
+          is_open: true,
+          keywords: [],
+        }],
+      }),
+      updateBug: async (id, update) => {
+        updates.push([id, update]);
+      },
+      phab: async () => ({
+        result: [{
+          id: 987654,
+          uri: "https://phabricator.services.mozilla.com/D987654",
+          status: "status-review",
+          statusName: "Needs Review",
+          title: "Bug 123456 - Fix thing",
+        }],
+      }),
+    }),
+    /Only accepted Phabricator patches/
+  );
+
+  assert.deepEqual(updates, []);
 });
 
 test("amendCurrentCommit stages shown changes and amends with an edited message", async () => {
@@ -1317,6 +1503,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /class="amend-commit" type="button" hidden>Amend<\/button>/);
   assert.match(html, /class="submit-commit" type="button" hidden>Submit<\/button>/);
   assert.match(html, /class="diff-message" hidden/);
+  assert.match(html, /class="integration-status" hidden/);
   assert.match(html, /id="amend-dialog"/);
   assert.match(html, /class="amend-message"/);
   assert.match(html, /id="submit-dialog"/);
@@ -1354,6 +1541,11 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /\.diff-message \{/);
   assert.match(html, /\.diff-message a \{ color: #0969da; text-decoration: none; \}/);
   assert.match(html, /\.diff-message\[hidden\] \{ display: none; \}/);
+  assert.match(html, /\.integration-status \{/);
+  assert.match(html, /\.status-badge \{/);
+  assert.match(html, /\.status-badge\.open/);
+  assert.match(html, /\.status-badge\.error/);
+  assert.match(html, /\.checkin-needed-button/);
   assert.match(html, /\.diff-table \{ border-collapse: collapse/);
   assert.match(html, /\.diff-line \{ height: 24px/);
   assert.match(html, /\.diff-line\.delete \.old-line/);
@@ -1394,6 +1586,11 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /function pollGraphUpdates/);
   assert.match(html, /function selectCommitActionResult/);
   assert.match(html, /function loadSelectedCommitMessage/);
+  assert.match(html, /function loadSelectedCommitIntegrationStatus/);
+  assert.match(html, /function renderCommitIntegrationStatus/);
+  assert.match(html, /function clearIntegrationStatus/);
+  assert.match(html, /function isAcceptedPhabricatorStatus/);
+  assert.match(html, /function markBugForCheckin/);
   assert.match(html, /function setCommitMessage/);
   assert.match(html, /function getCommitMessageLinkUrl/);
   assert.match(html, /function getLinkedCommitMessageNodes/);
@@ -1427,7 +1624,12 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /setInterval\(pollGraphUpdates, INTERACTIVE\.pollIntervalMs\)/);
   assert.match(html, /\/api\/graph\/" \+ graphIndex \+ "\/message\/" \+ encodeURIComponent\(hash\)/);
   assert.match(html, /\/api\/graph\/" \+ index \+ "\/message\/" \+ encodeURIComponent\(commit\.hash\)/);
+  assert.match(html, /\/api\/graph\/" \+ index \+ "\/integration\/" \+ encodeURIComponent\(commit\.hash\)/);
   assert.match(html, /loadSelectedCommitMessage\(index, commit, commitMessage\)/);
+  assert.match(html, /loadSelectedCommitIntegrationStatus\(index, commit, integrationStatus\)/);
+  assert.match(html, /!result\.bug\.error && isAcceptedPhabricatorStatus\(result\.phabricator\)/);
+  assert.match(html, /\/api\/bugzilla\/checkin/);
+  assert.match(html, /event\.target\.closest\("\.checkin-needed-button"\)/);
   assert.match(html, /\/api\/amend-message/);
   assert.match(html, /amendButton\.textContent = isWorkingTreeCommit\(commit\) \? "Amend" : "Amend Message"/);
   assert.match(html, /submitButton\.hidden = !INTERACTIVE\.enabled \|\| isWorkingTreeCommit\(commit\) \|\| !isCurrentCommit\(commit\)/);
@@ -1516,6 +1718,8 @@ test("graph command writes and opens a tabbed graph", async () => {
 
 test("interactive graph server streams commits, diffs, checkout responses, and closes", async (t) => {
   const calls = [];
+  const bugUpdates = [];
+  let checkinMarked = false;
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
     token: "secret",
@@ -1528,8 +1732,36 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
       commitCount: 0,
       diffs: {},
     }],
+    getBug: async (id) => ({
+      bugs: [{
+        id,
+        status: "NEW",
+        resolution: "---",
+        summary: "Fix the thing",
+        is_open: true,
+        keywords: checkinMarked ? ["checkin-needed-tb"] : [],
+      }],
+    }),
+    updateBug: async (id, update) => {
+      bugUpdates.push([id, update]);
+      checkinMarked = true;
+      return {};
+    },
+    phab: async () => ({
+      result: [{
+        id: 987654,
+        uri: "https://phabricator.services.mozilla.com/D987654",
+        status: "status-accepted",
+        statusName: "Accepted",
+        title: "Bug 123456 - Fix the thing",
+      }],
+    }),
     runCommand: async (command) => {
       calls.push(command);
+
+      if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+        return "Bug 123456 - Fix the thing\n\nDifferential Revision: https://phabricator.services.mozilla.com/D987654\n";
+      }
 
       if (command.args[0] === "log") {
         return "\x1eabc123\x1f\x1fHEAD -> main\x1fAlice\x1falice@example.com\x1f1710000000\x1fFix the thing\n";
@@ -1573,6 +1805,36 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.match(diff.html, /pretty-file/);
   assert.equal(diff.insertions, 1);
   assert.equal(diff.deletions, 1);
+
+  const integrationResponse = await fetch(new URL("api/graph/0/integration/abc123?token=secret", serverInfo.url));
+  const integration = await integrationResponse.json();
+  assert.equal(integration.bug.status, "NEW");
+  assert.equal(integration.bug.summary, "Fix the thing");
+  assert.equal(integration.bug.hasCheckinNeeded, false);
+  assert.equal(integration.phabricator.statusName, "Accepted");
+  assert.equal(integration.phabricator.title, "Bug 123456 - Fix the thing");
+
+  const checkinResponse = await fetch(new URL("api/bugzilla/checkin", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      graphIndex: 0,
+      hash: "abc123",
+      bugId: "123456",
+    }),
+  });
+  const checkin = await checkinResponse.json();
+  assert.equal(checkin.message, "Bug 123456 marked for checkin.");
+  assert.equal(checkin.bug.hasCheckinNeeded, true);
+  assert.deepEqual(bugUpdates, [[
+    "123456",
+    {
+      keywords: {
+        add: ["checkin-needed-tb"],
+      },
+    },
+  ]]);
 
   const snapshotResponse = await fetch(new URL("api/graph/0/snapshot?limit=1&token=secret", serverInfo.url));
   const snapshot = await snapshotResponse.json();
