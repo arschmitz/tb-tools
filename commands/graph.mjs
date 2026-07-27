@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +11,13 @@ import { run } from "../lib/utils.mjs";
 const FIELD_SEPARATOR = "\x1f";
 const RECORD_SEPARATOR = "\x1e";
 const DEFAULT_MAX_DIFF_BYTES = 200000;
+const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;
+const WORKING_TREE_CHANGES_HASH = "uncommitted-changes";
+const WORKING_TREE_AUTHOR = {
+  name: "Working tree",
+  email: "",
+  timestamp: 0,
+};
 const HIGHLIGHT_LANGUAGE_BY_EXTENSION = new Map([
   [".c", "c"],
   [".cc", "cpp"],
@@ -115,12 +122,97 @@ export function chooseCheckoutBranch(refsOutput = "", preferredBranch = "") {
   return branches[0] || "";
 }
 
-export function choosePruneBranches(refsOutput = "", currentBranch = "") {
+function parseBranchRefs(refsOutput = "") {
   return refsOutput
     .split("\n")
     .map((branch) => branch.trim())
-    .filter(Boolean)
-    .filter((branch) => branch !== currentBranch);
+    .filter(Boolean);
+}
+
+function isNamedBranch(branch = "") {
+  return branch && branch !== "(detached)";
+}
+
+function uniqueBranches(branches) {
+  return [...new Set(branches)];
+}
+
+export function choosePruneBranches({
+  containingRefs = "",
+  tipRefs = "",
+  currentBranch = "",
+  preferredBranch = "",
+} = {}) {
+  const containingBranches = parseBranchRefs(containingRefs);
+  const tipBranches = parseBranchRefs(tipRefs).filter((branch) => containingBranches.includes(branch));
+  const preferredBranches = [currentBranch, preferredBranch]
+    .filter(isNamedBranch)
+    .filter((branch) => containingBranches.includes(branch));
+  const preferred = uniqueBranches(preferredBranches)[0];
+
+  if (preferred) {
+    return [preferred];
+  }
+
+  if (tipBranches.length) {
+    return uniqueBranches(tipBranches);
+  }
+
+  if (containingBranches.length === 1) {
+    return containingBranches;
+  }
+
+  return [];
+}
+
+export function chooseRebaseBranch({
+  containingRefs = "",
+  tipRefs = "",
+  currentBranch = "",
+} = {}) {
+  const containingBranches = uniqueBranches(parseBranchRefs(containingRefs));
+  const tipBranches = uniqueBranches(parseBranchRefs(tipRefs))
+    .filter((branch) => containingBranches.includes(branch));
+
+  if (tipBranches.length) {
+    return chooseCheckoutBranch(tipBranches.join("\n"), currentBranch);
+  }
+
+  const nonCurrentBranches = containingBranches.filter((branch) => branch !== currentBranch);
+
+  if (nonCurrentBranches.length === 1) {
+    return nonCurrentBranches[0];
+  }
+
+  if (containingBranches.length === 1) {
+    return containingBranches[0];
+  }
+
+  return "";
+}
+
+export function chooseRewordBranch({
+  containingRefs = "",
+  tipRefs = "",
+  currentBranch = "",
+} = {}) {
+  const containingBranches = uniqueBranches(parseBranchRefs(containingRefs));
+  const tipBranches = uniqueBranches(parseBranchRefs(tipRefs))
+    .filter((branch) => containingBranches.includes(branch));
+
+  if (currentBranch && currentBranch !== "(detached)" && containingBranches.includes(currentBranch)) {
+    return currentBranch;
+  }
+
+  if (tipBranches.length === 1) {
+    return tipBranches[0];
+  }
+
+  if (containingBranches.length === 1) {
+    return containingBranches[0];
+  }
+
+  return "";
 }
 
 function getGitLogArgs(limit, offset = 0) {
@@ -154,6 +246,582 @@ function getGitShowArgs(hash) {
     "--no-color",
     hash,
   ];
+}
+
+function getGitWorkingTreeDiffArgs() {
+  return [
+    "diff",
+    "--patch",
+    "--find-renames",
+    "--no-ext-diff",
+    "--no-color",
+    "HEAD",
+  ];
+}
+
+function getGitUntrackedArgs() {
+  return ["ls-files", "--others", "--exclude-standard", "-z"];
+}
+
+function getGitNoIndexDiffArgs(file) {
+  return [
+    "diff",
+    "--no-index",
+    "--patch",
+    "--no-ext-diff",
+    "--no-color",
+    "--",
+    "/dev/null",
+    file,
+  ];
+}
+
+function getGitCommitMessageArgs(hash = "HEAD") {
+  const args = ["log", "-1", "--format=%B"];
+
+  if (hash && hash !== "HEAD") {
+    args.push(hash);
+  }
+
+  return args;
+}
+
+function getGitAddAllArgs() {
+  return ["add", "-A"];
+}
+
+function getGitAmendArgs(messagePath, { includeChanges = false } = {}) {
+  return includeChanges
+    ? ["commit", "--amend", "-F", messagePath]
+    : ["commit", "--amend", "--only", "-F", messagePath];
+}
+
+function normalizeCommitMessage(message = "") {
+  return `${String(message).replace(/\r\n/g, "\n").trimEnd()}\n`;
+}
+
+function ensureAmendedCommitMessage(actualMessage, expectedMessage, hash) {
+  if (normalizeCommitMessage(actualMessage) === normalizeCommitMessage(expectedMessage)) {
+    return;
+  }
+
+  const error = new Error(`Git reported a successful amend, but ${hash.slice(0, 12)} does not have the requested commit message.`);
+  error.statusCode = 500;
+  throw error;
+}
+
+function getContentHash(value = "") {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+export function isWorkingTreeCommitHash(hash) {
+  return hash === WORKING_TREE_CHANGES_HASH;
+}
+
+function isCheckedOutCommit(commit) {
+  return Array.isArray(commit?.refs) && commit.refs.includes("HEAD");
+}
+
+function getCheckedOutCommitHash(commits, headHash = "") {
+  return String(headHash || "").trim() || commits.find(isCheckedOutCommit)?.hash || "";
+}
+
+function insertWorkingTreeCommitsNearParent(gitCommits, workingTreeCommits) {
+  if (!workingTreeCommits.length) {
+    return gitCommits;
+  }
+
+  const orderedCommits = [...gitCommits];
+
+  for (const workingTreeCommit of workingTreeCommits) {
+    const parentHash = workingTreeCommit.parents[0] || "";
+    const parentIndex = orderedCommits.findIndex((commit) => commit.hash === parentHash);
+
+    if (parentIndex === -1) {
+      orderedCommits.unshift(workingTreeCommit);
+    } else {
+      orderedCommits.splice(parentIndex, 0, workingTreeCommit);
+    }
+  }
+
+  return orderedCommits;
+}
+
+function getWorkingTreeCommit({ parentHash, changeId = "", timestamp = Date.now() }) {
+  return {
+    hash: WORKING_TREE_CHANGES_HASH,
+    parents: parentHash ? [parentHash] : [],
+    refs: ["uncommitted"],
+    author: {
+      ...WORKING_TREE_AUTHOR,
+      timestamp,
+    },
+    subject: "Uncommitted changes",
+    workingTree: true,
+    changeId,
+  };
+}
+
+async function runDiffCommand(command, runCommand) {
+  try {
+    return await runCommand(command);
+  } catch (error) {
+    if (error?.code === 1 && typeof error.stdout === "string") {
+      return error.stdout;
+    }
+
+    throw error;
+  }
+}
+
+function parseNullSeparated(output = "") {
+  return output.split("\0").filter(Boolean);
+}
+
+async function getUntrackedDiff({
+  cwd,
+  runCommand = run,
+}) {
+  const output = await runCommand({
+    cmd: "git",
+    args: getGitUntrackedArgs(),
+    cwd,
+    capture: true,
+    silent: true,
+  });
+  const files = parseNullSeparated(output);
+  const diffs = [];
+
+  for (const file of files) {
+    const diff = await runDiffCommand({
+      cmd: "git",
+      args: getGitNoIndexDiffArgs(file),
+      cwd,
+      capture: true,
+      silent: true,
+    }, runCommand);
+
+    if (diff.trim()) {
+      diffs.push(diff.trimEnd());
+    }
+  }
+
+  return diffs.join("\n");
+}
+
+async function getRawWorkingTreeDiff({
+  cwd,
+  runCommand = run,
+}) {
+  const diff = await runDiffCommand({
+    cmd: "git",
+    args: getGitWorkingTreeDiffArgs(),
+    cwd,
+    capture: true,
+    silent: true,
+  }, runCommand);
+
+  const untrackedDiff = await getUntrackedDiff({ cwd, runCommand });
+
+  return [diff.trimEnd(), untrackedDiff].filter(Boolean).join("\n");
+}
+
+export async function getWorkingTreeDiff({
+  cwd,
+  maxDiffBytes = DEFAULT_MAX_DIFF_BYTES,
+  runCommand = run,
+}) {
+  return truncateDiff(await getRawWorkingTreeDiff({ cwd, runCommand }), maxDiffBytes);
+}
+
+export async function getWorkingTreeCommits({
+  cwd,
+  parentHash = "",
+  diffs = true,
+  maxDiffBytes = DEFAULT_MAX_DIFF_BYTES,
+  runCommand = run,
+}) {
+  const diff = await getRawWorkingTreeDiff({ cwd, runCommand });
+  const hasChanges = Boolean(diff.trim());
+  const commits = [];
+  const commitDiffs = {};
+
+  if (hasChanges) {
+    commits.push(getWorkingTreeCommit({
+      parentHash,
+      changeId: getContentHash(diff),
+    }));
+
+    if (diffs) {
+      commitDiffs[WORKING_TREE_CHANGES_HASH] = truncateDiff(diff, maxDiffBytes);
+    }
+  }
+
+  return {
+    commits,
+    diffs: commitDiffs,
+  };
+}
+
+async function getCheckoutHeadHash({
+  cwd,
+  runCommand = run,
+}) {
+  try {
+    return (await runCommand({
+      cmd: "git",
+      args: ["rev-parse", "HEAD"],
+      cwd,
+      capture: true,
+      silent: true,
+    })).trim();
+  } catch {
+    return "";
+  }
+}
+
+export async function getGraphCurrentCommitMessage({
+  graph,
+  runCommand = run,
+}) {
+  return getGraphCommitMessage({
+    graph,
+    hash: "HEAD",
+    runCommand,
+  });
+}
+
+export async function getGraphCommitMessage({
+  graph,
+  hash = "HEAD",
+  runCommand = run,
+}) {
+  if (!graph) {
+    throw new Error("Unknown graph checkout.");
+  }
+
+  const targetHash = isWorkingTreeCommitHash(hash) ? "HEAD" : hash;
+
+  return runCommand({
+    cmd: "git",
+    args: getGitCommitMessageArgs(targetHash),
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+}
+
+async function amendCheckedOutCommit({
+  graph,
+  message,
+  expectedChangeId = "",
+  includeChanges = false,
+  runCommand = run,
+  writeMessage = writeFile,
+  removeMessage = unlink,
+}) {
+  if (!graph) {
+    const error = new Error("Unknown graph checkout.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const commitMessage = String(message || "");
+
+  if (!commitMessage.trim()) {
+    const error = new Error("Commit message cannot be empty.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (includeChanges) {
+    const workingTree = await getWorkingTreeCommits({
+      cwd: graph.path,
+      diffs: false,
+      runCommand,
+    });
+    const workingTreeCommit = workingTree.commits[0];
+
+    if (!workingTreeCommit) {
+      const error = new Error("No uncommitted changes to amend.");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (expectedChangeId && workingTreeCommit.changeId !== expectedChangeId) {
+      const error = new Error("Working tree changed since this diff was loaded. Select uncommitted changes again before amending.");
+      error.statusCode = 409;
+      throw error;
+    }
+  }
+
+  const messagePath = path.join(os.tmpdir(), `tb-tools-amend-${randomUUID()}.txt`);
+
+  await writeMessage(messagePath, commitMessage.endsWith("\n") ? commitMessage : `${commitMessage}\n`);
+
+  try {
+    if (includeChanges) {
+      await runCommand({
+        cmd: "git",
+        args: getGitAddAllArgs(),
+        cwd: graph.path,
+        silent: true,
+      });
+    }
+    await runCommand({
+      cmd: "git",
+      args: getGitAmendArgs(messagePath, { includeChanges }),
+      cwd: graph.path,
+      silent: true,
+    });
+  } finally {
+    await removeMessage(messagePath).catch(() => {});
+  }
+
+  const [branch, currentHash] = await Promise.all([
+    getCurrentGraphBranch(graph, runCommand),
+    runCommand({
+      cmd: "git",
+      args: ["rev-parse", "HEAD"],
+      cwd: graph.path,
+      capture: true,
+      silent: true,
+    }),
+  ]);
+  const currentHashValue = currentHash.trim();
+  const amendedMessage = await getGraphCommitMessage({
+    graph,
+    hash: currentHashValue,
+    runCommand,
+  });
+
+  ensureAmendedCommitMessage(amendedMessage, commitMessage, currentHashValue);
+
+  graph.branch = branch || "(detached)";
+
+  return {
+    action: "amend",
+    label: graph.label,
+    path: graph.path,
+    branch: graph.branch,
+    hash: currentHashValue,
+    rewrittenHash: currentHashValue,
+    currentHash: currentHashValue,
+    message: `${graph.label} amended current commit ${currentHashValue.slice(0, 12)}.`,
+  };
+}
+
+export async function amendCurrentCommit({
+  graph,
+  message,
+  expectedChangeId = "",
+  includeChanges = false,
+  runCommand = run,
+  writeMessage = writeFile,
+  removeMessage = unlink,
+}) {
+  return amendCheckedOutCommit({
+    graph,
+    message,
+    expectedChangeId,
+    includeChanges,
+    runCommand,
+    writeMessage,
+    removeMessage,
+  });
+}
+
+export async function amendCommitMessage({
+  graph,
+  hash = "HEAD",
+  message,
+  expectedChangeId = "",
+  includeChanges = false,
+  runCommand = run,
+  writeMessage = writeFile,
+  removeMessage = unlink,
+}) {
+  const selectedHash = String(hash || "HEAD");
+
+  if (includeChanges && selectedHash !== "HEAD" && !isWorkingTreeCommitHash(selectedHash)) {
+    const error = new Error("Uncommitted changes can only be amended into the checked out commit.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (includeChanges || selectedHash === "HEAD" || isWorkingTreeCommitHash(selectedHash)) {
+    return amendCheckedOutCommit({
+      graph,
+      message,
+      expectedChangeId,
+      includeChanges,
+      runCommand,
+      writeMessage,
+      removeMessage,
+    });
+  }
+
+  if (!graph) {
+    const error = new Error("Unknown graph checkout.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  ensureKnownGraphCommit(graph, selectedHash);
+
+  const commitMessage = String(message || "");
+
+  if (!commitMessage.trim()) {
+    const error = new Error("Commit message cannot be empty.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const base = await getCurrentGraphBase(graph, runCommand);
+
+  if (base.hash === selectedHash) {
+    return amendCheckedOutCommit({
+      graph,
+      message: commitMessage,
+      runCommand,
+      writeMessage,
+      removeMessage,
+    });
+  }
+
+  await ensureCleanGraph(graph, runCommand);
+
+  const [branchRefs, containingBranchRefs, parents] = await Promise.all([
+    getLocalBranchesAtCommit(graph, selectedHash, runCommand),
+    getLocalBranchesContainingCommit(graph, selectedHash, runCommand),
+    getCommitParents(graph, selectedHash, runCommand),
+  ]);
+  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const branch = chooseRewordBranch({
+    containingRefs: containingBranchRefs,
+    tipRefs: branchRefs,
+    currentBranch: base.branch,
+  });
+
+  if (!containingBranches.length) {
+    const error = new Error(`No local branches contain ${selectedHash.slice(0, 12)}.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (!branch) {
+    const error = new Error(`Commit ${selectedHash.slice(0, 12)} is contained by multiple local branches (${containingBranches.join(", ")}). Check out the branch to amend and try again.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (parents.length !== 1) {
+    const error = new Error(parents.length
+      ? `Cannot amend merge commit ${selectedHash.slice(0, 12)} because it has multiple parents.`
+      : `Cannot amend root commit ${selectedHash.slice(0, 12)}.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const parent = parents[0];
+  const stackCommits = await getRebaseCommitStack(graph, selectedHash, branch, runCommand);
+  const messagePath = path.join(os.tmpdir(), `tb-tools-amend-${randomUUID()}.txt`);
+  let rewrittenHash = "";
+
+  await writeMessage(messagePath, commitMessage.endsWith("\n") ? commitMessage : `${commitMessage}\n`);
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["switch", "--detach", parent],
+      cwd: graph.path,
+      silent: true,
+    });
+
+    for (const [index, commit] of stackCommits.entries()) {
+      await runCommand({
+        cmd: "git",
+        args: ["cherry-pick", "--no-commit", commit],
+        cwd: graph.path,
+        silent: true,
+      });
+
+      await runCommand({
+        cmd: "git",
+        args: ["commit", "-C", commit],
+        cwd: graph.path,
+        silent: true,
+      });
+
+      if (index === 0) {
+        await runCommand({
+          cmd: "git",
+          args: getGitAmendArgs(messagePath, { includeChanges: false }),
+          cwd: graph.path,
+          silent: true,
+        });
+        rewrittenHash = (await runCommand({
+          cmd: "git",
+          args: ["rev-parse", "HEAD"],
+          cwd: graph.path,
+          capture: true,
+          silent: true,
+        })).trim();
+        const amendedMessage = await getGraphCommitMessage({
+          graph,
+          hash: rewrittenHash,
+          runCommand,
+        });
+
+        ensureAmendedCommitMessage(amendedMessage, commitMessage, rewrittenHash);
+      }
+    }
+  } finally {
+    await removeMessage(messagePath).catch(() => {});
+  }
+
+  let currentHash = (await runCommand({
+    cmd: "git",
+    args: ["rev-parse", "HEAD"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  })).trim();
+
+  await runCommand({
+    cmd: "git",
+    args: ["branch", "-f", branch, currentHash],
+    cwd: graph.path,
+    silent: true,
+  });
+  await runCommand({
+    cmd: "git",
+    args: ["switch", branch],
+    cwd: graph.path,
+    silent: true,
+  });
+  currentHash = (await runCommand({
+    cmd: "git",
+    args: ["rev-parse", "HEAD"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  })).trim();
+  graph.branch = branch;
+
+  return {
+    action: "amend",
+    label: graph.label,
+    path: graph.path,
+    hash: selectedHash,
+    branch,
+    parent,
+    commits: stackCommits,
+    amendedCount: stackCommits.length,
+    rewrittenHash,
+    currentHash,
+    message: `${graph.label} amended message for ${selectedHash.slice(0, 12)}${stackCommits.length > 1 ? ` and replayed ${stackCommits.length - 1} descendant commit${stackCommits.length === 2 ? "" : "s"}` : ""} on branch ${branch}.`,
+  };
 }
 
 export function splitPrettyDiffFiles(diff) {
@@ -459,15 +1127,23 @@ export async function getCommitDiffs({
 
   for (const commit of commits) {
     try {
-      const diff = await runCommand({
-        cmd: "git",
-        args: getGitShowArgs(commit.hash),
-        cwd,
-        capture: true,
-        silent: true,
-      });
+      if (isWorkingTreeCommitHash(commit.hash)) {
+        diffs[commit.hash] = await getWorkingTreeDiff({
+          cwd,
+          maxDiffBytes,
+          runCommand,
+        });
+      } else {
+        const diff = await runCommand({
+          cmd: "git",
+          args: getGitShowArgs(commit.hash),
+          cwd,
+          capture: true,
+          silent: true,
+        });
 
-      diffs[commit.hash] = truncateDiff(diff, maxDiffBytes);
+        diffs[commit.hash] = truncateDiff(diff, maxDiffBytes);
+      }
     } catch (error) {
       diffs[commit.hash] = {
         text: "",
@@ -488,6 +1164,14 @@ export async function getCommitDiff({
   maxDiffBytes = DEFAULT_MAX_DIFF_BYTES,
   runCommand = run,
 }) {
+  if (isWorkingTreeCommitHash(hash)) {
+    return getWorkingTreeDiff({
+      cwd,
+      maxDiffBytes,
+      runCommand,
+    });
+  }
+
   const diff = await runCommand({
     cmd: "git",
     args: getGitShowArgs(hash),
@@ -536,22 +1220,50 @@ export async function getCheckoutCommitPage({
   cwd,
   offset = 0,
   limit = 80,
+  includeWorkingTree = false,
+  workingTreeCount = 0,
   runCommand = run,
 }) {
+  const effectiveOffset = includeWorkingTree
+    ? Math.max(0, Number(offset) - Number(workingTreeCount || 0))
+    : offset;
   const output = await runCommand({
     cmd: "git",
-    args: getGitLogArgs(limit, offset),
+    args: getGitLogArgs(limit, effectiveOffset),
     cwd,
     capture: true,
     silent: true,
   });
-  const commits = parseGitLog(output);
+  const gitCommits = parseGitLog(output);
+
+  if (!includeWorkingTree || Number(offset) !== 0) {
+    return {
+      commits: gitCommits,
+      offset,
+      nextOffset: Number(offset) + gitCommits.length,
+      hasMore: gitCommits.length === Number(limit),
+      workingTreeCount,
+    };
+  }
+
+  const headHash = await getCheckoutHeadHash({
+    cwd,
+    runCommand,
+  });
+  const workingTree = await getWorkingTreeCommits({
+    cwd,
+    parentHash: getCheckedOutCommitHash(gitCommits, headHash) || gitCommits[0]?.hash || "",
+    diffs: false,
+    runCommand,
+  });
+  const commits = insertWorkingTreeCommitsNearParent(gitCommits, workingTree.commits);
 
   return {
     commits,
     offset,
-    nextOffset: offset + commits.length,
-    hasMore: commits.length === Number(limit),
+    nextOffset: Number(offset) + commits.length,
+    hasMore: gitCommits.length === Number(limit),
+    workingTreeCount: workingTree.commits.length,
   };
 }
 
@@ -566,15 +1278,27 @@ export async function getCheckoutGraphData({
   const absolutePath = path.resolve(cwd);
 
   try {
-    const [root, branch, log] = await Promise.all([
+    const [root, branch, log, headHash] = await Promise.all([
       runCommand({ cmd: "git", args: ["rev-parse", "--show-toplevel"], cwd: absolutePath, capture: true, silent: true }),
       runCommand({ cmd: "git", args: ["branch", "--show-current"], cwd: absolutePath, capture: true, silent: true }),
       runCommand({ cmd: "git", args: getGitLogArgs(limit), cwd: absolutePath, capture: true, silent: true }),
+      getCheckoutHeadHash({ cwd: absolutePath, runCommand }),
     ]);
 
-    const commits = pruneMissingParents(parseGitLog(log));
+    const gitCommits = parseGitLog(log);
+    const workingTree = await getWorkingTreeCommits({
+      cwd: absolutePath,
+      parentHash: getCheckedOutCommitHash(gitCommits, headHash) || gitCommits[0]?.hash || "",
+      diffs,
+      maxDiffBytes,
+      runCommand,
+    });
+    const commits = pruneMissingParents(insertWorkingTreeCommitsNearParent(gitCommits, workingTree.commits));
     const commitDiffs = diffs
-      ? await getCommitDiffs({ cwd: absolutePath, commits, maxDiffBytes, runCommand })
+      ? {
+          ...workingTree.diffs,
+          ...await getCommitDiffs({ cwd: absolutePath, commits: gitCommits, maxDiffBytes, runCommand }),
+        }
       : {};
 
     return {
@@ -583,7 +1307,8 @@ export async function getCheckoutGraphData({
       branch: branch.trim() || "(detached)",
       limit,
       commits,
-      commitCount: commits.length,
+      commitCount: gitCommits.length,
+      workingTreeCount: workingTree.commits.length,
       diffs: commitDiffs,
     };
   } catch (error) {
@@ -635,6 +1360,16 @@ async function getLocalBranchesAtCommit(graph, hash, runCommand) {
   });
 }
 
+async function getLocalBranchesContainingCommit(graph, hash, runCommand) {
+  return runCommand({
+    cmd: "git",
+    args: ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", hash, "refs/heads"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+}
+
 async function getCurrentGraphBranch(graph, runCommand) {
   const branch = await runCommand({
     cmd: "git",
@@ -645,6 +1380,87 @@ async function getCurrentGraphBranch(graph, runCommand) {
   });
 
   return branch.trim();
+}
+
+async function getCommitParents(graph, hash, runCommand) {
+  const output = await runCommand({
+    cmd: "git",
+    args: ["rev-list", "--parents", "-n", "1", hash],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+  const [commit, ...parents] = output.trim().split(/\s+/).filter(Boolean);
+
+  if (commit !== hash) {
+    throw new Error(`Could not find parents for ${hash.slice(0, 12)}.`);
+  }
+
+  return parents;
+}
+
+async function getRebaseCommitStack(graph, hash, branch, runCommand) {
+  if (!branch) {
+    return [hash];
+  }
+
+  const output = await runCommand({
+    cmd: "git",
+    args: ["rev-list", "--reverse", "--topo-order", "--ancestry-path", `${hash}..${branch}`],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+  const descendants = output.trim().split(/\s+/).filter(Boolean);
+
+  return [hash, ...descendants.filter((commit) => commit !== hash)];
+}
+
+async function getCurrentGraphBase(graph, runCommand) {
+  const [branch, hash] = await Promise.all([
+    getCurrentGraphBranch(graph, runCommand),
+    runCommand({
+      cmd: "git",
+      args: ["rev-parse", "HEAD"],
+      cwd: graph.path,
+      capture: true,
+      silent: true,
+    }),
+  ]);
+
+  return {
+    branch,
+    hash: hash.trim(),
+  };
+}
+
+export async function getCheckoutGraphSnapshot({
+  graph,
+  limit = 80,
+  runCommand = run,
+}) {
+  const [branch, page] = await Promise.all([
+    getCurrentGraphBranch(graph, runCommand),
+    getCheckoutCommitPage({
+      cwd: graph.path,
+      offset: 0,
+      limit,
+      includeWorkingTree: true,
+      runCommand,
+    }),
+  ]);
+
+  return {
+    label: graph.label,
+    path: graph.path,
+    branch: branch || "(detached)",
+    commits: page.commits,
+    commitCount: page.commits.filter((commit) => !commit.workingTree).length,
+    workingTreeCount: page.workingTreeCount,
+    offset: page.offset,
+    nextOffset: page.nextOffset,
+    hasMore: page.hasMore,
+  };
 }
 
 export async function checkoutCommit({
@@ -700,20 +1516,72 @@ export async function rebaseCommit({
   runCommand = run,
 }) {
   ensureKnownGraphCommit(graph, hash);
+
+  if (isWorkingTreeCommitHash(hash)) {
+    const error = new Error("Uncommitted changes cannot be rebased from the graph.");
+    error.statusCode = 409;
+    throw error;
+  }
+
   await ensureCleanGraph(graph, runCommand);
 
-  const branchRefs = await getLocalBranchesAtCommit(graph, hash, runCommand);
-  const branch = chooseCheckoutBranch(branchRefs, graph.branch);
-  const target = branch || hash;
+  const base = await getCurrentGraphBase(graph, runCommand);
+
+  if (base.hash === hash) {
+    const error = new Error(`Cannot rebase ${hash.slice(0, 12)} because it is already checked out.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const [branchRefs, containingBranchRefs] = await Promise.all([
+    getLocalBranchesAtCommit(graph, hash, runCommand),
+    getLocalBranchesContainingCommit(graph, hash, runCommand),
+  ]);
+  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const branch = chooseRebaseBranch({
+    containingRefs: containingBranchRefs,
+    tipRefs: branchRefs,
+    currentBranch: base.branch,
+  });
+
+  if (!branch && containingBranches.length > 1) {
+    const error = new Error(`Commit ${hash.slice(0, 12)} is contained by multiple local branches (${containingBranches.join(", ")}). Check out the target base and leave only one source branch containing the commit, then try again.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const stackCommits = await getRebaseCommitStack(graph, hash, branch, runCommand);
+
+  if (stackCommits.includes(base.hash)) {
+    const error = new Error(`Cannot rebase ${hash.slice(0, 12)} because the current checkout is inside the selected commit stack.`);
+    error.statusCode = 409;
+    throw error;
+  }
 
   await runCommand({
     cmd: "git",
-    args: ["rebase", target],
+    args: ["switch", "--detach", base.hash],
     cwd: graph.path,
     silent: true,
   });
 
-  const currentHash = (await runCommand({
+  for (const commit of stackCommits) {
+    await runCommand({
+      cmd: "git",
+      args: ["cherry-pick", "--no-commit", commit],
+      cwd: graph.path,
+      silent: true,
+    });
+
+    await runCommand({
+      cmd: "git",
+      args: ["commit", "-C", commit],
+      cwd: graph.path,
+      silent: true,
+    });
+  }
+
+  let currentHash = (await runCommand({
     cmd: "git",
     args: ["rev-parse", "HEAD"],
     cwd: graph.path,
@@ -721,14 +1589,43 @@ export async function rebaseCommit({
     silent: true,
   })).trim();
 
+  if (branch) {
+    await runCommand({
+      cmd: "git",
+      args: ["branch", "-f", branch, currentHash],
+      cwd: graph.path,
+      silent: true,
+    });
+    await runCommand({
+      cmd: "git",
+      args: ["switch", branch],
+      cwd: graph.path,
+      silent: true,
+    });
+    currentHash = (await runCommand({
+      cmd: "git",
+      args: ["rev-parse", "HEAD"],
+      cwd: graph.path,
+      capture: true,
+      silent: true,
+    })).trim();
+    graph.branch = branch;
+  } else {
+    graph.branch = "(detached)";
+  }
+
   return {
     action: "rebase",
     label: graph.label,
     path: graph.path,
     hash,
-    target,
+    branch,
+    base: base.hash,
+    commits: stackCommits,
+    rebasedCount: stackCommits.length,
     currentHash,
-    message: `${graph.label} rebased onto ${branch ? `branch ${branch}` : hash.slice(0, 12)}.`,
+    detached: !branch,
+    message: `${graph.label} rebased ${branch ? `branch ${branch}` : hash.slice(0, 12)}${stackCommits.length > 1 ? ` (${stackCommits.length} commits)` : ""} onto ${base.branch || base.hash.slice(0, 12)}.`,
   };
 }
 
@@ -738,30 +1635,70 @@ export async function pruneCommitBranches({
   runCommand = run,
 }) {
   ensureKnownGraphCommit(graph, hash);
-  await ensureCleanGraph(graph, runCommand);
 
-  const [currentBranch, branchRefs] = await Promise.all([
-    getCurrentGraphBranch(graph, runCommand),
-    getLocalBranchesAtCommit(graph, hash, runCommand),
-  ]);
-  const branches = choosePruneBranches(branchRefs, currentBranch);
-
-  if (!branches.length) {
-    const error = new Error(currentBranch && branchRefs.split("\n").map((branch) => branch.trim()).includes(currentBranch)
-      ? `Cannot prune ${currentBranch} because it is currently checked out.`
-      : `No local branch tips found at ${hash.slice(0, 12)}.`);
+  if (isWorkingTreeCommitHash(hash)) {
+    const error = new Error("Uncommitted changes cannot be pruned from the graph.");
     error.statusCode = 409;
     throw error;
   }
 
+  await ensureCleanGraph(graph, runCommand);
+
+  const [currentBranch, branchRefs, containingBranchRefs, parents] = await Promise.all([
+    getCurrentGraphBranch(graph, runCommand),
+    getLocalBranchesAtCommit(graph, hash, runCommand),
+    getLocalBranchesContainingCommit(graph, hash, runCommand),
+    getCommitParents(graph, hash, runCommand),
+  ]);
+  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const branches = choosePruneBranches({
+    containingRefs: containingBranchRefs,
+    tipRefs: branchRefs,
+    currentBranch,
+  });
+
+  if (!containingBranches.length) {
+    const error = new Error(`No local branches contain ${hash.slice(0, 12)}.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (!branches.length) {
+    const error = new Error(`Commit ${hash.slice(0, 12)} is contained by multiple local branches (${containingBranches.join(", ")}). Check out the branch to prune and try again.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (parents.length !== 1) {
+    const error = new Error(parents.length
+      ? `Cannot prune merge commit ${hash.slice(0, 12)} because it has multiple parents.`
+      : `Cannot prune root commit ${hash.slice(0, 12)}.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const parent = parents[0];
+
   for (const branch of branches) {
     await runCommand({
       cmd: "git",
-      args: ["branch", "-d", "--", branch],
+      args: ["rebase", "--onto", parent, hash, branch],
       cwd: graph.path,
       silent: true,
     });
   }
+
+  const [newBranch, currentHash] = await Promise.all([
+    getCurrentGraphBranch(graph, runCommand),
+    runCommand({
+      cmd: "git",
+      args: ["rev-parse", "HEAD"],
+      cwd: graph.path,
+      capture: true,
+      silent: true,
+    }),
+  ]);
+  graph.branch = newBranch.trim() || "(detached)";
 
   return {
     action: "prune",
@@ -769,7 +1706,10 @@ export async function pruneCommitBranches({
     path: graph.path,
     hash,
     branches,
-    message: `${graph.label} pruned ${branches.length === 1 ? "branch" : "branches"} ${branches.join(", ")} at ${hash.slice(0, 12)}.`,
+    parent,
+    currentHash: currentHash.trim(),
+    branch: graph.branch,
+    message: `${graph.label} pruned ${hash.slice(0, 12)} from ${branches.length === 1 ? "branch" : "branches"} ${branches.join(", ")}.`,
   };
 }
 
@@ -836,11 +1776,12 @@ export function buildGraphHtml({
   )).join("\n");
   const tabPanels = graphs.map((graph, index) => (
     `<section class="panel${index === 0 ? " active" : ""}" data-index="${index}">
-      <div class="summary">
+      <div class="summary" data-index="${index}">
         <strong>${escapeHtml(graph.label)}</strong>
-        <span>${escapeHtml(graph.path)}</span>
-        <span>${escapeHtml(graph.branch || "")}</span>
-        <span>${graph.commitCount} commit(s)</span>
+        <span class="summary-path">${escapeHtml(graph.path)}</span>
+        <span class="summary-branch">${escapeHtml(graph.branch || "")}</span>
+        <span class="summary-count">${graph.commitCount} commit(s)</span>
+        <span class="summary-working-tree"${graph.workingTreeCount ? "" : " hidden"}>${graph.workingTreeCount || 0} uncommitted change set</span>
       </div>
       <div class="workspace" data-index="${index}">
         <div class="graph" id="graph-${index}"></div>
@@ -860,11 +1801,13 @@ export function buildGraphHtml({
           <div class="diff-header">
             <strong class="diff-title">No commit selected</strong>
             <span class="diff-meta"></span>
+            <pre class="diff-message" hidden></pre>
             <span class="diff-stats" hidden aria-label="">
               <span class="stat-additions"></span>
               <span class="stat-deletions"></span>
             </span>
             <button class="checkout-commit" type="button" hidden>Checkout</button>
+            <button class="amend-commit" type="button" hidden>Amend</button>
             <span class="checkout-status"></span>
           </div>
           <div class="diff-body"><pre class="diff-placeholder">Select a commit in the graph.</pre></div>
@@ -921,22 +1864,35 @@ export function buildGraphHtml({
     .diff-header { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; padding: 8px 10px; border-bottom: 1px solid #d6dae1; }
     .diff-title { font-size: 13px; }
     .diff-meta { color: #59616d; font-size: 12px; }
+    .diff-message { border-top: 1px solid #edf0f4; color: #20242a; flex: 0 0 100%; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 2px 0 0; max-height: 220px; overflow: auto; padding: 8px 0 0; white-space: pre-wrap; }
+    .diff-message a { color: #0969da; text-decoration: none; }
+    .diff-message a:hover, .diff-message a:focus { text-decoration: underline; }
+    .diff-message[hidden] { display: none; }
     .diff-stats { display: flex; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; gap: 6px; white-space: nowrap; }
     .diff-stats[hidden] { display: none; }
-    .checkout-commit, .load-more { border: 1px solid #1f5f9f; border-radius: 4px; background: #1f5f9f; color: #fff; cursor: pointer; font-size: 12px; padding: 4px 8px; }
-    .checkout-commit:disabled, .load-more:disabled { cursor: wait; opacity: 0.65; }
+    .checkout-commit, .amend-commit, .load-more { border: 1px solid #1f5f9f; border-radius: 4px; background: #1f5f9f; color: #fff; cursor: pointer; font-size: 12px; padding: 4px 8px; }
+    .checkout-commit:disabled, .amend-commit:disabled, .load-more:disabled { cursor: wait; opacity: 0.65; }
     .checkout-status, .graph-status { color: #59616d; font-size: 12px; }
     .checkout-status.error, .graph-status.error { color: #9b1c1c; }
     .diff-body { margin: 0; padding: 10px; tab-size: 2; }
     .diff-placeholder, .error { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.38; margin: 0; white-space: pre-wrap; }
     .load-sentinel { block-size: 1px; inline-size: 100%; }
     .graph svg { overflow: visible; }
+    .lane-path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .commit-dot { stroke: #ffffff; stroke-width: 2; }
+    .commit-hash, .commit-message { dominant-baseline: central; font: normal 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; pointer-events: none; }
+    .commit-hash { fill: #59616d; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .branch-label-bg { stroke-width: 1; }
+    .branch-label-text { dominant-baseline: central; font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; pointer-events: none; }
     .commit-row, .commit-row * { cursor: pointer; }
     .commit-row:focus { outline: none; }
     .commit-row-hitbox { fill: transparent; pointer-events: all; transition: fill 120ms ease, stroke 120ms ease; }
     .commit-row.hover .commit-row-hitbox, .commit-row:focus-visible .commit-row-hitbox { fill: rgba(31, 95, 159, 0.08); }
     .commit-row.active .commit-row-hitbox { fill: rgba(31, 95, 159, 0.14); stroke: rgba(31, 95, 159, 0.35); stroke-width: 1; }
     .commit-row.active.hover .commit-row-hitbox { fill: rgba(31, 95, 159, 0.18); }
+    .commit-row.working-tree .commit-row-hitbox { fill: rgba(31, 95, 159, 0.06); stroke: rgba(31, 95, 159, 0.2); stroke-width: 1; }
+    .commit-row.working-tree.hover .commit-row-hitbox, .commit-row.working-tree:focus-visible .commit-row-hitbox { fill: rgba(31, 95, 159, 0.12); }
+    .commit-row.working-tree.active .commit-row-hitbox { fill: rgba(31, 95, 159, 0.2); stroke: rgba(31, 95, 159, 0.44); }
     .commit-row.current .commit-row-hitbox { fill: rgba(245, 158, 11, 0.18); stroke: rgba(180, 83, 9, 0.35); stroke-width: 1; }
     .commit-row.current.hover .commit-row-hitbox { fill: rgba(245, 158, 11, 0.24); }
     .commit-row.current.active .commit-row-hitbox { fill: rgba(245, 158, 11, 0.3); stroke: rgba(31, 95, 159, 0.48); }
@@ -946,6 +1902,18 @@ export function buildGraphHtml({
     .context-menu button { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: pointer; display: block; font: inherit; padding: 7px 8px; text-align: left; width: 100%; }
     .context-menu button:hover, .context-menu button:focus { background: rgba(31, 95, 159, 0.1); outline: none; }
     .context-menu button[data-action="prune"] { color: #9b1c1c; }
+    .amend-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(720px, calc(100vw - 32px)); padding: 0; width: 680px; }
+    .amend-dialog::backdrop { background: rgba(15, 23, 42, 0.36); }
+    .amend-form { display: grid; gap: 10px; margin: 0; padding: 16px; }
+    .amend-title { font-size: 16px; margin: 0; }
+    .amend-form label { color: #59616d; font-size: 12px; font-weight: 600; }
+    .amend-message { border: 1px solid #b9c0cc; border-radius: 6px; box-sizing: border-box; color: #20242a; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; min-height: 160px; padding: 8px; resize: vertical; width: 100%; }
+    .amend-error { color: #9b1c1c; font-size: 12px; margin: 0; min-height: 16px; }
+    .amend-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .amend-actions button { border: 1px solid #b9c0cc; border-radius: 4px; cursor: pointer; font-size: 13px; padding: 6px 10px; }
+    .amend-cancel { background: #fff; color: #20242a; }
+    .amend-submit { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
+    .amend-submit:disabled { cursor: wait; opacity: 0.65; }
     .pretty-file { background: var(--diff-bg); border: 1px solid var(--diff-border); border-radius: 6px; margin: 0 0 12px; overflow: hidden; }
     .pretty-file h3 { align-items: center; background: var(--diff-header-bg); border-bottom: 1px solid var(--diff-border); color: var(--diff-code); display: flex; font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; gap: 12px; justify-content: space-between; margin: 0; min-height: 32px; overflow: hidden; padding: 8px 10px; }
     .file-heading { align-items: center; display: flex; gap: 8px; min-width: 0; }
@@ -1017,6 +1985,8 @@ export function buildGraphHtml({
       body { background: #111418; color: #f1f3f6; }
       header, .summary, .graph, .diff-viewer, .tab { background: #191d23; color: #f1f3f6; border-color: #323844; }
       .summary span, .diff-meta { color: #acb4c0; }
+      .diff-message { border-color: #323844; color: #f1f3f6; }
+      .diff-message a { color: #79c0ff; }
       .pane-resizer::before { background: #424b59; }
       .pane-resizer:hover::before, .pane-resizer:focus-visible::before, .pane-resizer.dragging::before { background: #4b9eff; box-shadow: 0 0 0 3px rgba(75, 158, 255, 0.18); }
       .diff-header { border-color: #323844; }
@@ -1035,7 +2005,7 @@ export function buildGraphHtml({
       .line-content .hljs-meta { color: #8b949e; }
       .diff-line.delete .line-marker { color: #f85149; }
       .diff-line.insert .line-marker { color: #3fb950; }
-      .checkout-commit, .load-more { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .checkout-commit, .amend-commit, .load-more { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
       .checkout-status, .graph-status { color: #acb4c0; }
       .checkout-status.error, .graph-status.error { color: #ff9f9f; }
       .diff-line.delete:hover .old-line { background: #78191e; }
@@ -1046,6 +2016,9 @@ export function buildGraphHtml({
       .commit-row.hover .commit-row-hitbox, .commit-row:focus-visible .commit-row-hitbox { fill: rgba(75, 158, 255, 0.12); }
       .commit-row.active .commit-row-hitbox { fill: rgba(75, 158, 255, 0.2); stroke: rgba(75, 158, 255, 0.42); }
       .commit-row.active.hover .commit-row-hitbox { fill: rgba(75, 158, 255, 0.26); }
+      .commit-row.working-tree .commit-row-hitbox { fill: rgba(75, 158, 255, 0.12); stroke: rgba(75, 158, 255, 0.28); }
+      .commit-row.working-tree.hover .commit-row-hitbox, .commit-row.working-tree:focus-visible .commit-row-hitbox { fill: rgba(75, 158, 255, 0.18); }
+      .commit-row.working-tree.active .commit-row-hitbox { fill: rgba(75, 158, 255, 0.28); stroke: rgba(75, 158, 255, 0.52); }
       .commit-row.current .commit-row-hitbox { fill: rgba(251, 191, 36, 0.22); stroke: rgba(251, 191, 36, 0.42); }
       .commit-row.current.hover .commit-row-hitbox { fill: rgba(251, 191, 36, 0.28); }
       .commit-row.current.active .commit-row-hitbox { fill: rgba(251, 191, 36, 0.34); stroke: rgba(75, 158, 255, 0.55); }
@@ -1053,6 +2026,13 @@ export function buildGraphHtml({
       .context-menu-title { color: #acb4c0; }
       .context-menu button:hover, .context-menu button:focus { background: rgba(75, 158, 255, 0.16); }
       .context-menu button[data-action="prune"] { color: #ff9f9f; }
+      .amend-dialog { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .amend-dialog::backdrop { background: rgba(0, 0, 0, 0.58); }
+      .amend-form label { color: #acb4c0; }
+      .amend-message { background: #0d1117; border-color: #424b59; color: #e6edf3; }
+      .amend-error { color: #ff9f9f; }
+      .amend-cancel { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .amend-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
     }
   </style>
 </head>
@@ -1068,38 +2048,81 @@ export function buildGraphHtml({
     <button type="button" role="menuitem" data-action="rebase">Rebase</button>
     <button type="button" role="menuitem" data-action="prune">Prune</button>
   </div>
+  <dialog class="amend-dialog" id="amend-dialog">
+    <form class="amend-form">
+      <h2 class="amend-title">Amend Commit</h2>
+      <label for="amend-message">Commit message</label>
+      <textarea id="amend-message" class="amend-message" rows="9" required></textarea>
+      <p class="amend-error" role="alert"></p>
+      <div class="amend-actions">
+        <button class="amend-cancel" type="button">Cancel</button>
+        <button class="amend-submit" type="submit">Amend</button>
+      </div>
+    </form>
+  </dialog>
   <script>${gitgraphScript}</script>
   <script>
     const GRAPHS = ${safeScriptJson(graphs)};
     const INTERACTIVE = ${safeScriptJson({
       enabled: Boolean(interactive.enabled),
       pageSize: interactive.pageSize || 80,
+      pollIntervalMs: interactive.pollIntervalMs || 3000,
       token: interactive.token,
     })};
     const SVG_NS = "http://www.w3.org/2000/svg";
     const COMMIT_DOT_RADIUS = 10;
     const COMMIT_ROW_HEIGHT = 28;
     const COMMIT_ROW_HORIZONTAL_INSET = 4;
+    const LANE_LEFT = 14;
+    const LANE_TOP = 14;
+    const LANE_SPACING = 20;
+    const LANE_MESSAGE_GAP = 18;
+    const LANE_COLORS = ["#2563eb", "#16a34a", "#9333ea", "#ca8a04", "#dc2626", "#0891b2", "#7c3aed", "#db2777", "#ea580c", "#0f766e"];
+    const COMMIT_HASH_WIDTH = 116;
+    const BRANCH_LABEL_HEIGHT = 18;
+    const BRANCH_LABEL_GAP = 5;
+    const BRANCH_LABEL_PADDING_X = 6;
+    const BRANCH_LABEL_TEXT_WIDTH = 7.25;
+    const COMMIT_SUBJECT_GAP = 8;
     const PANE_MIN_WIDTH = 320;
     const PANE_RESIZE_KEY_STEP = 32;
     const PANE_WIDTH_STORAGE_PREFIX = "tb-tools:branch-graph:pane-width:";
+    const BUGZILLA_BUG_URL = "https://bugzilla.mozilla.org/show_bug.cgi?id=";
+    const PHABRICATOR_REVISION_URL = "https://phabricator.services.mozilla.com/D";
+    const COMMIT_MESSAGE_LINK_PATTERN = /(https?:\\/\\/[^\\s<>"']+|\\b[Bb]ug\\s+#?\\d{4,8}\\b|\\b(?:phab-)?D\\d{4,}\\b)/g;
 
-    const graphStates = GRAPHS.map((graph) => ({
-      graph,
-      commits: graph.commits ? [...graph.commits] : [],
-      offset: graph.commits ? graph.commits.length : 0,
-      hasMore: Boolean(INTERACTIVE.enabled),
-      loading: false,
-      gitgraph: null,
-      rendered: false,
-      sentinelReady: true,
-      lastScrollY: window.scrollY,
-      scrolledTowardBottom: false,
-      selectedHash: "",
-      currentHash: getCurrentCommitHash(graph.commits || []),
-    }));
+    const graphStates = GRAPHS.map((graph) => {
+      const commits = placeWorkingTreeCommits(graph.commits ? [...graph.commits] : []);
+      graph.commits = commits;
+
+      return {
+        graph,
+        commits,
+        offset: commits.length,
+        hasMore: Boolean(INTERACTIVE.enabled),
+        loading: false,
+        gitgraph: null,
+        rendered: false,
+        sentinelReady: true,
+        lastScrollY: window.scrollY,
+        scrolledTowardBottom: false,
+        selectedHash: "",
+        currentHash: getCurrentCommitHash(commits),
+        workingTreeCount: graph.workingTreeCount || 0,
+        snapshotSignature: "",
+        refreshing: false,
+        branchColors: new Map(),
+        nextBranchColorIndex: 0,
+      };
+    });
     const contextMenu = document.getElementById("commit-context-menu");
+    const amendDialog = document.getElementById("amend-dialog");
+    const amendForm = amendDialog.querySelector(".amend-form");
+    const amendMessage = amendDialog.querySelector(".amend-message");
+    const amendError = amendDialog.querySelector(".amend-error");
+    const amendSubmit = amendDialog.querySelector(".amend-submit");
     let contextMenuState = null;
+    let amendDialogState = null;
     const pendingPaneEnhancements = new Set();
 
     function showError(container, message) {
@@ -1118,8 +2141,53 @@ export function buildGraphHtml({
       }));
     }
 
+    function getCommitSnapshotFingerprint(commit) {
+      return [
+        commit.hash,
+        (commit.parents || []).join(","),
+        (commit.refs || []).join(","),
+        commit.subject || "",
+        commit.workingTree ? "working" : "commit",
+        commit.changeId || "",
+      ].join("\\u001f");
+    }
+
+    function getSnapshotFingerprint({ branch = "", workingTreeCount = 0, commits = [] } = {}) {
+      return [
+        branch,
+        String(workingTreeCount || 0),
+        commits.map(getCommitSnapshotFingerprint).join("\\u001e"),
+      ].join("\\u001d");
+    }
+
+    function getStateSnapshotFingerprint(state) {
+      return getSnapshotFingerprint({
+        branch: state.graph.branch,
+        workingTreeCount: state.workingTreeCount,
+        commits: state.commits,
+      });
+    }
+
     function getGraphContainer(index) {
       return document.getElementById("graph-" + index);
+    }
+
+    function setGraphSummary(index) {
+      const state = graphStates[index];
+      const summary = document.querySelector('.summary[data-index="' + index + '"]');
+
+      if (!summary) {
+        return;
+      }
+
+      summary.querySelector(".summary-path").textContent = state.graph.path || "";
+      summary.querySelector(".summary-branch").textContent = state.graph.branch || "";
+      summary.querySelector(".summary-count").textContent = (state.graph.commitCount || 0) + " commit(s)";
+
+      const workingTree = summary.querySelector(".summary-working-tree");
+      const count = state.workingTreeCount || 0;
+      workingTree.hidden = !count;
+      workingTree.textContent = count + " uncommitted change set" + (count === 1 ? "" : "s");
     }
 
     function getWorkspace(index) {
@@ -1366,18 +2434,286 @@ export function buildGraphHtml({
       return Math.max(width, 1);
     }
 
+    function getLaneX(lane) {
+      return LANE_LEFT + lane * LANE_SPACING;
+    }
+
+    function getLaneY(rowIndex) {
+      return LANE_TOP + rowIndex * 30;
+    }
+
+    function normalizeBranchRef(ref = "") {
+      return String(ref)
+        .replace(/^refs\\/heads\\//, "")
+        .replace(/^refs\\/remotes\\//, "")
+        .replace(/^remotes\\//, "")
+        .trim();
+    }
+
+    function isBranchRef(ref = "") {
+      const branch = normalizeBranchRef(ref);
+
+      return Boolean(
+        branch &&
+        branch !== "HEAD" &&
+        branch !== "uncommitted" &&
+        !branch.startsWith("tag: ") &&
+        !branch.endsWith("/HEAD")
+      );
+    }
+
+    function getCommitBranchRefs(commit) {
+      if (!commit || !Array.isArray(commit.refs)) {
+        return [];
+      }
+
+      return Array.from(new Set(commit.refs
+        .filter(isBranchRef)
+        .map(normalizeBranchRef)));
+    }
+
+    function getPrioritizedCommitBranchRefs(index, commit) {
+      const branches = getCommitBranchRefs(commit);
+      const currentBranch = normalizeBranchRef(graphStates[index]?.graph?.branch || "");
+
+      if (!currentBranch || !branches.includes(currentBranch)) {
+        return branches;
+      }
+
+      return [
+        currentBranch,
+        ...branches.filter((branch) => branch !== currentBranch),
+      ];
+    }
+
+    function getPrimaryBranchRef(index, commit) {
+      return getPrioritizedCommitBranchRefs(index, commit)[0] || "";
+    }
+
+    function getBranchColor(index, branch, fallbackIndex = 0) {
+      const name = normalizeBranchRef(branch);
+
+      if (!name) {
+        return LANE_COLORS[fallbackIndex % LANE_COLORS.length];
+      }
+
+      const state = graphStates[index];
+
+      if (!state.branchColors.has(name)) {
+        state.branchColors.set(name, LANE_COLORS[state.nextBranchColorIndex % LANE_COLORS.length]);
+        state.nextBranchColorIndex++;
+      }
+
+      return state.branchColors.get(name);
+    }
+
+    function getColorTint(color, alpha) {
+      const match = /^#([a-f\\d]{2})([a-f\\d]{2})([a-f\\d]{2})$/i.exec(color);
+
+      if (!match) {
+        return color;
+      }
+
+      return "rgba(" + parseInt(match[1], 16) + ", " + parseInt(match[2], 16) + ", " + parseInt(match[3], 16) + ", " + alpha + ")";
+    }
+
+    function getLaneColor(index, branch, lane) {
+      return getBranchColor(index, branch, lane);
+    }
+
+    function getKnownParentHashes(commits, commit) {
+      const knownHashes = new Set(commits.map(({ hash }) => hash));
+
+      return (commit.parents || []).filter((parent) => knownHashes.has(parent));
+    }
+
+    function getLaneRows(index, commits) {
+      const commitsByHash = new Map(commits.map((commit) => [commit.hash, commit]));
+      let lanes = [];
+      let maxLaneCount = 1;
+
+      return commits.map((commit, rowIndex) => {
+        let lane = lanes.findIndex(({ hash }) => hash === commit.hash);
+        const explicitBranch = getPrimaryBranchRef(index, commit);
+
+        if (lane === -1) {
+          lanes.push({
+            hash: commit.hash,
+            branch: explicitBranch,
+          });
+          lane = lanes.length - 1;
+        } else if (explicitBranch) {
+          lanes[lane] = {
+            ...lanes[lane],
+            branch: explicitBranch,
+          };
+        }
+
+        const lanesBefore = lanes.map((item) => ({ ...item }));
+        const branch = explicitBranch || lanesBefore[lane]?.branch || "";
+        const parents = getKnownParentHashes(commits, commit);
+        const lanesAfter = lanesBefore
+          .filter((item, index) => index !== lane)
+          .map((item) => ({ ...item }));
+        const parentItems = parents
+          .filter((parent, parentIndex) => parents.indexOf(parent) === parentIndex)
+          .map((parent, parentIndex) => {
+            const existing = lanesAfter.find((item) => item.hash === parent);
+            const parentBranch = getPrimaryBranchRef(index, commitsByHash.get(parent)) || (parentIndex === 0 ? branch : "");
+
+            if (existing) {
+              if (parentBranch && !existing.branch) {
+                existing.branch = parentBranch;
+              }
+              return null;
+            }
+
+            return {
+              hash: parent,
+              branch: parentBranch,
+            };
+          })
+          .filter(Boolean);
+
+        lanesAfter.splice(lane, 0, ...parentItems);
+
+        maxLaneCount = Math.max(maxLaneCount, lanesBefore.length, lanesAfter.length);
+        lanes = lanesAfter;
+
+        return {
+          commit,
+          rowIndex,
+          lane,
+          branch,
+          lanesBefore,
+          lanesAfter,
+          parents,
+          get maxLaneCount() {
+            return maxLaneCount;
+          },
+        };
+      });
+    }
+
+    function createSvgElement(name, attributes = {}) {
+      const node = document.createElementNS(SVG_NS, name);
+
+      Object.entries(attributes).forEach(([key, value]) => {
+        if (value !== undefined && value !== null) {
+          node.setAttribute(key, String(value));
+        }
+      });
+
+      return node;
+    }
+
+    function getLanePathD(fromLane, fromRow, toLane, toRow) {
+      const fromX = getLaneX(fromLane);
+      const fromY = getLaneY(fromRow);
+      const toX = getLaneX(toLane);
+      const toY = getLaneY(toRow);
+
+      if (fromX === toX) {
+        return "M " + fromX + " " + fromY + " L " + toX + " " + toY;
+      }
+
+      const midY = fromY + (toY - fromY) / 2;
+
+      return [
+        "M " + fromX + " " + fromY,
+        "C " + fromX + " " + midY + " " + toX + " " + midY + " " + toX + " " + toY,
+      ].join(" ");
+    }
+
+    function drawLanePath(svg, index, fromLane, fromRow, toLane, toRow, branch) {
+      const path = createSvgElement("path", {
+        class: "lane-path",
+        d: getLanePathD(fromLane, fromRow, toLane, toRow),
+        stroke: getLaneColor(index, branch, fromLane),
+        "stroke-width": 4,
+      });
+
+      svg.append(path);
+    }
+
+    function drawLaneContinuations(svg, index, row, rowCount) {
+      if (row.rowIndex >= rowCount - 1) {
+        return;
+      }
+
+      row.lanesBefore.forEach((laneState, beforeLane) => {
+        if (laneState.hash === row.commit.hash) {
+          return;
+        }
+
+        const afterLane = row.lanesAfter.findIndex(({ hash }) => hash === laneState.hash);
+
+        if (afterLane === -1) {
+          return;
+        }
+
+        drawLanePath(svg, index, beforeLane, row.rowIndex, afterLane, row.rowIndex + 1, laneState.branch || row.lanesAfter[afterLane]?.branch);
+      });
+
+      row.parents.forEach((parent) => {
+        const afterLane = row.lanesAfter.findIndex(({ hash }) => hash === parent);
+
+        if (afterLane !== -1) {
+          drawLanePath(svg, index, row.lane, row.rowIndex, afterLane, row.rowIndex + 1, row.lanesAfter[afterLane]?.branch || row.branch);
+        }
+      });
+    }
+
     function getCommitForMessage(text, commits) {
       const abbrev = (text.textContent || "").split(" ")[0];
 
-      return commits.find((commit) => commit.hash.substring(0, 7) === abbrev);
+      return commits.find((commit) => commit.hash.startsWith(abbrev) || commit.hash.substring(0, 7) === abbrev);
     }
 
     function isCurrentCommit(commit) {
       return Array.isArray(commit.refs) && commit.refs.includes("HEAD");
     }
 
+    function isWorkingTreeCommit(commit) {
+      return Boolean(commit && commit.workingTree);
+    }
+
+    function placeWorkingTreeCommits(commits) {
+      const orderedCommits = commits.filter((commit) => !isWorkingTreeCommit(commit));
+      const workingTreeCommits = commits.filter(isWorkingTreeCommit);
+
+      for (const commit of workingTreeCommits) {
+        const parentHash = commit.parents && commit.parents[0];
+        const parentIndex = orderedCommits.findIndex((item) => item.hash === parentHash);
+
+        if (parentIndex === -1) {
+          orderedCommits.unshift(commit);
+        } else {
+          orderedCommits.splice(parentIndex, 0, commit);
+        }
+      }
+
+      return orderedCommits;
+    }
+
     function getCurrentCommitHash(commits) {
       return commits.find(isCurrentCommit)?.hash || "";
+    }
+
+    function formatCommitTitle(commit) {
+      if (isWorkingTreeCommit(commit)) {
+        return commit.subject;
+      }
+
+      return commit.hash.substring(0, 12) + " " + commit.subject;
+    }
+
+    function formatCommitMeta(commit) {
+      if (isWorkingTreeCommit(commit)) {
+        return "Current staged, unstaged, and untracked changes";
+      }
+
+      return commit.author.name + " <" + commit.author.email + ">";
     }
 
     function hideCommitContextMenu() {
@@ -1386,7 +2722,7 @@ export function buildGraphHtml({
     }
 
     function showCommitContextMenu(event, index, commit) {
-      if (!INTERACTIVE.enabled) {
+      if (!INTERACTIVE.enabled || isWorkingTreeCommit(commit)) {
         return;
       }
 
@@ -1429,6 +2765,138 @@ export function buildGraphHtml({
       return hitbox;
     }
 
+    function getBranchLabelWidth(branch) {
+      return Math.max(28, branch.length * BRANCH_LABEL_TEXT_WIDTH + BRANCH_LABEL_PADDING_X * 2);
+    }
+
+    function addBranchLabels(group, index, commit, x, y, fallbackLane) {
+      let nextX = x;
+
+      for (const branch of getPrioritizedCommitBranchRefs(index, commit)) {
+        const color = getBranchColor(index, branch, fallbackLane);
+        const labelWidth = getBranchLabelWidth(branch);
+        const rect = createSvgElement("rect", {
+          class: "branch-label-bg",
+          x: nextX,
+          y: y - BRANCH_LABEL_HEIGHT / 2,
+          width: labelWidth,
+          height: BRANCH_LABEL_HEIGHT,
+          rx: 3,
+          fill: getColorTint(color, 0.15),
+          stroke: getColorTint(color, 0.58),
+        });
+        const label = createSvgElement("text", {
+          class: "branch-label-text",
+          x: nextX + BRANCH_LABEL_PADDING_X,
+          y,
+          fill: color,
+        });
+
+        label.textContent = branch;
+        group.append(rect, label);
+        nextX += labelWidth + BRANCH_LABEL_GAP;
+      }
+
+      return nextX;
+    }
+
+    function addLaneCommitRow({ svg, index, row, messageX, width }) {
+      const state = graphStates[index];
+      const { commit, lane, rowIndex } = row;
+      const y = getLaneY(rowIndex);
+      const branchColor = getLaneColor(index, row.branch, lane);
+      const group = createSvgElement("g", {
+        class: "commit-row" + (isWorkingTreeCommit(commit) ? " working-tree" : ""),
+        transform: "translate(0, 0)",
+        role: "button",
+        tabindex: "0",
+        "aria-label": "Show diff for " + commit.hash.substring(0, 12) + " " + commit.subject,
+      });
+      const hitbox = createSvgElement("rect", {
+        class: "commit-row-hitbox",
+        x: 0,
+        y: y - COMMIT_ROW_HEIGHT / 2,
+        width,
+        height: COMMIT_ROW_HEIGHT,
+        rx: 5,
+      });
+      const dot = createSvgElement("circle", {
+        class: "commit-dot",
+        cx: getLaneX(lane),
+        cy: y,
+        r: COMMIT_DOT_RADIUS,
+        fill: branchColor,
+      });
+      const hash = createSvgElement("text", {
+        class: "commit-hash",
+        x: messageX,
+        y,
+      });
+      const branchRefs = getCommitBranchRefs(commit);
+      let subjectX = messageX + COMMIT_HASH_WIDTH;
+      const message = createSvgElement("text", {
+        class: "commit-message",
+        x: subjectX,
+        y,
+      });
+
+      group.dataset.hash = commit.hash;
+      hash.textContent = commit.hash.substring(0, 12);
+      message.textContent = commit.subject;
+      group.append(hitbox, dot, hash);
+
+      if (branchRefs.length) {
+        subjectX = addBranchLabels(group, index, commit, subjectX, y, lane) + COMMIT_SUBJECT_GAP;
+        message.setAttribute("x", subjectX);
+      }
+
+      group.append(message);
+      group.addEventListener("pointerover", () => group.classList.add("hover"));
+      group.addEventListener("pointerout", (event) => {
+        if (!group.contains(event.relatedTarget)) {
+          group.classList.remove("hover");
+        }
+      });
+      group.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          showDiff(state.graph, index, commit);
+        }
+      });
+      group.addEventListener("click", (event) => {
+        event.stopPropagation();
+        showDiff(state.graph, index, commit);
+      });
+      group.addEventListener("contextmenu", (event) => showCommitContextMenu(event, index, commit));
+      svg.append(group);
+    }
+
+    function renderLaneGraph(index, commits) {
+      const container = getGraphContainer(index);
+      const rows = getLaneRows(index, commits);
+      const maxLaneCount = rows.reduce((max, row) => Math.max(max, row.maxLaneCount), 1);
+      const messageX = getLaneX(maxLaneCount) + LANE_MESSAGE_GAP;
+      const height = rows.length ? getLaneY(rows.length - 1) + LANE_TOP : 1;
+      const width = Math.max(container.clientWidth || 0, messageX + 720);
+      const svg = createSvgElement("svg", {
+        width,
+        height,
+        viewBox: "0 0 " + width + " " + height,
+      });
+
+      rows.forEach((row) => drawLaneContinuations(svg, index, row, rows.length));
+      rows.forEach((row) => addLaneCommitRow({
+        svg,
+        index,
+        row,
+        messageX,
+        width,
+      }));
+
+      container.replaceChildren(svg);
+      updateCommitRowStates(index);
+    }
+
     function decorateCommitRows(index) {
       const state = graphStates[index];
       const container = getGraphContainer(index);
@@ -1459,6 +2927,7 @@ export function buildGraphHtml({
 
         const hitbox = ensureCommitRowHitbox(commitGroup, width);
         commitGroup.classList.add("commit-row");
+        commitGroup.classList.toggle("working-tree", isWorkingTreeCommit(commit));
         commitGroup.dataset.hash = commit.hash;
         commitGroup.setAttribute("role", "button");
         commitGroup.setAttribute("tabindex", "0");
@@ -1547,58 +3016,23 @@ export function buildGraphHtml({
       container.append(sentinel);
     }
 
-    function ensureGitgraph(index) {
-      const state = graphStates[index];
-
-      if (state.gitgraph) {
-        return state.gitgraph;
-      }
-
-      const container = getGraphContainer(index);
-      container.replaceChildren();
-      state.gitgraph = GitgraphJS.createGitgraph(container, {
-        template: GitgraphJS.templateExtend(GitgraphJS.TemplateName.Metro, {
-          branch: {
-            spacing: 24,
-            label: {
-              borderRadius: 4,
-              font: "normal 10px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-            },
-          },
-          commit: {
-            spacing: 30,
-            dot: {
-              // GitGraph's dot size is a radius; 10 renders as a 20px dot.
-              size: COMMIT_DOT_RADIUS,
-              strokeColor: "#ffffff",
-              strokeWidth: 2,
-            },
-            message: { font: "normal 16px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" },
-          },
-        }),
-      });
-
-      return state.gitgraph;
-    }
-
     function renderLoadedGraph(index) {
       const state = graphStates[index];
-      const gitgraph = ensureGitgraph(index);
 
       if (!state.commits.length) {
+        state.rendered = true;
+        state.snapshotSignature = getStateSnapshotFingerprint(state);
+        setGraphSummary(index);
         setGraphStatus(index, state.loading ? "Loading commits..." : "No commits found.");
         return;
       }
 
-      const commits = pruneLoadedParents(state.commits).map((commit) => ({
-        ...commit,
-        onClick: () => showDiff(state.graph, index, commit),
-        onMessageClick: () => showDiff(state.graph, index, commit),
-      }));
-
-      gitgraph.import(commits);
+      state.currentHash = getCurrentCommitHash(state.commits) || state.currentHash;
+      renderLaneGraph(index, pruneLoadedParents(state.commits));
       scheduleGraphEnhancements(index);
       state.rendered = true;
+      state.snapshotSignature = getStateSnapshotFingerprint(state);
+      setGraphSummary(index);
       ensureLoadSentinel(index);
       setGraphStatus(
         index,
@@ -1631,9 +3065,13 @@ export function buildGraphHtml({
           throw new Error(result.error || response.statusText);
         }
 
-        state.commits.push(...result.commits);
+        state.commits = placeWorkingTreeCommits([...state.commits, ...result.commits]);
+        state.graph.commits = state.commits;
         state.offset = result.nextOffset;
         state.hasMore = result.hasMore;
+        state.workingTreeCount = result.workingTreeCount || state.workingTreeCount || 0;
+        state.graph.workingTreeCount = state.workingTreeCount;
+        state.graph.commitCount = state.commits.filter((commit) => !isWorkingTreeCommit(commit)).length;
         renderLoadedGraph(index);
       } catch (error) {
         setGraphStatus(index, error && error.message ? error.message : String(error), { error: true });
@@ -1678,32 +3116,279 @@ export function buildGraphHtml({
       stats.querySelector(".stat-deletions").textContent = "-" + deletions;
     }
 
+    function clearDiffSelection(index, message = "Select a commit in the graph.") {
+      const viewer = document.getElementById("diff-" + index);
+
+      if (!viewer) {
+        return;
+      }
+
+      graphStates[index].selectedHash = "";
+      viewer.querySelector(".diff-title").textContent = "No commit selected";
+      viewer.querySelector(".diff-meta").textContent = "";
+      setCommitMessage(viewer.querySelector(".diff-message"), "");
+      viewer.querySelector(".checkout-commit").hidden = true;
+      viewer.querySelector(".amend-commit").hidden = true;
+      viewer.querySelector(".checkout-status").textContent = "";
+      setDiffStats(viewer.querySelector(".diff-stats"), null);
+      setDiffText(viewer.querySelector(".diff-body"), message);
+      updateCommitRowStates(index);
+    }
+
+    function setCommitMessage(messageElement, message = "") {
+      const text = String(message || "").trimEnd();
+
+      messageElement.replaceChildren(...getLinkedCommitMessageNodes(text));
+      messageElement.hidden = !text;
+    }
+
+    function getCommitMessageLinkUrl(text) {
+      if (/^https?:\\/\\//i.test(text)) {
+        return text;
+      }
+
+      const bugMatch = /^bug\\s+#?(\\d{4,8})$/i.exec(text);
+      if (bugMatch) {
+        return BUGZILLA_BUG_URL + bugMatch[1];
+      }
+
+      const phabMatch = /^(?:phab-)?D(\\d{4,})$/i.exec(text);
+      if (phabMatch) {
+        return PHABRICATOR_REVISION_URL + phabMatch[1];
+      }
+
+      return "";
+    }
+
+    function splitLinkTrailingPunctuation(text) {
+      const match = /^(.*?)([.,;:)]+)?$/.exec(text);
+
+      if (!match) {
+        return [text, ""];
+      }
+
+      return [match[1], match[2] || ""];
+    }
+
+    function getLinkedCommitMessageNodes(message) {
+      const nodes = [];
+      let index = 0;
+
+      for (const match of message.matchAll(COMMIT_MESSAGE_LINK_PATTERN)) {
+        const rawText = match[0];
+        const start = match.index || 0;
+
+        if (start > index) {
+          nodes.push(document.createTextNode(message.slice(index, start)));
+        }
+
+        const [linkText, trailingText] = splitLinkTrailingPunctuation(rawText);
+        const href = getCommitMessageLinkUrl(linkText);
+
+        if (href) {
+          const link = document.createElement("a");
+          link.href = href;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          link.textContent = linkText;
+          nodes.push(link);
+        } else {
+          nodes.push(document.createTextNode(linkText));
+        }
+
+        if (trailingText) {
+          nodes.push(document.createTextNode(trailingText));
+        }
+
+        index = start + rawText.length;
+      }
+
+      if (index < message.length) {
+        nodes.push(document.createTextNode(message.slice(index)));
+      }
+
+      return nodes;
+    }
+
+    async function loadSelectedCommitMessage(index, commit, messageElement) {
+      if (!INTERACTIVE.enabled || isWorkingTreeCommit(commit)) {
+        setCommitMessage(messageElement, "");
+        return;
+      }
+
+      setCommitMessage(messageElement, "Loading commit message...");
+
+      try {
+        const response = await fetch(
+          "/api/graph/" + index + "/message/" + encodeURIComponent(commit.hash) +
+            "?token=" + encodeURIComponent(INTERACTIVE.token)
+        );
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || response.statusText);
+        }
+
+        if (graphStates[index].selectedHash !== commit.hash) {
+          return;
+        }
+
+        setCommitMessage(messageElement, result.message || commit.subject);
+      } catch (error) {
+        if (graphStates[index].selectedHash === commit.hash) {
+          setCommitMessage(messageElement, "Could not load commit message: " + (error && error.message ? error.message : String(error)));
+        }
+      }
+    }
+
+    function selectCommitActionResult(index, hash, message) {
+      const state = graphStates[index];
+      const viewer = document.getElementById("diff-" + index);
+      const commit = hash ? state.commits.find((item) => item.hash === hash) : null;
+
+      if (!commit) {
+        clearDiffSelection(index, message);
+        return;
+      }
+
+      showDiff(state.graph, index, commit);
+      viewer.querySelector(".checkout-status").textContent = message || "";
+    }
+
+    function getLoadedGitCommitLimit(state) {
+      const loadedGitCommits = state.commits.filter((commit) => !isWorkingTreeCommit(commit)).length;
+
+      return Math.max(INTERACTIVE.pageSize, loadedGitCommits);
+    }
+
+    function resetRenderedGraph(index) {
+      const state = graphStates[index];
+
+      state.gitgraph = null;
+      state.rendered = false;
+      getGraphContainer(index).replaceChildren();
+    }
+
+    function applyGraphSnapshot(index, snapshot, { force = false } = {}) {
+      const state = graphStates[index];
+      const nextSignature = getSnapshotFingerprint(snapshot);
+
+      if (!force && state.snapshotSignature === nextSignature) {
+        return false;
+      }
+
+      const previousSelectedHash = state.selectedHash;
+      state.graph.label = snapshot.label || state.graph.label;
+      state.graph.path = snapshot.path || state.graph.path;
+      state.graph.branch = snapshot.branch || "";
+      state.graph.commitCount = snapshot.commitCount || 0;
+      state.graph.workingTreeCount = snapshot.workingTreeCount || 0;
+      state.graph.diffs = {};
+      state.commits = placeWorkingTreeCommits(snapshot.commits || []);
+      state.graph.commits = state.commits;
+      state.offset = snapshot.nextOffset || state.commits.length;
+      state.hasMore = Boolean(snapshot.hasMore);
+      state.workingTreeCount = snapshot.workingTreeCount || 0;
+      state.currentHash = getCurrentCommitHash(state.commits);
+      state.snapshotSignature = nextSignature;
+      setGraphSummary(index);
+      resetRenderedGraph(index);
+      renderLoadedGraph(index);
+
+      if (!previousSelectedHash) {
+        return true;
+      }
+
+      const selectedCommit = state.commits.find((commit) => commit.hash === previousSelectedHash);
+
+      if (selectedCommit) {
+        showDiff(state.graph, index, selectedCommit);
+      } else {
+        clearDiffSelection(index, "Graph updated. The selected commit is no longer loaded.");
+      }
+
+      return true;
+    }
+
+    async function refreshGraphFromServer(index, { force = false } = {}) {
+      const state = graphStates[index];
+
+      if (!INTERACTIVE.enabled || state.loading || state.refreshing || state.graph.error) {
+        return false;
+      }
+
+      state.refreshing = true;
+
+      try {
+        const response = await fetch(
+          "/api/graph/" + index + "/snapshot?limit=" + getLoadedGitCommitLimit(state) +
+            "&token=" + encodeURIComponent(INTERACTIVE.token)
+        );
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || response.statusText);
+        }
+
+        return applyGraphSnapshot(index, result, { force });
+      } catch (error) {
+        setGraphStatus(index, error && error.message ? error.message : String(error), { error: true });
+        return false;
+      } finally {
+        state.refreshing = false;
+      }
+    }
+
+    function pollGraphUpdates() {
+      if (!INTERACTIVE.enabled) {
+        return;
+      }
+
+      graphStates.forEach((state, index) => {
+        if (state.rendered || state.commits.length) {
+          refreshGraphFromServer(index);
+        }
+      });
+    }
+
     async function showDiff(graph, index, commit) {
       const viewer = document.getElementById("diff-" + index);
       const title = viewer.querySelector(".diff-title");
       const meta = viewer.querySelector(".diff-meta");
+      const commitMessage = viewer.querySelector(".diff-message");
       const stats = viewer.querySelector(".diff-stats");
       const body = viewer.querySelector(".diff-body");
       const checkoutButton = viewer.querySelector(".checkout-commit");
+      const amendButton = viewer.querySelector(".amend-commit");
       const checkoutStatus = viewer.querySelector(".checkout-status");
       const diff = graph.diffs && graph.diffs[commit.hash];
 
       graphStates[index].selectedHash = commit.hash;
       updateCommitRowStates(index);
 
-      title.textContent = commit.hash.substring(0, 12) + " " + commit.subject;
-      meta.textContent = commit.author.name + " <" + commit.author.email + ">";
-      checkoutButton.hidden = !INTERACTIVE.enabled;
+      title.textContent = formatCommitTitle(commit);
+      meta.textContent = formatCommitMeta(commit);
+      setCommitMessage(commitMessage, "");
+      checkoutButton.hidden = !INTERACTIVE.enabled || isWorkingTreeCommit(commit);
       checkoutButton.disabled = false;
       checkoutButton.dataset.graphIndex = String(index);
       checkoutButton.dataset.hash = commit.hash;
       checkoutButton.dataset.label = graph.label;
+      amendButton.hidden = !INTERACTIVE.enabled;
+      amendButton.disabled = false;
+      amendButton.textContent = isWorkingTreeCommit(commit) ? "Amend" : "Amend Message";
+      amendButton.dataset.graphIndex = String(index);
+      amendButton.dataset.hash = commit.hash;
+      amendButton.dataset.label = graph.label;
+      amendButton.dataset.changeId = commit.changeId || "";
+      amendButton.dataset.includeChanges = String(isWorkingTreeCommit(commit));
       checkoutStatus.classList.remove("error");
       checkoutStatus.textContent = "";
       setDiffStats(stats, null);
 
       if (INTERACTIVE.enabled) {
         setDiffText(body, "Loading diff...");
+        loadSelectedCommitMessage(index, commit, commitMessage);
 
         try {
           const response = await fetch(
@@ -1761,15 +3446,15 @@ export function buildGraphHtml({
 
       if (action === "rebase") {
         return {
-          confirm: "Rebase " + label + " onto " + shortHash + "?",
+          confirm: "Rebase " + shortHash + " in " + label + " onto the current checkout?",
           progress: "Rebasing...",
         };
       }
 
       if (action === "prune") {
         return {
-          confirm: "Prune local branch tips at " + shortHash + " in " + label + "?",
-          progress: "Pruning...",
+          confirm: "Prune commit " + shortHash + " from local branch history in " + label + "?",
+          progress: "Pruning commit...",
         };
       }
 
@@ -1799,6 +3484,7 @@ export function buildGraphHtml({
             graphIndex,
             hash,
             action,
+            snapshotLimit: getLoadedGitCommitLimit(graphStates[graphIndex]),
           }),
         });
         const result = await response.json();
@@ -1807,13 +3493,23 @@ export function buildGraphHtml({
           throw new Error(result.error || response.statusText);
         }
 
-        status.textContent = result.message;
+        if (result.branch) {
+          graphStates[graphIndex].graph.branch = result.branch;
+        }
         if (result.currentHash) {
           graphStates[graphIndex].currentHash = result.currentHash;
         } else if (action === "checkout") {
           graphStates[graphIndex].currentHash = hash;
         }
         updateCommitRowStates(graphIndex);
+
+        if (result.snapshot) {
+          applyGraphSnapshot(graphIndex, result.snapshot, { force: true });
+        } else {
+          await refreshGraphFromServer(graphIndex, { force: true });
+        }
+
+        status.textContent = result.message;
       } catch (error) {
         status.classList.add("error");
         status.textContent = error && error.message ? error.message : String(error);
@@ -1834,6 +3530,111 @@ export function buildGraphHtml({
       }
     }
 
+    function closeAmendDialog() {
+      amendDialogState = null;
+      amendError.textContent = "";
+      amendSubmit.disabled = false;
+      amendDialog.close();
+    }
+
+    async function openAmendDialog(button) {
+      const graphIndex = Number(button.dataset.graphIndex);
+      const hash = button.dataset.hash || "HEAD";
+      const includeChanges = button.dataset.includeChanges === "true";
+      const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
+
+      button.disabled = true;
+      status.classList.remove("error");
+      status.textContent = "Loading commit message...";
+
+      try {
+        const response = await fetch(
+          "/api/graph/" + graphIndex + "/message/" + encodeURIComponent(hash) +
+            "?token=" + encodeURIComponent(INTERACTIVE.token)
+        );
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || response.statusText);
+        }
+
+        amendDialogState = {
+          graphIndex,
+          hash,
+          changeId: button.dataset.changeId || "",
+          includeChanges,
+          label: button.dataset.label,
+        };
+        amendDialog.querySelector(".amend-title").textContent = includeChanges
+          ? "Amend " + button.dataset.label + " current commit"
+          : "Amend " + button.dataset.label + " commit " + hash.substring(0, 12);
+        amendMessage.value = result.message || "";
+        amendError.textContent = "";
+        status.textContent = "";
+        amendDialog.showModal();
+        amendMessage.focus();
+        amendMessage.setSelectionRange(amendMessage.value.length, amendMessage.value.length);
+      } catch (error) {
+        status.classList.add("error");
+        status.textContent = error && error.message ? error.message : String(error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function submitAmendDialog() {
+      if (!amendDialogState) {
+        return;
+      }
+
+      const message = amendMessage.value;
+
+      if (!message.trim()) {
+        amendError.textContent = "Commit message cannot be empty.";
+        return;
+      }
+
+      amendSubmit.disabled = true;
+      amendError.textContent = "Amending...";
+
+      try {
+        const response = await fetch("/api/amend-message", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            token: INTERACTIVE.token,
+            graphIndex: amendDialogState.graphIndex,
+            hash: amendDialogState.hash,
+            expectedChangeId: amendDialogState.changeId,
+            includeChanges: amendDialogState.includeChanges,
+            message,
+            snapshotLimit: getLoadedGitCommitLimit(graphStates[amendDialogState.graphIndex]),
+          }),
+        });
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || response.statusText);
+        }
+
+        const graphIndex = amendDialogState.graphIndex;
+
+        closeAmendDialog();
+
+        if (result.snapshot) {
+          applyGraphSnapshot(graphIndex, result.snapshot, { force: true });
+        } else {
+          await refreshGraphFromServer(graphIndex, { force: true });
+        }
+
+        selectCommitActionResult(graphIndex, result.rewrittenHash || result.currentHash, result.message);
+      } catch (error) {
+        amendError.textContent = error && error.message ? error.message : String(error);
+      } finally {
+        amendSubmit.disabled = false;
+      }
+    }
+
     document.addEventListener("click", (event) => {
       if (!event.target.closest(".context-menu")) {
         hideCommitContextMenu();
@@ -1842,6 +3643,12 @@ export function buildGraphHtml({
       const checkoutButton = event.target.closest(".checkout-commit");
       if (checkoutButton) {
         checkoutSelectedCommit(checkoutButton);
+        return;
+      }
+
+      const amendButton = event.target.closest(".amend-commit");
+      if (amendButton) {
+        openAmendDialog(amendButton);
         return;
       }
 
@@ -1867,6 +3674,13 @@ export function buildGraphHtml({
       hideCommitContextMenu();
       runCommitAction(button.dataset.action, actionState);
     });
+
+    amendForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitAmendDialog();
+    });
+
+    amendDialog.querySelector(".amend-cancel").addEventListener("click", closeAmendDialog);
 
     window.addEventListener("scroll", hideCommitContextMenu, { passive: true });
     window.addEventListener("keydown", (event) => {
@@ -1930,8 +3744,6 @@ export function buildGraphHtml({
       }
 
       if (INTERACTIVE.enabled) {
-        ensureGitgraph(index);
-
         if (!state.commits.length) {
           loadMoreCommits(index);
         } else {
@@ -1945,21 +3757,15 @@ export function buildGraphHtml({
         return;
       }
 
-      if (!graph.commits.length) {
+      if (!state.commits.length) {
         container.textContent = "No commits found.";
         state.rendered = true;
         return;
       }
 
       try {
-        const gitgraph = ensureGitgraph(index);
-        const commits = graph.commits.map((commit) => ({
-          ...commit,
-          onClick: () => showDiff(graph, index, commit),
-          onMessageClick: () => showDiff(graph, index, commit),
-        }));
-
-        gitgraph.import(commits);
+        state.currentHash = getCurrentCommitHash(state.commits) || state.currentHash;
+        renderLaneGraph(index, state.commits);
         scheduleGraphEnhancements(index);
         state.rendered = true;
       } catch (error) {
@@ -2019,9 +3825,11 @@ export function buildGraphHtml({
           keepalive: true,
         }).catch(() => {});
       }, 2000);
+      const graphPoll = setInterval(pollGraphUpdates, INTERACTIVE.pollIntervalMs);
 
       window.addEventListener("pagehide", () => {
         clearInterval(heartbeat);
+        clearInterval(graphPoll);
         sendCloseSignal();
       }, { once: true });
       window.addEventListener("beforeunload", sendCloseSignal, { once: true });
@@ -2076,6 +3884,13 @@ function validateToken(token, expectedToken) {
   }
 }
 
+function formatDurationLabel(milliseconds) {
+  const seconds = Math.ceil(Number(milliseconds || 0) / 1000);
+  const unit = seconds === 1 ? "second" : "seconds";
+
+  return `${seconds} ${unit}`;
+}
+
 export async function startInteractiveGraphServer({
   html,
   graphs,
@@ -2085,13 +3900,14 @@ export async function startInteractiveGraphServer({
   port = 0,
   host = "127.0.0.1",
   heartbeatIntervalMs = 2000,
-  heartbeatTimeoutMs = 8000,
+  heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
   runCommand = run,
   serverFactory = createServer,
 }) {
   const serverGraphs = graphs.map((graph) => ({
     ...graph,
     knownHashes: new Set(),
+    workingTreeCount: 0,
   }));
   const sockets = new Set();
   let closeTimer;
@@ -2099,16 +3915,17 @@ export async function startInteractiveGraphServer({
   let shuttingDown = false;
   const heartbeatTimer = setInterval(() => {
     if (lastHeartbeat && Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
-      shutdown(0);
+      shutdown(0, `browser heartbeat timed out after ${formatDurationLabel(heartbeatTimeoutMs)}`);
     }
   }, heartbeatIntervalMs);
 
-  function shutdown(delay = 0) {
+  function shutdown(delay = 0, reason = "server shutdown requested") {
     if (shuttingDown) {
       return;
     }
 
     shuttingDown = true;
+    server.closeReason = reason;
     closeTimer = setTimeout(() => {
       clearInterval(heartbeatTimer);
 
@@ -2120,6 +3937,25 @@ export async function startInteractiveGraphServer({
         sockets.forEach((socket) => socket.destroy());
       }, 250);
     }, delay);
+  }
+
+  async function getServerGraphSnapshot(graph, limit) {
+    const snapshot = await getCheckoutGraphSnapshot({
+      graph,
+      limit,
+      runCommand,
+    });
+
+    graph.branch = snapshot.branch;
+    graph.workingTreeCount = snapshot.workingTreeCount || 0;
+    graph.commitCount = snapshot.commitCount || 0;
+    graph.knownHashes = new Set(snapshot.commits.map((commit) => commit.hash));
+
+    return snapshot;
+  }
+
+  function getRequestLimit(value) {
+    return Math.max(1, Number(value || pageSize) || pageSize);
   }
 
   const server = serverFactory(async (request, response) => {
@@ -2157,11 +3993,80 @@ export async function startInteractiveGraphServer({
           cwd: graph.path,
           offset,
           limit,
+          includeWorkingTree: true,
+          workingTreeCount: graph.workingTreeCount,
           runCommand,
         });
 
+        graph.workingTreeCount = page.workingTreeCount || graph.workingTreeCount || 0;
         page.commits.forEach((commit) => graph.knownHashes.add(commit.hash));
         sendJson(response, 200, { ok: true, ...page });
+        return;
+      }
+
+      const snapshotMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/snapshot$/);
+      if (request.method === "GET" && snapshotMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        lastHeartbeat = Date.now();
+        const graph = serverGraphs[Number(snapshotMatch[1])];
+
+        if (!graph) {
+          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          return;
+        }
+
+        if (graph.error) {
+          sendJson(response, 500, { ok: false, error: graph.error });
+          return;
+        }
+
+        const limit = getRequestLimit(url.searchParams.get("limit"));
+        const snapshot = await getServerGraphSnapshot(graph, limit);
+
+        sendJson(response, 200, { ok: true, ...snapshot });
+        return;
+      }
+
+      const commitMessageMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/current-message$/);
+      if (request.method === "GET" && commitMessageMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        const graph = serverGraphs[Number(commitMessageMatch[1])];
+
+        if (!graph) {
+          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          return;
+        }
+
+        const message = await getGraphCurrentCommitMessage({
+          graph,
+          runCommand,
+        });
+        sendJson(response, 200, { ok: true, message });
+        return;
+      }
+
+      const selectedCommitMessageMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/message\/(.+)$/);
+      if (request.method === "GET" && selectedCommitMessageMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        const graph = serverGraphs[Number(selectedCommitMessageMatch[1])];
+        const hash = decodeURIComponent(selectedCommitMessageMatch[2]);
+
+        if (!graph) {
+          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          return;
+        }
+
+        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD" && !graph.knownHashes.has(hash)) {
+          sendJson(response, 404, { ok: false, error: "Commit has not been loaded by this graph." });
+          return;
+        }
+
+        const message = await getGraphCommitMessage({
+          graph,
+          hash,
+          runCommand,
+        });
+        sendJson(response, 200, { ok: true, message });
         return;
       }
 
@@ -2195,7 +4100,11 @@ export async function startInteractiveGraphServer({
           hash: body.hash,
           runCommand,
         });
-        sendJson(response, 200, { ok: true, ...result });
+        const snapshot = await getServerGraphSnapshot(
+          serverGraphs[Number(body.graphIndex)],
+          getRequestLimit(body.snapshotLimit)
+        );
+        sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
       }
 
@@ -2209,7 +4118,43 @@ export async function startInteractiveGraphServer({
           action: body.action,
           runCommand,
         });
-        sendJson(response, 200, { ok: true, ...result });
+        const snapshot = await getServerGraphSnapshot(
+          serverGraphs[Number(body.graphIndex)],
+          getRequestLimit(body.snapshotLimit)
+        );
+        sendJson(response, 200, { ok: true, ...result, snapshot });
+        return;
+      }
+
+      if (request.method === "POST" && (url.pathname === "/api/amend-current" || url.pathname === "/api/amend-message")) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        const graph = serverGraphs[Number(body.graphIndex)];
+        const hash = String(body.hash || "HEAD");
+
+        if (!graph) {
+          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          return;
+        }
+
+        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD" && !graph.knownHashes.has(hash)) {
+          sendJson(response, 404, { ok: false, error: "Commit has not been loaded by this graph." });
+          return;
+        }
+
+        const result = await amendCommitMessage({
+          graph,
+          hash,
+          message: body.message,
+          expectedChangeId: body.expectedChangeId,
+          includeChanges: Boolean(body.includeChanges),
+          runCommand,
+        });
+        const snapshot = await getServerGraphSnapshot(
+          graph,
+          getRequestLimit(body.snapshotLimit)
+        );
+        sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
       }
 
@@ -2225,7 +4170,7 @@ export async function startInteractiveGraphServer({
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         sendJson(response, 200, { ok: true });
-        shutdown(50);
+        shutdown(50, "browser tab closed");
         return;
       }
 
@@ -2237,6 +4182,7 @@ export async function startInteractiveGraphServer({
       });
     }
   });
+  server.shutdown = shutdown;
   heartbeatTimer.unref?.();
 
   server.on("connection", (socket) => {
@@ -2265,7 +4211,7 @@ export async function startInteractiveGraphServer({
   };
 }
 
-export function waitForInteractiveServerClose(server) {
+export function waitForInteractiveServerClose(server, signalSource = process) {
   return new Promise((resolve) => {
     if (!server.listening) {
       resolve();
@@ -2273,19 +4219,24 @@ export function waitForInteractiveServerClose(server) {
     }
 
     const close = () => {
+      if (typeof server.shutdown === "function") {
+        server.shutdown(0, "terminal signal received");
+        return;
+      }
+
       if (server.listening) {
         server.close();
       }
     };
     const cleanup = () => {
-      process.off("SIGINT", close);
-      process.off("SIGTERM", close);
-      resolve();
+      signalSource.off("SIGINT", close);
+      signalSource.off("SIGTERM", close);
+      resolve(server.closeReason || "server closed");
     };
 
     server.once("close", cleanup);
-    process.once("SIGINT", close);
-    process.once("SIGTERM", close);
+    signalSource.once("SIGINT", close);
+    signalSource.once("SIGTERM", close);
   });
 }
 
@@ -2379,7 +4330,10 @@ export function createGraphCommand({
         await open(graphServer.url);
       }
 
-      await waitForClose(graphServer.server);
+      const closeReason = await waitForClose(graphServer.server);
+      if (closeReason) {
+        log(`Interactive graph stopped: ${closeReason}.`);
+      }
       return graphServer.url;
     }
 

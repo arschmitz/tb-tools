@@ -170,7 +170,7 @@ tb graph
 |--firefox||Include the Firefox parent checkout tab|true|`tb graph --firefox=false`
 |--diffs||Embed per-commit diffs for click-to-view|true|`tb graph --diffs=false`
 |--maxDiffBytes||Maximum embedded diff bytes per commit|200000|`tb graph --maxDiffBytes=200000`
-|--interactive|-i|Serve an interactive graph with paged commits, server-loaded diffs, and checkout callbacks|false|`tb graph --interactive`
+|--interactive|-i|Serve an interactive graph with paged commits, server-loaded diffs, live polling, and checkout callbacks|false|`tb graph --interactive`
 |--pageSize||Commit page size for interactive infinite loading|80|`tb graph --pageSize=80`
 |--port||Localhost port for interactive mode. Use 0 for a random free port|0|`tb graph --port=0`
 
@@ -305,7 +305,19 @@ tb patch
 |--bug|-b|Create or switch to Bug-N before applying the patch||`tb patch --bug=<value>`
 |--checkpoint||Create a rollback checkpoint before applying the patch|true|`tb patch --checkpoint=false`
 |--rollback||Prompt to roll back if patching fails|true|`tb patch --rollback=false`
-|--skipDependencies||Pass --skip-dependencies to moz-phab patch|true|`tb patch --skipDependencies=false`
+|--applyTo|-a|Pass --apply-to to moz-phab patch: a node, here, or base||`tb patch --applyTo=<value>`
+|--raw||Pass --raw to moz-phab patch|false|`tb patch --raw`
+|--diffId||Pass --diff-id to moz-phab patch||`tb patch --diffId=<value>`
+|--name|-n|Pass --name to moz-phab patch||`tb patch --name=<value>`
+|--noCommit||Pass --no-commit to moz-phab patch|false|`tb patch --noCommit`
+|--noBookmark||Pass --no-bookmark to moz-phab patch|false|`tb patch --noBookmark`
+|--noTopic||Pass --no-topic to moz-phab patch|false|`tb patch --noTopic`
+|--noBranch||Pass --no-branch to moz-phab patch|false|`tb patch --noBranch`
+|--skipDependencies||Pass --skip-dependencies to moz-phab patch|false|`tb patch --skipDependencies`
+|--includeAbandoned||Pass --include-abandoned to moz-phab patch|false|`tb patch --includeAbandoned`
+|--yes|-y|Pass --yes to moz-phab patch|false|`tb patch --yes`
+|--safeMode||Pass --safe-mode to moz-phab patch|false|`tb patch --safeMode`
+|--forceVcs||Pass --force-vcs to moz-phab patch|false|`tb patch --forceVcs`
 
 <br/><br/>
 ### preflight

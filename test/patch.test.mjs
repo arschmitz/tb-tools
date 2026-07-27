@@ -12,16 +12,49 @@ test("getPatchArgs builds moz-phab patch arguments", () => {
   assert.deepEqual(getPatchArgs({ revision: "D123456" }), [
     "patch",
     "D123456",
-    "--skip-dependencies",
-    "--apply-to",
-    "here",
   ]);
-  assert.deepEqual(getPatchArgs({ revision: "D123456", skipDependencies: false }), [
+  assert.deepEqual(getPatchArgs({
+    revision: "D123456",
+    applyTo: "here",
+    diffId: 42,
+    name: "Bug-1234567",
+    noCommit: true,
+    noBookmark: true,
+    noTopic: true,
+    noBranch: true,
+    skipDependencies: true,
+    includeAbandoned: true,
+    yes: true,
+    safeMode: true,
+    forceVcs: true,
+  }), [
     "patch",
     "D123456",
     "--apply-to",
     "here",
+    "--diff-id",
+    "42",
+    "--name",
+    "Bug-1234567",
+    "--no-commit",
+    "--no-bookmark",
+    "--no-topic",
+    "--no-branch",
+    "--skip-dependencies",
+    "--include-abandoned",
+    "--yes",
+    "--safe-mode",
+    "--force-vcs",
   ]);
+  assert.deepEqual(getPatchArgs({ revision: "D123456", raw: true }), [
+    "patch",
+    "D123456",
+    "--raw",
+  ]);
+  assert.throws(
+    () => getPatchArgs({ revision: "D123456", raw: true, applyTo: "here" }),
+    /does not allow --raw with --apply-to/
+  );
 });
 
 test("switchToBugBranch creates a Bug branch", async () => {
@@ -77,10 +110,73 @@ test("patch command creates a checkpoint and runs moz-phab patch", async () => {
     ["branch", "1234567"],
     ["run", {
       cmd: "moz-phab",
-      args: ["patch", "D123456", "--skip-dependencies", "--apply-to", "here"],
-      capture: true,
+      args: ["patch", "D123456"],
     }],
   ]);
+});
+
+test("patch command passes through moz-phab patch options", async () => {
+  const calls = [];
+  const patch = createPatchCommand({
+    runCommand: async (command) => {
+      calls.push(command);
+    },
+  });
+
+  await patch({
+    revision: "123456",
+    checkpoint: false,
+    applyTo: "base",
+    diffId: "42",
+    name: "topic-name",
+    noCommit: true,
+    noBookmark: true,
+    noTopic: true,
+    noBranch: true,
+    skipDependencies: true,
+    includeAbandoned: true,
+    yes: true,
+    safeMode: true,
+    forceVcs: true,
+  });
+
+  assert.deepEqual(calls, [{
+    cmd: "moz-phab",
+    args: [
+      "patch",
+      "D123456",
+      "--apply-to",
+      "base",
+      "--diff-id",
+      "42",
+      "--name",
+      "topic-name",
+      "--no-commit",
+      "--no-bookmark",
+      "--no-topic",
+      "--no-branch",
+      "--skip-dependencies",
+      "--include-abandoned",
+      "--yes",
+      "--safe-mode",
+      "--force-vcs",
+    ],
+  }]);
+});
+
+test("patch command validates moz-phab options before creating a checkpoint", async () => {
+  const calls = [];
+  const patch = createPatchCommand({
+    createPatchCheckpoint: async () => {
+      calls.push("checkpoint");
+    },
+  });
+
+  await assert.rejects(
+    patch({ revision: "D123456", raw: true, applyTo: "here" }),
+    /does not allow --raw with --apply-to/
+  );
+  assert.deepEqual(calls, []);
 });
 
 test("patch command restores the checkpoint on failure when requested", async () => {

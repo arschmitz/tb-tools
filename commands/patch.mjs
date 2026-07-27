@@ -10,14 +10,79 @@ export function normalizeRevision(revision) {
   return /^D/i.test(revision) ? revision.toUpperCase() : `D${revision}`;
 }
 
-export function getPatchArgs({ revision, skipDependencies = true } = {}) {
+export function getPatchArgs({
+  revision,
+  applyTo,
+  raw = false,
+  diffId,
+  name,
+  noCommit = false,
+  noBookmark = false,
+  noTopic = false,
+  noBranch = false,
+  skipDependencies = false,
+  includeAbandoned = false,
+  yes = false,
+  safeMode = false,
+  forceVcs = false,
+} = {}) {
+  if (raw && applyTo) {
+    throw new Error("moz-phab patch does not allow --raw with --apply-to.");
+  }
+
   const args = ["patch", normalizeRevision(revision)];
+
+  if (applyTo) {
+    args.push("--apply-to", applyTo);
+  }
+
+  if (raw) {
+    args.push("--raw");
+  }
+
+  if (diffId) {
+    args.push("--diff-id", String(diffId));
+  }
+
+  if (name) {
+    args.push("--name", name);
+  }
+
+  if (noCommit) {
+    args.push("--no-commit");
+  }
+
+  if (noBookmark) {
+    args.push("--no-bookmark");
+  }
+
+  if (noTopic) {
+    args.push("--no-topic");
+  }
+
+  if (noBranch) {
+    args.push("--no-branch");
+  }
 
   if (skipDependencies) {
     args.push("--skip-dependencies");
   }
 
-  args.push("--apply-to", "here");
+  if (includeAbandoned) {
+    args.push("--include-abandoned");
+  }
+
+  if (yes) {
+    args.push("--yes");
+  }
+
+  if (safeMode) {
+    args.push("--safe-mode");
+  }
+
+  if (forceVcs) {
+    args.push("--force-vcs");
+  }
 
   return args;
 }
@@ -50,8 +115,36 @@ export function createPatchCommand({
     bug,
     checkpoint = true,
     rollback = true,
-    skipDependencies = true,
+    applyTo,
+    raw = false,
+    diffId,
+    name,
+    noCommit = false,
+    noBookmark = false,
+    noTopic = false,
+    noBranch = false,
+    skipDependencies = false,
+    includeAbandoned = false,
+    yes = false,
+    safeMode = false,
+    forceVcs = false,
   } = {}) {
+    const patchArgs = getPatchArgs({
+      revision,
+      applyTo,
+      raw,
+      diffId,
+      name,
+      noCommit,
+      noBookmark,
+      noTopic,
+      noBranch,
+      skipDependencies,
+      includeAbandoned,
+      yes,
+      safeMode,
+      forceVcs,
+    });
     const patchCheckpoint = checkpoint ? await createPatchCheckpoint("patch-start") : undefined;
 
     if (bug) {
@@ -61,8 +154,7 @@ export function createPatchCommand({
     try {
       await runCommand({
         cmd: "moz-phab",
-        args: getPatchArgs({ revision, skipDependencies }),
-        capture: true,
+        args: patchArgs,
       });
     } catch (error) {
       if (patchCheckpoint && rollback) {
