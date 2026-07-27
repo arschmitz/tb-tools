@@ -34,6 +34,7 @@ This file currently contains credentials for phabricator and bugzilla, plus opti
 - [cleanup](#cleanup)
 - [diff](#diff)
 - [graph](#graph)
+- [console](#console)
 - [build-rebase](#build-rebase)
 - [build-update](#build-update)
 - [bump](#bump)
@@ -156,7 +157,7 @@ tb diff
 <br/><br/>
 ### graph
 ---
-Generates and opens a tabbed branch graph for comm and the Firefox parent checkout. Interactive mode can show origin/main freshness, Bugzilla/Phabricator status, tracked try runs, mark accepted patches for checkin, checkout, rebase, prune, amend, submit the current commit, submit configurable mach try runs, update or rebase both checkouts onto origin/main, and build or build+run Thunderbird with a dismissible bottom command status bar and toggleable output panel.
+Generates and opens a static tabbed branch graph for comm and the Firefox parent checkout.
 ```bash
 tb graph
 ```
@@ -170,9 +171,23 @@ tb graph
 |--firefox||Include the Firefox parent checkout tab|true|`tb graph --firefox=false`
 |--diffs||Embed per-commit diffs for click-to-view|true|`tb graph --diffs=false`
 |--maxDiffBytes||Maximum embedded diff bytes per commit|200000|`tb graph --maxDiffBytes=200000`
-|--interactive|-i|Serve an interactive graph with paged commits, server-loaded diffs, live polling, origin/main freshness badges, checkout callbacks, update/rebase buttons with post-update build/run prompts, build/run controls with a dismissible bottom command status bar and toggleable output, Bugzilla/Phabricator status badges, accepted-patch checkin-needed marking, tracked try-run links, configurable mach try submission, and current-commit submit prompts|false|`tb graph --interactive`
-|--pageSize||Commit page size for interactive infinite loading|80|`tb graph --pageSize=80`
-|--port||Localhost port for interactive mode. Use 0 for a random free port|0|`tb graph --port=0`
+
+<br/><br/>
+### console
+---
+Starts the interactive Thunderbird Desktop Console with live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/prune/amend/submit actions, Bugzilla/Phabricator status, tracked try runs, update/rebase controls, and build/run output.
+```bash
+tb console
+```
+#### Options
+|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+|----|-----------|--|--|---|
+|--open||Open the console in a browser|true|`tb console --open=false`
+|--comm||Include the comm checkout tab|true|`tb console --comm=false`
+|--firefox||Include the Firefox parent checkout tab|true|`tb console --firefox=false`
+|--maxDiffBytes||Maximum server-loaded diff bytes per commit|200000|`tb console --maxDiffBytes=200000`
+|--pageSize||Commit page size for infinite loading|80|`tb console --pageSize=80`
+|--port||Localhost port. Use 0 for a random free port|0|`tb console --port=0`
 
 <br/><br/>
 ### build-rebase

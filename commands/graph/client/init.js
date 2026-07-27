@@ -354,6 +354,9 @@ if (INTERACTIVE.enabled) {
     if (uiState.commandElapsedTimer) {
       window.clearInterval(uiState.commandElapsedTimer);
     }
+    if (uiState.originMainStatusRetryTimer) {
+      window.clearTimeout(uiState.originMainStatusRetryTimer);
+    }
     sendCloseSignal();
   }, { once: true });
   window.addEventListener("beforeunload", sendCloseSignal, { once: true });

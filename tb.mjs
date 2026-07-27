@@ -32,6 +32,7 @@ import diffCommand from './commands/diff.mjs';
 import fs from "fs";
 import path from "path";
 import graphCommand from './commands/graph.mjs';
+import consoleCommand from './commands/console.mjs';
 
 
 const mainDefinitions = [
@@ -129,7 +130,7 @@ const commands = {
     ]
   },
   graph: {
-    description: "Generates and opens a tabbed branch graph for comm and the Firefox parent checkout. Interactive mode can show origin/main freshness, Bugzilla/Phabricator status, tracked try runs, mark accepted patches for checkin, checkout, rebase, prune, amend, submit the current commit, submit configurable mach try runs, update or rebase both checkouts onto origin/main, and build or build+run Thunderbird with a dismissible bottom command status bar and toggleable output panel.",
+    description: "Generates and opens a static tabbed branch graph for comm and the Firefox parent checkout.",
     header: "Graph Options",
     options: [
       { name: "limit", alias: "l", description: "Maximum commits to include per checkout", defaultValue: "80" },
@@ -139,13 +140,26 @@ const commands = {
       { name: "firefox", description: "Include the Firefox parent checkout tab", defaultValue: "true" },
       { name: "diffs", description: "Embed per-commit diffs for click-to-view", defaultValue: "true" },
       { name: "maxDiffBytes", description: "Maximum embedded diff bytes per commit", defaultValue: "200000" },
-      { name: "interactive", alias: "i", description: "Serve an interactive graph with paged commits, server-loaded diffs, live polling, origin/main freshness badges, checkout callbacks, update/rebase buttons with post-update build/run prompts, build/run controls with a dismissible bottom command status bar and toggleable output, Bugzilla/Phabricator status badges, accepted-patch checkin-needed marking, tracked try-run links, configurable mach try submission, and current-commit submit prompts", defaultValue: "false" },
-      { name: "pageSize", description: "Commit page size for interactive infinite loading", defaultValue: "80" },
-      { name: "port", description: "Localhost port for interactive mode. Use 0 for a random free port", defaultValue: "0" },
     ],
     async run () {
       const options = mapBooleanOptions(args(commands.graph.options, { argv }));
       await graphCommand(options);
+    },
+  },
+  console: {
+    description: "Starts the interactive Thunderbird Desktop Console with live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/prune/amend/submit actions, Bugzilla/Phabricator status, tracked try runs, update/rebase controls, and build/run output.",
+    header: "Console Options",
+    options: [
+      { name: "open", description: "Open the console in a browser", defaultValue: "true" },
+      { name: "comm", description: "Include the comm checkout tab", defaultValue: "true" },
+      { name: "firefox", description: "Include the Firefox parent checkout tab", defaultValue: "true" },
+      { name: "maxDiffBytes", description: "Maximum server-loaded diff bytes per commit", defaultValue: "200000" },
+      { name: "pageSize", description: "Commit page size for infinite loading", defaultValue: "80" },
+      { name: "port", description: "Localhost port. Use 0 for a random free port", defaultValue: "0" },
+    ],
+    async run () {
+      const options = mapBooleanOptions(args(commands.console.options, { argv }));
+      await consoleCommand(options);
     },
   },
   "build-rebase": {

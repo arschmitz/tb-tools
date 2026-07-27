@@ -29,6 +29,7 @@ import {
   getCurrentGraphBase,
   getGraphCommitIntegrationStatus,
   getGraphOriginMainStatus,
+  getGraphRustUpstreamStatus,
   markGraphBugForCheckin,
   runGraphCommitAction,
   runGraphRepositoryUpdate,
@@ -104,6 +105,7 @@ export async function startInteractiveGraphServer({
   updateBug = defaultUpdateBug,
   phab = defaultPhab,
   postComment = defaultComment,
+  getRustUpstreamStatus = getGraphRustUpstreamStatus,
   serverFactory = createServer,
 }) {
   const serverGraphs = graphs.map((graph) => ({
@@ -120,6 +122,9 @@ export async function startInteractiveGraphServer({
   let closeTimer;
   let lastHeartbeat;
   let shuttingDown = false;
+  let rustUpstreamStatus;
+  let rustUpstreamStatusCheckedAt = 0;
+  let rustUpstreamStatusPromise = null;
   const heartbeatTimer = setInterval(() => {
     if (lastHeartbeat && Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
       shutdown(0, `browser heartbeat timed out after ${formatDurationLabel(heartbeatTimeoutMs)}`);
@@ -231,9 +236,77 @@ export async function startInteractiveGraphServer({
   }
 
   async function getServerOriginMainStatuses({ force = false } = {}) {
-    return (await Promise.all(serverGraphs.map((graph) => (
+    const statuses = (await Promise.all(serverGraphs.map((graph) => (
       getServerOriginMainStatus(graph, { force })
     )))).filter(Boolean);
+    statuses.push(await getServerRustUpstreamStatus({ force }));
+
+    return statuses;
+  }
+
+  function getServerRustUpstreamCheckingStatus() {
+    return {
+      type: "rust-upstream",
+      label: "rust",
+      state: "checking",
+      upToDate: null,
+      message: "Checking Rust dependencies against Firefox remote main.",
+    };
+  }
+
+  async function refreshServerRustUpstreamStatus() {
+    if (rustUpstreamStatusPromise) {
+      return rustUpstreamStatusPromise;
+    }
+
+    rustUpstreamStatus = rustUpstreamStatus || getServerRustUpstreamCheckingStatus();
+    rustUpstreamStatusPromise = (async () => {
+      try {
+        rustUpstreamStatus = await getRustUpstreamStatus({
+          graphs: serverGraphs,
+          runCommand,
+        });
+      } catch (error) {
+        rustUpstreamStatus = {
+          type: "rust-upstream",
+          label: "rust",
+          state: "error",
+          upToDate: false,
+          message: error && error.message ? error.message : String(error),
+        };
+      } finally {
+        rustUpstreamStatusCheckedAt = Date.now();
+        rustUpstreamStatusPromise = null;
+      }
+
+      return rustUpstreamStatus;
+    })();
+
+    return rustUpstreamStatusPromise;
+  }
+
+  function isFreshRustUpstreamStatus(now) {
+    return (
+      rustUpstreamStatus &&
+      rustUpstreamStatus.state !== "checking" &&
+      rustUpstreamStatusCheckedAt &&
+      now - rustUpstreamStatusCheckedAt < DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS
+    );
+  }
+
+  async function getServerRustUpstreamStatus({ force = false } = {}) {
+    const now = Date.now();
+
+    if (!force && isFreshRustUpstreamStatus(now)) {
+      return rustUpstreamStatus;
+    }
+
+    if (force) {
+      return refreshServerRustUpstreamStatus();
+    }
+
+    refreshServerRustUpstreamStatus();
+    return rustUpstreamStatus || getServerRustUpstreamCheckingStatus();
   }
 
   const server = serverFactory(async (request, response) => {

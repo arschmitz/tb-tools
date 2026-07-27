@@ -46,8 +46,9 @@ export function buildGraphHtml({
         ${graphs.length
           ? graphs.map((graph) => (
             `<span class="origin-main-badge checking">${escapeHtml(getOriginMainDisplayLabel(graph.label))}: checking</span>`
-          )).join("\n")
-          : `<span class="origin-main-badge checking">origin/main: checking</span>`}
+          )).join("\n") + `\n<span class="origin-main-badge checking">Rust deps: checking</span>`
+          : `<span class="origin-main-badge checking">origin/main: checking</span>
+<span class="origin-main-badge checking">Rust deps: checking</span>`}
       </div>`
     : "";
   const graphOptions = interactive.enabled
@@ -204,7 +205,7 @@ export function buildGraphHtml({
     .origin-main-status { align-items: center; display: flex; flex-wrap: wrap; gap: 4px; }
     .origin-main-badge { border: 1px solid #d0d7de; border-radius: 999px; color: #59616d; display: inline-flex; font-size: 12px; line-height: 1.2; padding: 3px 8px; white-space: nowrap; }
     .origin-main-badge.current { background: #dafbe1; border-color: #2da44e; color: #116329; }
-    .origin-main-badge.stale { background: #fff8c5; border-color: #bf8700; color: #7d4e00; }
+    .origin-main-badge.stale, .origin-main-badge.warning { background: #fff8c5; border-color: #bf8700; color: #7d4e00; }
     .origin-main-badge.error { background: #ffebe9; border-color: #f1a5a5; color: #9b1c1c; }
     .mach-output-panel { background: #ffffff; border: 1px solid #d6dae1; border-radius: 6px 6px 0 0; bottom: 100%; box-shadow: 0 -6px 18px rgba(27, 31, 36, 0.12); box-sizing: border-box; left: 12px; padding: 8px; position: absolute; right: 12px; }
     .mach-output-panel[hidden] { display: none; }
@@ -421,7 +422,7 @@ export function buildGraphHtml({
       .update-status.error { color: #ff9f9f; }
       .origin-main-badge { background: #191d23; border-color: #424b59; color: #acb4c0; }
       .origin-main-badge.current { background: #072b15; border-color: #2ea043; color: #7ee787; }
-      .origin-main-badge.stale { background: #341a00; border-color: #9e6a03; color: #f2cc60; }
+      .origin-main-badge.stale, .origin-main-badge.warning { background: #341a00; border-color: #9e6a03; color: #f2cc60; }
       .origin-main-badge.error { background: #3d1114; border-color: #da3633; color: #ff9f9f; }
       .mach-output-panel { background: #161b22; border-color: #323844; }
       .mach-output { background: #0d1117; border-color: #424b59; color: #e6edf3; }

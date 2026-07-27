@@ -251,6 +251,10 @@ export function shortHash(hash) {
 export function getOriginMainDisplayLabel(label) {
   const normalized = String(label || "").toLowerCase();
 
+  if (normalized === "rust" || normalized === "rust-upstream") {
+    return "Rust deps";
+  }
+
   if (normalized === "comm") {
     return "Thunderbird";
   }
@@ -264,6 +268,7 @@ export function getOriginMainDisplayLabel(label) {
 
 export function getOriginMainBadgeText(status) {
   const label = getOriginMainDisplayLabel(status && status.label);
+  const isRustStatus = status && status.type === "rust-upstream";
 
   if (!status || status.state === "checking") {
     return label + ": checking";
@@ -271,6 +276,10 @@ export function getOriginMainBadgeText(status) {
 
   if (status.state === "current") {
     return label + ": current";
+  }
+
+  if (isRustStatus && status.state === "warning") {
+    return label + ": out of sync";
   }
 
   if (status.state === "stale") {
@@ -283,6 +292,18 @@ export function getOriginMainBadgeText(status) {
 export function getOriginMainBadgeTitle(status) {
   if (!status) {
     return "";
+  }
+
+  if (status.type === "rust-upstream") {
+    const mismatches = Array.isArray(status.mismatches) && status.mismatches.length
+      ? " Mismatched files: " + status.mismatches.map((item) => item.file).join(", ") + "."
+      : "";
+    const hashes = status.commLocalHash && status.firefoxRemoteHash
+      ? " Thunderbird origin/main " + shortHash(status.commLocalHash) +
+        " Firefox remote " + shortHash(status.firefoxRemoteHash) + "."
+      : "";
+
+    return (status.message || "") + hashes + mismatches;
   }
 
   if (status.state === "current" || status.state === "stale") {
@@ -303,6 +324,7 @@ export function renderOriginMainStatus(statuses) {
   const items = Array.isArray(statuses) && statuses.length
     ? statuses
     : [{ label: "origin/main", state: "checking" }];
+  uiState.rustUpstreamStatus = items.find((status) => status.type === "rust-upstream") || null;
 
   container.replaceChildren(...items.map((status) => {
     const badge = document.createElement("span");
@@ -313,6 +335,21 @@ export function renderOriginMainStatus(statuses) {
     badge.title = getOriginMainBadgeTitle(status);
     return badge;
   }));
+}
+
+export function hasCheckingOriginMainStatus(statuses = []) {
+  return statuses.some((status) => status && status.state === "checking");
+}
+
+export function scheduleOriginMainStatusRetry(statuses = []) {
+  if (!hasCheckingOriginMainStatus(statuses) || uiState.originMainStatusRetryTimer) {
+    return;
+  }
+
+  uiState.originMainStatusRetryTimer = window.setTimeout(() => {
+    uiState.originMainStatusRetryTimer = null;
+    refreshOriginMainStatus();
+  }, 1000);
 }
 
 export async function refreshOriginMainStatus({ force = false } = {}) {
@@ -334,15 +371,56 @@ export async function refreshOriginMainStatus({ force = false } = {}) {
     }
 
     renderOriginMainStatus(result.statuses);
+    scheduleOriginMainStatusRetry(result.statuses || []);
+    return result.statuses || [];
   } catch (error) {
+    uiState.rustUpstreamStatus = null;
     renderOriginMainStatus([{
       label: "origin/main",
       state: "error",
       message: error && error.message ? error.message : String(error),
     }]);
+    return [];
   } finally {
     uiState.originMainStatusLoading = false;
   }
+}
+
+export function getRustRemoteBuildWarning(status = uiState.rustUpstreamStatus) {
+  if (!status || status.type !== "rust-upstream") {
+    return "";
+  }
+
+  if (status.state === "error") {
+    return status.message
+      ? "Rust dependency status could not be checked: " + status.message
+      : "Rust dependency status could not be checked.";
+  }
+
+  if (status.state === "checking") {
+    return "Rust dependency status is still checking.";
+  }
+
+  if (status.state !== "warning") {
+    return "";
+  }
+
+  const files = Array.isArray(status.mismatches) && status.mismatches.length
+    ? "\n\nMismatched files:\n" + status.mismatches.map((item) => "- " + item.file).join("\n")
+    : "";
+
+  return (status.message || "Rust dependencies are out of sync with Firefox remote main.") + files;
+}
+
+export async function confirmRemoteBuildRustWarning(actionLabel) {
+  await refreshOriginMainStatus({ force: true });
+
+  const warning = getRustRemoteBuildWarning();
+  if (!warning) {
+    return true;
+  }
+
+  return confirm(warning + "\n\nRemote builds may fail. Continue with " + actionLabel + "?");
 }
 
 export function getMachActionLabel(action) {
@@ -607,6 +685,10 @@ export async function submitTryDialog(event) {
 
   if (hasActiveCommandSession()) {
     alert("A command is already active.");
+    return;
+  }
+
+  if (!await confirmRemoteBuildRustWarning("the try run")) {
     return;
   }
 

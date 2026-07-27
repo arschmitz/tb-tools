@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { run } from "../../lib/utils.mjs";
@@ -55,6 +55,14 @@ import {
   parseBranchRefs,
   recordGraphTryRun,
 } from "./data.mjs";
+
+const RUST_UPSTREAM_CHECKSUMS_PATH = "rust/checksums.json";
+const RUST_UPSTREAM_FILES = {
+  mc_workspace_toml: "Cargo.toml",
+  mc_gkrust_toml: "toolkit/library/rust/shared/Cargo.toml",
+  mc_hack_toml: "build/workspace-hack/Cargo.toml",
+  mc_cargo_lock: "Cargo.lock",
+};
 
 async function amendCheckedOutCommit({
   graph,
@@ -894,6 +902,167 @@ export async function getGraphOriginMainStatus({
     message: upToDate
       ? `origin/${DEFAULT_BRANCH} is up to date.`
       : `origin/${DEFAULT_BRANCH} differs from remote.`,
+  };
+}
+
+function getGraphByLabel(graphs = [], label) {
+  return graphs.find((graph) => String(graph?.label || "").toLowerCase() === label) || null;
+}
+
+function getSha512(value = "") {
+  return createHash("sha512").update(String(value), "utf8").digest("hex");
+}
+
+function parseRustChecksumFile(value = "") {
+  const parsed = JSON.parse(value || "{}");
+
+  return Object.fromEntries(Object.keys(RUST_UPSTREAM_FILES).map((key) => [key, String(parsed[key] || "")]));
+}
+
+function getRustMismatchDetails(expectedChecksums, actualChecksums) {
+  return Object.entries(RUST_UPSTREAM_FILES)
+    .filter(([key]) => expectedChecksums[key] !== actualChecksums[key])
+    .map(([key, file]) => ({
+      key,
+      file,
+      expected: expectedChecksums[key] || "",
+      actual: actualChecksums[key] || "",
+    }));
+}
+
+async function getOptionalGitRefHash({ cwd, ref, runCommand = run }) {
+  try {
+    return (await runCommand({
+      cmd: "git",
+      args: ["rev-parse", "--verify", ref],
+      cwd,
+      capture: true,
+      silent: true,
+    })).trim();
+  } catch {
+    return "";
+  }
+}
+
+async function getRustFileChecksumsFromRef({ cwd, ref, runCommand = run }) {
+  const entries = await Promise.all(Object.entries(RUST_UPSTREAM_FILES).map(async ([key, file]) => {
+    const content = await runCommand({
+      cmd: "git",
+      args: ["show", `${ref}:${file}`],
+      cwd,
+      capture: true,
+      silent: true,
+    });
+
+    return [key, getSha512(content)];
+  }));
+
+  return Object.fromEntries(entries);
+}
+
+export async function getGraphRustUpstreamStatus({
+  graphs,
+  commGraph = getGraphByLabel(graphs, "comm"),
+  firefoxGraph = getGraphByLabel(graphs, "firefox"),
+  runCommand = run,
+  makeTempDir = mkdtemp,
+  removeDir = rm,
+}) {
+  if (!commGraph || !firefoxGraph) {
+    const error = new Error("Rust dependency status requires both comm and Firefox checkouts.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const commLocalHash = (await runCommand({
+    cmd: "git",
+    args: ["rev-parse", "--verify", `refs/remotes/origin/${DEFAULT_BRANCH}`],
+    cwd: commGraph.path,
+    capture: true,
+    silent: true,
+  })).trim();
+  const checksumData = parseRustChecksumFile(await runCommand({
+    cmd: "git",
+    args: ["show", `refs/remotes/origin/${DEFAULT_BRANCH}:${RUST_UPSTREAM_CHECKSUMS_PATH}`],
+    cwd: commGraph.path,
+    capture: true,
+    silent: true,
+  }));
+  const firefoxRemoteHash = parseLsRemoteHash(await runCommand({
+    cmd: "git",
+    args: ["ls-remote", "--heads", "origin", DEFAULT_BRANCH],
+    cwd: firefoxGraph.path,
+    capture: true,
+    silent: true,
+  }));
+
+  if (!firefoxRemoteHash) {
+    throw new Error(`Firefox remote origin/${DEFAULT_BRANCH} was not found.`);
+  }
+
+  const firefoxLocalHash = await getOptionalGitRefHash({
+    cwd: firefoxGraph.path,
+    ref: `refs/remotes/origin/${DEFAULT_BRANCH}`,
+    runCommand,
+  });
+  let actualChecksums;
+
+  if (firefoxLocalHash === firefoxRemoteHash) {
+    actualChecksums = await getRustFileChecksumsFromRef({
+      cwd: firefoxGraph.path,
+      ref: `refs/remotes/origin/${DEFAULT_BRANCH}`,
+      runCommand,
+    });
+  } else {
+    const firefoxRemoteUrl = (await runCommand({
+      cmd: "git",
+      args: ["remote", "get-url", "origin"],
+      cwd: firefoxGraph.path,
+      capture: true,
+      silent: true,
+    })).trim();
+    const tempDir = await makeTempDir(path.join(os.tmpdir(), "tb-tools-rust-upstream-"));
+
+    try {
+      await runCommand({
+        cmd: "git",
+        args: ["init"],
+        cwd: tempDir,
+        capture: true,
+        silent: true,
+      });
+      await runCommand({
+        cmd: "git",
+        args: ["fetch", "--depth=1", "--no-tags", firefoxRemoteUrl, firefoxRemoteHash],
+        cwd: tempDir,
+        capture: true,
+        silent: true,
+      });
+
+      actualChecksums = await getRustFileChecksumsFromRef({
+        cwd: tempDir,
+        ref: "FETCH_HEAD",
+        runCommand,
+      });
+    } finally {
+      await removeDir(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  const mismatches = getRustMismatchDetails(checksumData, actualChecksums);
+  const upToDate = mismatches.length === 0;
+
+  return {
+    type: "rust-upstream",
+    label: "rust",
+    state: upToDate ? "current" : "warning",
+    upToDate,
+    commLocalHash,
+    firefoxRemoteHash,
+    mismatches,
+    message: upToDate
+      ? "Rust dependencies match Firefox remote main."
+      : "Rust dependencies are out of sync with Firefox remote main. Remote builds may fail.",
   };
 }
 

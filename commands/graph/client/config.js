@@ -85,6 +85,8 @@ export const uiState = {
   commandStatusStartedAt: 0,
   commandElapsedTimer: null,
   originMainStatusLoading: false,
+  originMainStatusRetryTimer: null,
+  rustUpstreamStatus: null,
   pendingPaneEnhancements: new Set(),
   loadObserver: null,
 };

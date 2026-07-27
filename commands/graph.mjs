@@ -26,6 +26,7 @@ export function createGraphCommand({
   makeToken = randomUUID,
   runCommand = run,
   log = console.log,
+  forceInteractive = false,
 } = {}) {
   return async function graph({
     limit = 80,
@@ -59,8 +60,9 @@ export function createGraphCommand({
       throw new Error("At least one checkout tab must be enabled.");
     }
 
+    const isInteractive = forceInteractive || Boolean(interactive);
     const graphs = await Promise.all(checkouts.map((checkout) => {
-      if (interactive) {
+      if (isInteractive) {
         return getCheckoutMetadata(checkout);
       }
 
@@ -71,21 +73,21 @@ export function createGraphCommand({
         maxDiffBytes: diffByteLimit,
       });
     }));
-    const token = interactive ? makeToken() : undefined;
+    const token = isInteractive ? makeToken() : undefined;
     const html = buildGraphHtml({
       graphs,
       interactive: {
-        enabled: interactive,
+        enabled: isInteractive,
         pageSize: commitPageSize,
         token,
       },
       scriptSrcs: GRAPH_CLIENT_SCRIPTS.map((script) => (
-        interactive ? `/assets/${script.output}` : script.output
+        isInteractive ? `/assets/${script.output}` : script.output
       )),
     });
     const outputPath = getGraphOutputPath(output);
 
-    if (interactive) {
+    if (isInteractive) {
       const graphServer = await startServer({
         html,
         graphs,

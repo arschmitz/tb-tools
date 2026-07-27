@@ -34,6 +34,7 @@ import {
 } from "./diff-viewer.js";
 import {
   applyGraphSnapshot,
+  confirmRemoteBuildRustWarning,
   getLoadedGitCommitLimit,
   refreshGraphFromServer,
 } from "./command-sessions.js";
@@ -417,6 +418,10 @@ export async function openSubmitDialog(button) {
   const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
 
   if (!confirm("Submit the currently checked out commit in " + button.dataset.label + "?")) {
+    return;
+  }
+
+  if (!await confirmRemoteBuildRustWarning("submit")) {
     return;
   }
 

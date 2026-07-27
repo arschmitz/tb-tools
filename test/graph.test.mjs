@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -20,6 +21,7 @@ import {
   getGraphCommitIntegrationStatus,
   getGraphCurrentCommitMessage,
   getGraphOriginMainStatus,
+  getGraphRustUpstreamStatus,
   getGraphTryRunsForCommit,
   getCheckoutCommitPage,
   getCheckoutGraphData,
@@ -49,6 +51,7 @@ import {
   updateGraphCheckout,
   waitForInteractiveServerClose,
 } from "../commands/graph.mjs";
+import { createConsoleCommand } from "../commands/console.mjs";
 import {
   formatPrettyDiffHtml,
   splitPrettyDiffFiles,
@@ -1895,6 +1898,158 @@ test("getGraphOriginMainStatus compares local origin main with remote origin mai
   ]);
 });
 
+test("getGraphRustUpstreamStatus compares Firefox remote rust files to comm origin main checksums without changing checkouts", async () => {
+  const calls = [];
+  const removed = [];
+  const tempDir = path.join(os.tmpdir(), "rust-upstream-check");
+  const remoteFiles = {
+    "Cargo.toml": "workspace\n",
+    "toolkit/library/rust/shared/Cargo.toml": "gkrust\n",
+    "build/workspace-hack/Cargo.toml": "hack\n",
+    "Cargo.lock": "remote lock\n",
+  };
+  const checksumData = {
+    mc_workspace_toml: createHash("sha512").update(remoteFiles["Cargo.toml"]).digest("hex"),
+    mc_gkrust_toml: createHash("sha512").update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"]).digest("hex"),
+    mc_hack_toml: createHash("sha512").update(remoteFiles["build/workspace-hack/Cargo.toml"]).digest("hex"),
+    mc_cargo_lock: createHash("sha512").update("old lock\n").digest("hex"),
+  };
+
+  const result = await getGraphRustUpstreamStatus({
+    graphs: [
+      { label: "comm", path: "/repo/comm" },
+      { label: "firefox", path: "/repo/firefox" },
+    ],
+    makeTempDir: async (prefix) => {
+      assert.match(prefix, /tb-tools-rust-upstream-/);
+      return tempDir;
+    },
+    removeDir: async (dir, options) => {
+      removed.push([dir, options]);
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cwd === "/repo/comm" && command.args[0] === "rev-parse") {
+        return "cccccccccccccccccccccccccccccccccccccccc\n";
+      }
+
+      if (command.cwd === "/repo/comm" && command.args[0] === "show") {
+        return JSON.stringify(checksumData);
+      }
+
+      if (command.cwd === "/repo/firefox" && command.args[0] === "ls-remote") {
+        return "ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n";
+      }
+
+      if (command.cwd === "/repo/firefox" && command.args.join(" ") === "remote get-url origin") {
+        return "git@example.com:firefox.git\n";
+      }
+
+      if (command.cwd === tempDir && command.args[0] === "init") {
+        return "";
+      }
+
+      if (command.cwd === tempDir && command.args[0] === "fetch") {
+        return "";
+      }
+
+      if (command.cwd === tempDir && command.args[0] === "show") {
+        return remoteFiles[command.args[1].replace(/^FETCH_HEAD:/, "")];
+      }
+
+      throw new Error(`Unexpected command: ${JSON.stringify(command)}`);
+    },
+  });
+
+  assert.equal(result.type, "rust-upstream");
+  assert.equal(result.label, "rust");
+  assert.equal(result.state, "warning");
+  assert.equal(result.upToDate, false);
+  assert.equal(result.commLocalHash, "cccccccccccccccccccccccccccccccccccccccc");
+  assert.equal(result.firefoxRemoteHash, "ffffffffffffffffffffffffffffffffffffffff");
+  assert.deepEqual(result.mismatches.map((item) => item.file), ["Cargo.lock"]);
+  assert.deepEqual(removed, [[tempDir, { recursive: true, force: true }]]);
+  assert.deepEqual(calls.map((call) => [call.cwd, call.args]), [
+    ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+    ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
+    ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
+    ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+    ["/repo/firefox", ["remote", "get-url", "origin"]],
+    [tempDir, ["init"]],
+    [tempDir, ["fetch", "--depth=1", "--no-tags", "git@example.com:firefox.git", "ffffffffffffffffffffffffffffffffffffffff"]],
+    [tempDir, ["show", "FETCH_HEAD:Cargo.toml"]],
+    [tempDir, ["show", "FETCH_HEAD:toolkit/library/rust/shared/Cargo.toml"]],
+    [tempDir, ["show", "FETCH_HEAD:build/workspace-hack/Cargo.toml"]],
+    [tempDir, ["show", "FETCH_HEAD:Cargo.lock"]],
+  ]);
+});
+
+test("getGraphRustUpstreamStatus reads local Firefox origin main when it already matches remote", async () => {
+  const calls = [];
+  const remoteFiles = {
+    "Cargo.toml": "workspace\n",
+    "toolkit/library/rust/shared/Cargo.toml": "gkrust\n",
+    "build/workspace-hack/Cargo.toml": "hack\n",
+    "Cargo.lock": "remote lock\n",
+  };
+  const checksumData = {
+    mc_workspace_toml: createHash("sha512").update(remoteFiles["Cargo.toml"]).digest("hex"),
+    mc_gkrust_toml: createHash("sha512").update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"]).digest("hex"),
+    mc_hack_toml: createHash("sha512").update(remoteFiles["build/workspace-hack/Cargo.toml"]).digest("hex"),
+    mc_cargo_lock: createHash("sha512").update(remoteFiles["Cargo.lock"]).digest("hex"),
+  };
+
+  const result = await getGraphRustUpstreamStatus({
+    graphs: [
+      { label: "comm", path: "/repo/comm" },
+      { label: "firefox", path: "/repo/firefox" },
+    ],
+    makeTempDir: async () => {
+      throw new Error("Temp fetch should not run when local Firefox origin/main is current.");
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cwd === "/repo/comm" && command.args[0] === "rev-parse") {
+        return "cccccccccccccccccccccccccccccccccccccccc\n";
+      }
+
+      if (command.cwd === "/repo/comm" && command.args[0] === "show") {
+        return JSON.stringify(checksumData);
+      }
+
+      if (command.cwd === "/repo/firefox" && command.args[0] === "ls-remote") {
+        return "ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n";
+      }
+
+      if (command.cwd === "/repo/firefox" && command.args[0] === "rev-parse") {
+        return "ffffffffffffffffffffffffffffffffffffffff\n";
+      }
+
+      if (command.cwd === "/repo/firefox" && command.args[0] === "show") {
+        return remoteFiles[command.args[1].replace(/^refs\/remotes\/origin\/main:/, "")];
+      }
+
+      throw new Error(`Unexpected command: ${JSON.stringify(command)}`);
+    },
+  });
+
+  assert.equal(result.state, "current");
+  assert.equal(result.upToDate, true);
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(calls.map((call) => [call.cwd, call.args]), [
+    ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+    ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
+    ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
+    ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+    ["/repo/firefox", ["show", "refs/remotes/origin/main:Cargo.toml"]],
+    ["/repo/firefox", ["show", "refs/remotes/origin/main:toolkit/library/rust/shared/Cargo.toml"]],
+    ["/repo/firefox", ["show", "refs/remotes/origin/main:build/workspace-hack/Cargo.toml"]],
+    ["/repo/firefox", ["show", "refs/remotes/origin/main:Cargo.lock"]],
+  ]);
+});
+
 test("unshelfGraphShelves pops requested graph shelves", async () => {
   const calls = [];
   const result = await unshelfGraphShelves({
@@ -2136,6 +2291,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /\.mach-output-toggle\[hidden\]/);
   assert.match(html, /\.origin-main-status \{/);
   assert.match(html, /\.origin-main-badge\.current/);
+  assert.match(html, /\.origin-main-badge\.stale, \.origin-main-badge\.warning/);
   assert.match(html, /\.update-status\.error/);
   assert.match(html, /\.pane-resizer \{[^}]*cursor: col-resize/);
   assert.match(html, /\.pane-resizer:hover::before/);
@@ -2205,8 +2361,13 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function openAmendDialog/);
   assert.match(client, /function submitAmendDialog/);
   assert.match(client, /function openSubmitDialog/);
+  assert.match(client, /await confirmRemoteBuildRustWarning\("submit"\)/);
   assert.match(client, /function renderSubmitSession/);
   assert.match(client, /function answerSubmitPrompt/);
+  assert.match(client, /function confirmRemoteBuildRustWarning/);
+  assert.match(client, /Rust dependencies are out of sync with Firefox remote main/);
+  assert.match(client, /function scheduleOriginMainStatusRetry/);
+  assert.match(client, /originMainStatusRetryTimer/);
   assert.match(client, /submitOutput\.textContent = session\.output \|\| ""/);
   assert.match(client, /function isWorkingTreeCommit/);
   assert.match(client, /function getSnapshotFingerprint/);
@@ -2328,6 +2489,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /<h1>Thunderbird Desktop Console<\/h1>/);
   assert.match(html, /<h1>Thunderbird Desktop Console<\/h1>\s*<div class="origin-main-status"/);
   assert.match(html, /class="origin-main-badge checking">Thunderbird: checking<\/span>/);
+  assert.match(html, /class="origin-main-badge checking">Rust deps: checking<\/span>/);
   assert.ok(html.indexOf('<div class="graph-options">') > html.indexOf('<div class="header-row">'));
   assert.ok(html.indexOf('<div class="graph-options">') < html.indexOf('<div class="toolbar-row">'));
   assert.match(html, /<div class="toolbar-row">\s*<nav class="tabs">/);
@@ -2369,10 +2531,12 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /\/api\/unshelf-graphs/);
   assert.match(client, /\/api\/mach-action/);
   assert.match(client, /\/api\/origin-main-status/);
+  assert.match(client, /await confirmRemoteBuildRustWarning\("the try run"\)/);
   assert.match(client, /snapshotLimits: getSnapshotLimits\(\)/);
   assert.match(client, /await promptForPostUpdateMachAction\(\)/);
   assert.match(client, /await startGraphMachAction\("run"\)/);
   assert.match(client, /clearInterval\(originMainStatusPoll\)/);
+  assert.match(client, /window\.clearTimeout\(uiState\.originMainStatusRetryTimer\)/);
   assert.match(client, /snapshotLimit: getLoadedGitCommitLimit\(graphStates\[graphIndex\]\)/);
   assert.match(client, /applyGraphSnapshot\(graphIndex, result\.snapshot, \{ force: true \}\)/);
   assert.match(client, /\/api\/close/);
@@ -2436,6 +2600,86 @@ test("graph command writes and opens a tabbed graph", async () => {
   ]);
 });
 
+test("interactive graph server returns origin status before slow Rust dependency check finishes", async (t) => {
+  let resolveRustStatus;
+  const rustStatusPromise = new Promise((resolve) => {
+    resolveRustStatus = resolve;
+  });
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+      {
+        label: "firefox",
+        path: "/repo/firefox",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    getRustUpstreamStatus: async () => rustStatusPromise,
+    runCommand: async (command) => {
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        return command.cwd === "/repo/comm"
+          ? "cccccccccccccccccccccccccccccccccccccccc\n"
+          : "ffffffffffffffffffffffffffffffffffffffff\n";
+      }
+
+      if (command.args[0] === "ls-remote") {
+        return command.cwd === "/repo/comm"
+          ? "cccccccccccccccccccccccccccccccccccccccc\trefs/heads/main\n"
+          : "ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const pendingResponse = await fetch(new URL("api/origin-main-status?token=secret", serverInfo.url));
+  const pendingStatus = await pendingResponse.json();
+
+  assert.equal(pendingStatus.statuses[0].label, "comm");
+  assert.equal(pendingStatus.statuses[0].state, "current");
+  assert.equal(pendingStatus.statuses[1].label, "firefox");
+  assert.equal(pendingStatus.statuses[1].state, "current");
+  assert.equal(pendingStatus.statuses[2].type, "rust-upstream");
+  assert.equal(pendingStatus.statuses[2].state, "checking");
+
+  resolveRustStatus({
+    type: "rust-upstream",
+    label: "rust",
+    state: "current",
+    upToDate: true,
+    commLocalHash: "cccccccccccccccccccccccccccccccccccccccc",
+    firefoxRemoteHash: "ffffffffffffffffffffffffffffffffffffffff",
+    mismatches: [],
+    message: "Rust dependencies match Firefox remote main.",
+  });
+  await rustStatusPromise;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const completedResponse = await fetch(new URL("api/origin-main-status?token=secret", serverInfo.url));
+  const completedStatus = await completedResponse.json();
+
+  assert.equal(completedStatus.statuses[2].type, "rust-upstream");
+  assert.equal(completedStatus.statuses[2].state, "current");
+});
+
 test("interactive graph server streams commits, diffs, checkout responses, and closes", async (t) => {
   const calls = [];
   const bugUpdates = [];
@@ -2475,6 +2719,16 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
         statusName: "Accepted",
         title: "Bug 123456 - Fix the thing",
       }],
+    }),
+    getRustUpstreamStatus: async () => ({
+      type: "rust-upstream",
+      label: "rust",
+      state: "warning",
+      upToDate: false,
+      commLocalHash: "cccccccccccccccccccccccccccccccccccccccc",
+      firefoxRemoteHash: "ffffffffffffffffffffffffffffffffffffffff",
+      mismatches: [{ file: "Cargo.lock" }],
+      message: "Rust dependencies are out of sync with Firefox remote main. Remote builds may fail.",
     }),
     runCommand: async (command) => {
       calls.push(command);
@@ -2591,6 +2845,9 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.equal(originMainStatus.statuses[0].label, "comm");
   assert.equal(originMainStatus.statuses[0].state, "current");
   assert.equal(originMainStatus.statuses[0].upToDate, true);
+  assert.equal(originMainStatus.statuses[1].type, "rust-upstream");
+  assert.equal(originMainStatus.statuses[1].state, "warning");
+  assert.equal(originMainStatus.statuses[1].mismatches[0].file, "Cargo.lock");
 
   const checkoutResponse = await fetch(new URL("api/checkout", serverInfo.url), {
     method: "POST",
@@ -3123,9 +3380,9 @@ test("waitForInteractiveServerClose routes signals through the interactive shutd
   assert.equal(signals.listenerCount("SIGTERM"), 0);
 });
 
-test("graph command serves interactive mode without writing static output", async () => {
+test("console command serves interactive mode without writing static output", async () => {
   const calls = [];
-  const graph = createGraphCommand({
+  const command = createConsoleCommand({
     getCheckoutMetadata: async ({ label }) => ({
       label,
       path: `/repo/${label}`,
@@ -3155,7 +3412,7 @@ test("graph command serves interactive mode without writing static output", asyn
     waitForClose: async (server) => calls.push(["wait", server]),
   });
 
-  const url = await graph({ interactive: true, pageSize: 25 });
+  const url = await command({ pageSize: 25 });
 
   assert.equal(url, "http://127.0.0.1:1234/");
   assert.deepEqual(calls, [
