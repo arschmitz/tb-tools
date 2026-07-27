@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createSubmitCommand } from "../commands/submit.mjs";
+import { createSubmitCommand, getSubmitLinksFromText } from "../commands/submit.mjs";
 
 function promptsFrom(answers) {
   return {
@@ -25,6 +25,7 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
     },
     runCommand: async (command) => {
       calls.push(["run", command]);
+      return "Submitted https://phabricator.services.mozilla.com/D123456\n";
     },
     tryCommand: async (options, tryOptions) => {
       calls.push(["try", options, tryOptions]);
@@ -33,10 +34,11 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
     postComment: async (comment) => {
       comments.push(comment);
     },
+    getCommitMessage: async () => "Differential Revision: https://phabricator.services.mozilla.com/D123456\n",
     prompts: promptsFrom([false, true, true, true]),
   });
 
-  await submit({
+  const result = await submit({
     comment: true,
     flavor: "browser",
     pattern: "mail/**/browser_*.js",
@@ -48,7 +50,7 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
       flavor: "browser",
       pattern: "mail/**/browser_*.js",
     }],
-    ["run", { cmd: "moz-phab", args: ["submit"] }],
+    ["run", { cmd: "moz-phab", args: ["submit"], capture: true }],
     ["try", {
       comment: false,
       flavor: "browser",
@@ -58,7 +60,13 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
   assert.deepEqual(comments, [{
     message: "try: https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
     resolve: true,
+    id: "123456",
   }]);
+  assert.deepEqual(result, {
+    phabRevision: "D123456",
+    phabUrl: "https://phabricator.services.mozilla.com/D123456",
+    tryUrl: "https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
+  });
 });
 
 test("submit command throws a lint failure when the user declines to continue", async () => {
@@ -75,4 +83,18 @@ test("submit command throws a lint failure when the user declines to continue", 
   });
 
   await assert.rejects(submit({}, []), lintError);
+});
+
+test("getSubmitLinksFromText extracts phabricator and try links", () => {
+  assert.deepEqual(
+    getSubmitLinksFromText(`
+      Review at https://phabricator.services.mozilla.com/D234567
+      Try https://treeherder.mozilla.org/jobs?repo=try&revision=def
+    `),
+    {
+      phabRevision: "D234567",
+      phabUrl: "https://phabricator.services.mozilla.com/D234567",
+      tryUrl: "https://treeherder.mozilla.org/jobs?repo=try&revision=def",
+    }
+  );
 });

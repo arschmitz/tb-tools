@@ -129,7 +129,7 @@ const commands = {
     ]
   },
   graph: {
-    description: "Generates and opens a tabbed branch graph for comm and the Firefox parent checkout.",
+    description: "Generates and opens a tabbed branch graph for comm and the Firefox parent checkout. Interactive mode can checkout, rebase, prune, amend, and submit the current commit.",
     header: "Graph Options",
     options: [
       { name: "limit", alias: "l", description: "Maximum commits to include per checkout", defaultValue: "80" },
@@ -139,7 +139,7 @@ const commands = {
       { name: "firefox", description: "Include the Firefox parent checkout tab", defaultValue: "true" },
       { name: "diffs", description: "Embed per-commit diffs for click-to-view", defaultValue: "true" },
       { name: "maxDiffBytes", description: "Maximum embedded diff bytes per commit", defaultValue: "200000" },
-      { name: "interactive", alias: "i", description: "Serve an interactive graph with paged commits, server-loaded diffs, live polling, and checkout callbacks", defaultValue: "false" },
+      { name: "interactive", alias: "i", description: "Serve an interactive graph with paged commits, server-loaded diffs, live polling, checkout callbacks, and current-commit submit prompts", defaultValue: "false" },
       { name: "pageSize", description: "Commit page size for interactive infinite loading", defaultValue: "80" },
       { name: "port", description: "Localhost port for interactive mode. Use 0 for a random free port", defaultValue: "0" },
     ],

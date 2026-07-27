@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
@@ -7,12 +8,24 @@ import { fileURLToPath } from "node:url";
 import hljs from "highlight.js";
 import openUrl from "open";
 import { run } from "../lib/utils.mjs";
+import { comment as defaultComment } from "../lib/phab.mjs";
+import { DEFAULT_BRANCH } from "../lib/git.mjs";
+import { createSubmitCommand } from "./submit.mjs";
+import { createTestCommand } from "./test.mjs";
+import { createTryCommand } from "./try.mjs";
 
 const FIELD_SEPARATOR = "\x1f";
 const RECORD_SEPARATOR = "\x1e";
 const DEFAULT_MAX_DIFF_BYTES = 200000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_SUBMIT_OUTPUT_LIMIT = 160000;
 const WORKING_TREE_CHANGES_HASH = "uncommitted-changes";
+const GRAPH_SUBMIT_OPTIONS = {
+  artifact: true,
+  flavor: "all",
+  selector: "auto",
+};
+const GRAPH_LINT_DIRS = ["build", "calendar", "chat", "docs", "mail", "tools"];
 const WORKING_TREE_AUTHOR = {
   name: "Working tree",
   email: "",
@@ -1434,6 +1447,437 @@ async function getCurrentGraphBase(graph, runCommand) {
   };
 }
 
+function parseGraphStatusFile(line) {
+  if (!line) {
+    return "";
+  }
+
+  const file = line.substring(3);
+  return file.includes(" -> ") ? file.split(" -> ").pop() : file;
+}
+
+async function getGraphChangedFilePaths({
+  graph,
+  base = `origin/${DEFAULT_BRANCH}`,
+  runCommand = run,
+}) {
+  let committedFiles;
+
+  try {
+    const mergeBase = (await runCommand({
+      cmd: "git",
+      args: ["merge-base", "HEAD", base],
+      cwd: graph.path,
+      capture: true,
+      silent: true,
+    })).trim();
+    committedFiles = await runCommand({
+      cmd: "git",
+      args: ["diff", "--name-only", mergeBase, "HEAD"],
+      cwd: graph.path,
+      capture: true,
+      silent: true,
+    });
+  } catch {
+    committedFiles = await runCommand({
+      cmd: "git",
+      args: ["show", "--name-only", "--format=", "HEAD"],
+      cwd: graph.path,
+      capture: true,
+      silent: true,
+    });
+  }
+
+  const dirtyFiles = await runCommand({
+    cmd: "git",
+    args: ["status", "--porcelain"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+
+  return Array.from(new Set([
+    ...committedFiles.split("\n").filter(Boolean),
+    ...dirtyFiles.split("\n").map(parseGraphStatusFile).filter(Boolean),
+  ]));
+}
+
+async function runGraphMach({
+  graph,
+  args,
+  session,
+  runCommand = run,
+}) {
+  const command = {
+    cmd: path.join("..", "mach"),
+    args: Array.isArray(args) ? args : String(args).split(/\s+/).filter(Boolean),
+    cwd: graph.path,
+    capture: true,
+  };
+
+  return runCommand === run
+    ? runInteractiveSubmitCommand({ command, session })
+    : runInjectedSubmitCommand({ command, session, runCommand });
+}
+
+async function runGraphLint({
+  graph,
+  session,
+  runCommand = run,
+}) {
+  await runGraphMach({
+    graph,
+    args: ["commlint", ...GRAPH_LINT_DIRS, "--fix"],
+    session,
+    runCommand,
+  });
+}
+
+function withGraphSubmitCwd(graph, session, runCommand) {
+  return (command) => {
+    const commandWithCwd = {
+      ...command,
+      cwd: command.cwd || graph.path,
+    };
+
+    return runCommand === run
+      ? runInteractiveSubmitCommand({ command: commandWithCwd, session })
+      : runInjectedSubmitCommand({ command: commandWithCwd, session, runCommand });
+  };
+}
+
+function getSubmitLinks(result = {}) {
+  const links = [];
+
+  if (result.phabUrl) {
+    links.push({
+      label: result.phabRevision || "Phabricator",
+      url: result.phabUrl,
+    });
+  }
+
+  if (result.tryUrl) {
+    links.push({
+      label: "Try",
+      url: result.tryUrl,
+    });
+  }
+
+  return links;
+}
+
+function stripAnsi(value = "") {
+  const escapeCharacter = String.fromCharCode(27);
+
+  return String(value).replace(new RegExp(`${escapeCharacter}\\[[0-?]*[ -/]*[@-~]`, "g"), "");
+}
+
+function appendSubmitOutput(session, output = "") {
+  if (!output) {
+    return;
+  }
+
+  session.output = `${session.output || ""}${stripAnsi(output)}`;
+
+  if (session.output.length > DEFAULT_SUBMIT_OUTPUT_LIMIT) {
+    session.output = session.output.slice(-DEFAULT_SUBMIT_OUTPUT_LIMIT);
+  }
+}
+
+export function getInteractiveYesNoPrompt(output = "") {
+  const text = stripAnsi(output).replace(/\r/g, "\n");
+  const tail = text.slice(-2000);
+  const match = tail.match(/(?:^|\n)([^\n]*(?:\[[Yy]\/[Nn]\]|\[[Nn]\/[Yy]\]|\((?:yes|no|always|y|n|a)(?:\/(?:yes|no|always|y|n|a)){1,3}\)\?)[^\n]*)$/i);
+
+  if (!match) {
+    return "";
+  }
+
+  return match[1].trim();
+}
+
+function askSubmitConfirm(session, message, source = "tb-tools") {
+  return new Promise((resolve, reject) => {
+    if (session.prompt) {
+      reject(new Error("Submit is already waiting on a browser prompt."));
+      return;
+    }
+
+    session.status = "prompt";
+    session.message = "Waiting for input.";
+    session.prompt = {
+      id: randomUUID(),
+      type: "confirm",
+      source,
+      message,
+    };
+    session.pendingPrompt = { resolve, reject };
+  });
+}
+
+export function answerSubmitSessionPrompt(session, promptId, answer) {
+  if (!session.prompt || !session.pendingPrompt) {
+    const error = new Error("Submit is not waiting for input.");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (session.prompt.id !== promptId) {
+    const error = new Error("Submit prompt is no longer active.");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const pendingPrompt = session.pendingPrompt;
+  session.prompt = null;
+  session.pendingPrompt = null;
+  session.status = "running";
+  session.message = "Running submit...";
+  appendSubmitOutput(session, `\n> ${answer ? "yes" : "no"}\n`);
+  pendingPrompt.resolve(Boolean(answer));
+}
+
+function formatCommandForOutput(command) {
+  return [command.cmd, ...(command.args || [])].join(" ");
+}
+
+function runInjectedSubmitCommand({ command, session, runCommand }) {
+  appendSubmitOutput(session, `$ ${formatCommandForOutput(command)}\n`);
+
+  return runCommand(command).then((output) => {
+    appendSubmitOutput(session, output);
+    return output;
+  }, (error) => {
+    appendSubmitOutput(session, error.stdout || "");
+    appendSubmitOutput(session, error.stderr || "");
+    throw error;
+  });
+}
+
+export async function runInteractiveSubmitCommand({
+  command,
+  session,
+  spawnCommand = spawn,
+}) {
+  appendSubmitOutput(session, `$ ${formatCommandForOutput(command)}\n`);
+  const initialOutputLength = session.output.length;
+
+  return new Promise((resolve, reject) => {
+    const child = spawnCommand(command.cmd, command.args || [], {
+      cwd: command.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    let promptSearchStart = initialOutputLength;
+    let promptPromise = Promise.resolve();
+
+    function handleOutput(chunk, target) {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
+      target.push(Buffer.from(text));
+      appendSubmitOutput(session, text);
+
+      if (session.prompt) {
+        return;
+      }
+
+      const searchable = session.output.slice(promptSearchStart);
+      const prompt = getInteractiveYesNoPrompt(searchable);
+
+      if (!prompt) {
+        return;
+      }
+
+      promptSearchStart = session.output.length;
+      promptPromise = promptPromise.then(async () => {
+        const answer = await askSubmitConfirm(session, prompt, command.cmd);
+        child.stdin.write(answer ? "y\n" : "n\n");
+      }).catch((error) => {
+        child.kill();
+        throw error;
+      });
+    }
+
+    child.stdout.on("data", (chunk) => handleOutput(chunk, stdout));
+    child.stderr.on("data", (chunk) => handleOutput(chunk, stderr));
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      promptPromise.then(() => {
+        const stdoutText = Buffer.concat(stdout).toString();
+        const stderrText = Buffer.concat(stderr).toString();
+
+        if (code > 0) {
+          const error = new Error(stderrText || `${command.cmd} exited with code ${code}`);
+          error.code = code;
+          error.stdout = stdoutText;
+          error.stderr = stderrText;
+          reject(error);
+          return;
+        }
+
+        resolve(stdoutText);
+      }, reject);
+    });
+  });
+}
+
+function serializeSubmitSession(session) {
+  return {
+    id: session.id,
+    graphIndex: session.graphIndex,
+    status: session.status,
+    message: session.message,
+    prompt: session.prompt,
+    result: session.result,
+    links: session.links,
+    error: session.error,
+    snapshot: session.snapshot,
+    output: session.output || "",
+  };
+}
+
+function createBrowserSubmitPrompts(session) {
+  return {
+    keyInYNStrict(message) {
+      return askSubmitConfirm(session, message);
+    },
+  };
+}
+
+function createBrowserSubmitSpinner(session, text) {
+  appendSubmitOutput(session, `${text}\n`);
+
+  return {
+    succeed() {
+      appendSubmitOutput(session, `Done: ${text}\n`);
+    },
+    fail() {
+      appendSubmitOutput(session, `Failed: ${text}\n`);
+    },
+  };
+}
+
+async function checkGraphSubmitChanges({
+  graph,
+  prompts,
+  message,
+  runCommand = run,
+}) {
+  const status = await runCommand({
+    cmd: "git",
+    args: ["status", "--porcelain"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+
+  if (!status.trim()) {
+    return;
+  }
+
+  const amend = await prompts.keyInYNStrict("Amend commit? [y/n]:");
+
+  if (!amend) {
+    throw new Error(message);
+  }
+
+  try {
+    await runCommand({ cmd: "git", args: ["add", "-A"], cwd: graph.path, silent: true });
+    await runCommand({ cmd: "git", args: ["commit", "--amend", "--no-edit"], cwd: graph.path, silent: true });
+  } catch (error) {
+    throw new Error("Commit failed aborting!", { cause: error });
+  }
+}
+
+function createGraphSubmitRunner({
+  graph,
+  session,
+  runCommand = run,
+  postComment = defaultComment,
+}) {
+  const prompts = createBrowserSubmitPrompts(session);
+  const graphRunCommand = withGraphSubmitCwd(graph, session, runCommand);
+  const testChanged = createTestCommand({
+    getChangedFiles: () => getGraphChangedFilePaths({ graph, runCommand }),
+    runMach: (args) => runGraphMach({ graph, args, session, runCommand }),
+  });
+  const tryCommand = createTryCommand({
+    runCommand: graphRunCommand,
+    postComment,
+  });
+
+  return createSubmitCommand({
+    checkChanges: (message) => checkGraphSubmitChanges({
+      graph,
+      prompts,
+      message,
+      runCommand,
+    }),
+    lint: () => runGraphLint({ graph, session, runCommand }),
+    testChanged,
+    tryCommand,
+    prompts,
+    postComment,
+    getCommitMessage: () => getGraphCurrentCommitMessage({ graph, runCommand }),
+    runCommand: graphRunCommand,
+    createSpinner: (text) => createBrowserSubmitSpinner(session, text),
+  });
+}
+
+function createGraphSubmitSession({
+  graph,
+  graphIndex,
+  snapshotLimit,
+  getSnapshot,
+  runCommand = run,
+  postComment = defaultComment,
+}) {
+  const session = {
+    id: randomUUID(),
+    graphIndex,
+    status: "running",
+    message: "Starting submit...",
+    prompt: null,
+    pendingPrompt: null,
+    result: null,
+    links: [],
+    error: "",
+    snapshot: null,
+  };
+  const submit = createGraphSubmitRunner({
+    graph,
+    session,
+    runCommand,
+    postComment,
+  });
+
+  session.answer = (promptId, answer) => {
+    answerSubmitSessionPrompt(session, promptId, answer);
+  };
+
+  queueMicrotask(async () => {
+    try {
+      const result = await submit(GRAPH_SUBMIT_OPTIONS, []);
+      session.result = result;
+      session.links = getSubmitLinks(result);
+      session.snapshot = await getSnapshot(graph, snapshotLimit);
+      session.status = "complete";
+      session.message = "Submit complete.";
+    } catch (error) {
+      session.status = "error";
+      session.error = String(error?.message || error);
+      session.message = session.error;
+      if (session.pendingPrompt) {
+        session.pendingPrompt.reject(error);
+        session.pendingPrompt = null;
+        session.prompt = null;
+      }
+    }
+  });
+
+  return session;
+}
+
 export async function getCheckoutGraphSnapshot({
   graph,
   limit = 80,
@@ -1808,6 +2252,7 @@ export function buildGraphHtml({
             </span>
             <button class="checkout-commit" type="button" hidden>Checkout</button>
             <button class="amend-commit" type="button" hidden>Amend</button>
+            <button class="submit-commit" type="button" hidden>Submit</button>
             <span class="checkout-status"></span>
           </div>
           <div class="diff-body"><pre class="diff-placeholder">Select a commit in the graph.</pre></div>
@@ -1870,8 +2315,8 @@ export function buildGraphHtml({
     .diff-message[hidden] { display: none; }
     .diff-stats { display: flex; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; gap: 6px; white-space: nowrap; }
     .diff-stats[hidden] { display: none; }
-    .checkout-commit, .amend-commit, .load-more { border: 1px solid #1f5f9f; border-radius: 4px; background: #1f5f9f; color: #fff; cursor: pointer; font-size: 12px; padding: 4px 8px; }
-    .checkout-commit:disabled, .amend-commit:disabled, .load-more:disabled { cursor: wait; opacity: 0.65; }
+    .checkout-commit, .amend-commit, .submit-commit, .load-more { border: 1px solid #1f5f9f; border-radius: 4px; background: #1f5f9f; color: #fff; cursor: pointer; font-size: 12px; padding: 4px 8px; }
+    .checkout-commit:disabled, .amend-commit:disabled, .submit-commit:disabled, .load-more:disabled { cursor: wait; opacity: 0.65; }
     .checkout-status, .graph-status { color: #59616d; font-size: 12px; }
     .checkout-status.error, .graph-status.error { color: #9b1c1c; }
     .diff-body { margin: 0; padding: 10px; tab-size: 2; }
@@ -1914,6 +2359,24 @@ export function buildGraphHtml({
     .amend-cancel { background: #fff; color: #20242a; }
     .amend-submit { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
     .amend-submit:disabled { cursor: wait; opacity: 0.65; }
+    .submit-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(520px, calc(100vw - 32px)); padding: 0; width: 500px; }
+    .submit-dialog::backdrop { background: rgba(15, 23, 42, 0.36); }
+    .submit-panel { display: grid; gap: 12px; padding: 16px; }
+    .submit-title { font-size: 16px; margin: 0; }
+    .submit-status, .submit-question { margin: 0; }
+    .submit-status { color: #59616d; font-size: 13px; }
+    .submit-status.error { color: #9b1c1c; }
+    .submit-prompt { border: 1px solid #d6dae1; border-radius: 6px; display: grid; gap: 10px; padding: 10px; }
+    .submit-prompt[hidden], .submit-links[hidden] { display: none; }
+    .submit-prompt-actions, .submit-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .submit-prompt-actions button, .submit-actions button { border: 1px solid #b9c0cc; border-radius: 4px; cursor: pointer; font-size: 13px; padding: 6px 10px; }
+    .submit-answer-yes { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
+    .submit-answer-no, .submit-close { background: #fff; color: #20242a; }
+    .submit-close:disabled { cursor: wait; opacity: 0.65; }
+    .submit-links { border-top: 1px solid #edf0f4; display: flex; flex-wrap: wrap; gap: 8px; padding-top: 10px; }
+    .submit-links a { border: 1px solid #d0d7de; border-radius: 999px; color: #0969da; font-size: 13px; padding: 5px 9px; text-decoration: none; }
+    .submit-links a:hover, .submit-links a:focus { background: #f6f8fa; text-decoration: underline; }
+    .submit-output { background: #f6f8fa; border: 1px solid #d6dae1; border-radius: 6px; color: #24292f; font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; max-height: min(42vh, 360px); overflow: auto; padding: 10px; white-space: pre-wrap; }
     .pretty-file { background: var(--diff-bg); border: 1px solid var(--diff-border); border-radius: 6px; margin: 0 0 12px; overflow: hidden; }
     .pretty-file h3 { align-items: center; background: var(--diff-header-bg); border-bottom: 1px solid var(--diff-border); color: var(--diff-code); display: flex; font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; gap: 12px; justify-content: space-between; margin: 0; min-height: 32px; overflow: hidden; padding: 8px 10px; }
     .file-heading { align-items: center; display: flex; gap: 8px; min-width: 0; }
@@ -2005,7 +2468,7 @@ export function buildGraphHtml({
       .line-content .hljs-meta { color: #8b949e; }
       .diff-line.delete .line-marker { color: #f85149; }
       .diff-line.insert .line-marker { color: #3fb950; }
-      .checkout-commit, .amend-commit, .load-more { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .checkout-commit, .amend-commit, .submit-commit, .load-more { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
       .checkout-status, .graph-status { color: #acb4c0; }
       .checkout-status.error, .graph-status.error { color: #ff9f9f; }
       .diff-line.delete:hover .old-line { background: #78191e; }
@@ -2033,6 +2496,18 @@ export function buildGraphHtml({
       .amend-error { color: #ff9f9f; }
       .amend-cancel { background: #191d23; border-color: #424b59; color: #f1f3f6; }
       .amend-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .submit-dialog { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .submit-dialog::backdrop { background: rgba(0, 0, 0, 0.58); }
+      .submit-status { color: #acb4c0; }
+      .submit-status.error { color: #ff9f9f; }
+      .submit-prompt { border-color: #424b59; }
+      .submit-prompt-actions button, .submit-actions button { border-color: #424b59; }
+      .submit-answer-yes { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .submit-answer-no, .submit-close { background: #191d23; color: #f1f3f6; }
+      .submit-links { border-color: #323844; }
+      .submit-links a { border-color: #424b59; color: #79c0ff; }
+      .submit-links a:hover, .submit-links a:focus { background: #161b22; }
+      .submit-output { background: #0d1117; border-color: #424b59; color: #e6edf3; }
     }
   </style>
 </head>
@@ -2059,6 +2534,24 @@ export function buildGraphHtml({
         <button class="amend-submit" type="submit">Amend</button>
       </div>
     </form>
+  </dialog>
+  <dialog class="submit-dialog" id="submit-dialog">
+    <div class="submit-panel">
+      <h2 class="submit-title">Submit Current Commit</h2>
+      <p class="submit-status" role="status">Starting submit...</p>
+      <div class="submit-prompt" hidden>
+        <p class="submit-question"></p>
+        <div class="submit-prompt-actions">
+          <button class="submit-answer-yes" type="button" data-answer="true">Yes</button>
+          <button class="submit-answer-no" type="button" data-answer="false">No</button>
+        </div>
+      </div>
+      <div class="submit-links" hidden></div>
+      <pre class="submit-output" aria-label="Submit output"></pre>
+      <div class="submit-actions">
+        <button class="submit-close" type="button">Close</button>
+      </div>
+    </div>
   </dialog>
   <script>${gitgraphScript}</script>
   <script>
@@ -2121,8 +2614,18 @@ export function buildGraphHtml({
     const amendMessage = amendDialog.querySelector(".amend-message");
     const amendError = amendDialog.querySelector(".amend-error");
     const amendSubmit = amendDialog.querySelector(".amend-submit");
+    const submitDialog = document.getElementById("submit-dialog");
+    const submitTitle = submitDialog.querySelector(".submit-title");
+    const submitStatus = submitDialog.querySelector(".submit-status");
+    const submitPrompt = submitDialog.querySelector(".submit-prompt");
+    const submitQuestion = submitDialog.querySelector(".submit-question");
+    const submitLinks = submitDialog.querySelector(".submit-links");
+    const submitOutput = submitDialog.querySelector(".submit-output");
+    const submitClose = submitDialog.querySelector(".submit-close");
     let contextMenuState = null;
     let amendDialogState = null;
+    let submitDialogState = null;
+    let submitPollTimer = null;
     const pendingPaneEnhancements = new Set();
 
     function showError(container, message) {
@@ -3360,6 +3863,7 @@ export function buildGraphHtml({
       const body = viewer.querySelector(".diff-body");
       const checkoutButton = viewer.querySelector(".checkout-commit");
       const amendButton = viewer.querySelector(".amend-commit");
+      const submitButton = viewer.querySelector(".submit-commit");
       const checkoutStatus = viewer.querySelector(".checkout-status");
       const diff = graph.diffs && graph.diffs[commit.hash];
 
@@ -3382,6 +3886,11 @@ export function buildGraphHtml({
       amendButton.dataset.label = graph.label;
       amendButton.dataset.changeId = commit.changeId || "";
       amendButton.dataset.includeChanges = String(isWorkingTreeCommit(commit));
+      submitButton.hidden = !INTERACTIVE.enabled || isWorkingTreeCommit(commit) || !isCurrentCommit(commit);
+      submitButton.disabled = false;
+      submitButton.dataset.graphIndex = String(index);
+      submitButton.dataset.hash = commit.hash;
+      submitButton.dataset.label = graph.label;
       checkoutStatus.classList.remove("error");
       checkoutStatus.textContent = "";
       setDiffStats(stats, null);
@@ -3635,6 +4144,176 @@ export function buildGraphHtml({
       }
     }
 
+    function closeSubmitDialog() {
+      if (submitPollTimer) {
+        window.clearTimeout(submitPollTimer);
+        submitPollTimer = null;
+      }
+
+      submitDialog.close();
+    }
+
+    function setSubmitLinkNodes(links) {
+      submitLinks.replaceChildren();
+
+      if (!links || !links.length) {
+        submitLinks.hidden = true;
+        return;
+      }
+
+      for (const linkInfo of links) {
+        const link = document.createElement("a");
+        link.href = linkInfo.url;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = linkInfo.label || linkInfo.url;
+        submitLinks.append(link);
+      }
+
+      submitLinks.hidden = false;
+    }
+
+    function renderSubmitSession(session) {
+      submitStatus.textContent = session.message || session.status || "";
+      submitStatus.classList.toggle("error", session.status === "error");
+      submitClose.disabled = session.status === "running" || session.status === "prompt";
+      submitOutput.textContent = session.output || "";
+      submitOutput.scrollTop = submitOutput.scrollHeight;
+
+      if (session.prompt) {
+        submitPrompt.hidden = false;
+        submitQuestion.textContent = session.prompt.message;
+        submitDialogState.promptId = session.prompt.id;
+      } else {
+        submitPrompt.hidden = true;
+        submitQuestion.textContent = "";
+        submitDialogState.promptId = "";
+      }
+
+      setSubmitLinkNodes(session.links || []);
+
+      if (session.status === "complete" && session.snapshot && !submitDialogState.appliedSnapshot) {
+        submitDialogState.appliedSnapshot = true;
+        applyGraphSnapshot(submitDialogState.graphIndex, session.snapshot, { force: true });
+      }
+    }
+
+    async function pollSubmitSession() {
+      if (!submitDialogState) {
+        return;
+      }
+
+      try {
+        const response = await fetch(
+          "/api/submit/" + encodeURIComponent(submitDialogState.sessionId) +
+            "?token=" + encodeURIComponent(INTERACTIVE.token)
+        );
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || response.statusText);
+        }
+
+        renderSubmitSession(result);
+
+        if (result.status === "running") {
+          submitPollTimer = window.setTimeout(pollSubmitSession, 500);
+        }
+      } catch (error) {
+        submitStatus.classList.add("error");
+        submitStatus.textContent = error && error.message ? error.message : String(error);
+      }
+    }
+
+    async function openSubmitDialog(button) {
+      const graphIndex = Number(button.dataset.graphIndex);
+      const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
+
+      if (!confirm("Submit the currently checked out commit in " + button.dataset.label + "?")) {
+        return;
+      }
+
+      button.disabled = true;
+      status.classList.remove("error");
+      status.textContent = "Starting submit...";
+
+      try {
+        const response = await fetch("/api/submit", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            token: INTERACTIVE.token,
+            graphIndex,
+            hash: button.dataset.hash,
+            snapshotLimit: getLoadedGitCommitLimit(graphStates[graphIndex]),
+          }),
+        });
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || response.statusText);
+        }
+
+        submitDialogState = {
+          graphIndex,
+          sessionId: result.id,
+          promptId: "",
+          appliedSnapshot: false,
+        };
+        submitTitle.textContent = "Submit " + button.dataset.label + " current commit";
+        submitPrompt.hidden = true;
+        submitQuestion.textContent = "";
+        submitLinks.hidden = true;
+        submitLinks.replaceChildren();
+        submitOutput.textContent = "";
+        renderSubmitSession(result);
+        status.textContent = "";
+        submitDialog.showModal();
+        pollSubmitSession();
+      } catch (error) {
+        status.classList.add("error");
+        status.textContent = error && error.message ? error.message : String(error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function answerSubmitPrompt(answer) {
+      if (!submitDialogState || !submitDialogState.promptId) {
+        return;
+      }
+
+      submitStatus.classList.remove("error");
+      submitStatus.textContent = "Running submit...";
+      submitPrompt.hidden = true;
+
+      try {
+        const response = await fetch(
+          "/api/submit/" + encodeURIComponent(submitDialogState.sessionId) + "/answer",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              token: INTERACTIVE.token,
+              promptId: submitDialogState.promptId,
+              answer,
+            }),
+          }
+        );
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || response.statusText);
+        }
+
+        renderSubmitSession(result);
+        pollSubmitSession();
+      } catch (error) {
+        submitStatus.classList.add("error");
+        submitStatus.textContent = error && error.message ? error.message : String(error);
+      }
+    }
+
     document.addEventListener("click", (event) => {
       if (!event.target.closest(".context-menu")) {
         hideCommitContextMenu();
@@ -3649,6 +4328,12 @@ export function buildGraphHtml({
       const amendButton = event.target.closest(".amend-commit");
       if (amendButton) {
         openAmendDialog(amendButton);
+        return;
+      }
+
+      const submitButton = event.target.closest(".submit-commit");
+      if (submitButton) {
+        openSubmitDialog(submitButton);
         return;
       }
 
@@ -3681,6 +4366,10 @@ export function buildGraphHtml({
     });
 
     amendDialog.querySelector(".amend-cancel").addEventListener("click", closeAmendDialog);
+    submitClose.addEventListener("click", closeSubmitDialog);
+    submitDialog.querySelectorAll("button[data-answer]").forEach((button) => {
+      button.addEventListener("click", () => answerSubmitPrompt(button.dataset.answer === "true"));
+    });
 
     window.addEventListener("scroll", hideCommitContextMenu, { passive: true });
     window.addEventListener("keydown", (event) => {
@@ -3902,6 +4591,7 @@ export async function startInteractiveGraphServer({
   heartbeatIntervalMs = 2000,
   heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
   runCommand = run,
+  postComment = defaultComment,
   serverFactory = createServer,
 }) {
   const serverGraphs = graphs.map((graph) => ({
@@ -3909,6 +4599,7 @@ export async function startInteractiveGraphServer({
     knownHashes: new Set(),
     workingTreeCount: 0,
   }));
+  const submitSessions = new Map();
   const sockets = new Set();
   let closeTimer;
   let lastHeartbeat;
@@ -4155,6 +4846,77 @@ export async function startInteractiveGraphServer({
           getRequestLimit(body.snapshotLimit)
         );
         sendJson(response, 200, { ok: true, ...result, snapshot });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/submit") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+        const graphIndex = Number(body.graphIndex);
+        const graph = serverGraphs[graphIndex];
+
+        if (!graph) {
+          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          return;
+        }
+
+        if (graph.error) {
+          sendJson(response, 500, { ok: false, error: graph.error });
+          return;
+        }
+
+        const current = await getCurrentGraphBase(graph, runCommand);
+        const requestedHash = String(body.hash || current.hash);
+
+        if (requestedHash !== current.hash) {
+          sendJson(response, 409, { ok: false, error: "Submit is only available for the currently checked out commit." });
+          return;
+        }
+
+        const session = createGraphSubmitSession({
+          graph,
+          graphIndex,
+          snapshotLimit: getRequestLimit(body.snapshotLimit),
+          getSnapshot: getServerGraphSnapshot,
+          runCommand,
+          postComment,
+        });
+
+        submitSessions.set(session.id, session);
+        sendJson(response, 200, { ok: true, ...serializeSubmitSession(session) });
+        return;
+      }
+
+      const submitStatusMatch = url.pathname.match(/^\/api\/submit\/([^/]+)$/);
+      if (request.method === "GET" && submitStatusMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        lastHeartbeat = Date.now();
+        const session = submitSessions.get(decodeURIComponent(submitStatusMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown submit session." });
+          return;
+        }
+
+        sendJson(response, 200, { ok: true, ...serializeSubmitSession(session) });
+        return;
+      }
+
+      const submitAnswerMatch = url.pathname.match(/^\/api\/submit\/([^/]+)\/answer$/);
+      if (request.method === "POST" && submitAnswerMatch) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+        const session = submitSessions.get(decodeURIComponent(submitAnswerMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown submit session." });
+          return;
+        }
+
+        session.answer(body.promptId, body.answer);
+        sendJson(response, 200, { ok: true, ...serializeSubmitSession(session) });
         return;
       }
 

@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   amendCommitMessage,
   amendCurrentCommit,
+  answerSubmitSessionPrompt,
   buildGraphHtml,
   chooseCheckoutBranch,
   choosePruneBranches,
@@ -27,11 +28,40 @@ import {
   pruneCommitBranches,
   pruneMissingParents,
   rebaseCommit,
+  getInteractiveYesNoPrompt,
+  runInteractiveSubmitCommand,
   splitPrettyDiffFiles,
   startInteractiveGraphServer,
   truncateDiff,
   waitForInteractiveServerClose,
 } from "../commands/graph.mjs";
+
+async function waitForSubmitSession(url, predicate) {
+  for (let index = 0; index < 50; index++) {
+    const response = await fetch(url);
+    const session = await response.json();
+
+    if (predicate(session)) {
+      return session;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error("Timed out waiting for submit session.");
+}
+
+async function waitForSubmitSessionLike(session, predicate) {
+  for (let index = 0; index < 50; index++) {
+    if (predicate(session)) {
+      return session;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error("Timed out waiting for submit session state.");
+}
 
 test("parseDecorations expands HEAD arrows and tags", () => {
   assert.deepEqual(parseDecorations("HEAD -> main, origin/main, tag: v1.0.0"), [
@@ -175,6 +205,54 @@ test("truncateDiff caps embedded diff size", () => {
     insertions: 2,
     deletions: 1,
   });
+});
+
+test("runInteractiveSubmitCommand routes child yes/no prompts through submit session", async () => {
+  let child;
+  const writes = [];
+  const session = {
+    status: "running",
+    message: "",
+    prompt: null,
+    pendingPrompt: null,
+    output: "",
+  };
+  const spawnCommand = () => {
+    child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = {
+      write(value) {
+        writes.push(value);
+        child.stdout.emit("data", "Submitted https://phabricator.services.mozilla.com/D123456\n");
+        queueMicrotask(() => child.emit("exit", 0));
+      },
+    };
+    child.kill = () => {};
+    return child;
+  };
+
+  const command = runInteractiveSubmitCommand({
+    command: { cmd: "moz-phab", args: ["submit"], cwd: "/repo/comm" },
+    session,
+    spawnCommand,
+  });
+
+  child.stdout.emit("data", "Submit to https://phabricator.services.mozilla.com (Yes/no/always)? ");
+  await waitForSubmitSessionLike(session, (item) => Boolean(item.prompt));
+  assert.equal(
+    getInteractiveYesNoPrompt(session.output),
+    "Submit to https://phabricator.services.mozilla.com (Yes/no/always)?"
+  );
+  assert.equal(session.prompt.message, "Submit to https://phabricator.services.mozilla.com (Yes/no/always)?");
+
+  answerSubmitSessionPrompt(session, session.prompt.id, true);
+
+  assert.equal(await command, "Submit to https://phabricator.services.mozilla.com (Yes/no/always)? Submitted https://phabricator.services.mozilla.com/D123456\n");
+  assert.deepEqual(writes, ["y\n"]);
+  assert.match(session.output, /\$ moz-phab submit/);
+  assert.match(session.output, /> yes/);
+  assert.match(session.output, /Submitted https:\/\/phabricator\.services\.mozilla\.com\/D123456/);
 });
 
 test("splitPrettyDiffFiles groups patch output by file", () => {
@@ -1237,9 +1315,14 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /data-action="rebase"/);
   assert.match(html, /data-action="prune"/);
   assert.match(html, /class="amend-commit" type="button" hidden>Amend<\/button>/);
+  assert.match(html, /class="submit-commit" type="button" hidden>Submit<\/button>/);
   assert.match(html, /class="diff-message" hidden/);
   assert.match(html, /id="amend-dialog"/);
   assert.match(html, /class="amend-message"/);
+  assert.match(html, /id="submit-dialog"/);
+  assert.match(html, /class="submit-prompt"/);
+  assert.match(html, /class="submit-links" hidden/);
+  assert.match(html, /class="submit-output"/);
   assert.match(html, /class="workspace" data-index="0"/);
   assert.match(html, /class="pane-resizer"/);
   assert.match(html, /role="separator"/);
@@ -1261,9 +1344,12 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /\.commit-row\.working-tree \.commit-row-hitbox/);
   assert.match(html, /\.commit-row\.current \.commit-row-hitbox/);
   assert.match(html, /\.context-menu button\[data-action="prune"\]/);
-  assert.match(html, /\.checkout-commit, \.amend-commit, \.load-more/);
+  assert.match(html, /\.checkout-commit, \.amend-commit, \.submit-commit, \.load-more/);
   assert.match(html, /\.amend-dialog \{/);
   assert.match(html, /\.amend-message \{/);
+  assert.match(html, /\.submit-dialog \{/);
+  assert.match(html, /\.submit-links a/);
+  assert.match(html, /\.submit-output \{/);
   assert.match(html, /\.diff-placeholder/);
   assert.match(html, /\.diff-message \{/);
   assert.match(html, /\.diff-message a \{ color: #0969da; text-decoration: none; \}/);
@@ -1298,6 +1384,10 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /function runCommitAction/);
   assert.match(html, /function openAmendDialog/);
   assert.match(html, /function submitAmendDialog/);
+  assert.match(html, /function openSubmitDialog/);
+  assert.match(html, /function renderSubmitSession/);
+  assert.match(html, /function answerSubmitPrompt/);
+  assert.match(html, /submitOutput\.textContent = session\.output \|\| ""/);
   assert.match(html, /function isWorkingTreeCommit/);
   assert.match(html, /function getSnapshotFingerprint/);
   assert.match(html, /function refreshGraphFromServer/);
@@ -1340,10 +1430,14 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /loadSelectedCommitMessage\(index, commit, commitMessage\)/);
   assert.match(html, /\/api\/amend-message/);
   assert.match(html, /amendButton\.textContent = isWorkingTreeCommit\(commit\) \? "Amend" : "Amend Message"/);
+  assert.match(html, /submitButton\.hidden = !INTERACTIVE\.enabled \|\| isWorkingTreeCommit\(commit\) \|\| !isCurrentCommit\(commit\)/);
   assert.match(html, /hash: amendDialogState\.hash/);
   assert.match(html, /expectedChangeId: amendDialogState\.changeId/);
   assert.match(html, /includeChanges: amendDialogState\.includeChanges/);
   assert.match(html, /selectCommitActionResult\(graphIndex, result\.rewrittenHash \|\| result\.currentHash, result\.message\)/);
+  assert.match(html, /\/api\/submit/);
+  assert.match(html, /\/api\/submit\/" \+ encodeURIComponent\(submitDialogState\.sessionId\)/);
+  assert.match(html, /button\.dataset\.answer === "true"/);
   assert.match(html, /scheduleGraphEnhancements\(index\)/);
   assert.match(html, /Branch tips will check out the branch/);
   assert.match(html, /commitGroup\.addEventListener\("contextmenu"/);
@@ -1381,6 +1475,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /beforeunload/);
   assert.match(html, /checkout-commit/);
   assert.match(html, /amend-commit/);
+  assert.match(html, /submit-commit/);
   assert.match(html, /IntersectionObserver/);
   assert.match(html, /load-sentinel/);
   assert.doesNotMatch(html, /window\.innerHeight \+ window\.scrollY/);
@@ -1617,6 +1712,133 @@ test("interactive graph server amends current commit with edited message and ref
   assert.equal(amend.snapshot.workingTreeCount, 0);
   assert.equal(calls.some((call) => call.args[0] === "add" && call.args[1] === "-A"), true);
   assert.equal(calls.some((call) => call.args[0] === "commit" && call.args[1] === "--amend" && call.args[2] === "-F"), true);
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph server submits current commit through browser prompts", async (t) => {
+  const calls = [];
+  const comments = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    postComment: async (comment) => {
+      comments.push(comment);
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cmd === "moz-phab") {
+        return "Submitted https://phabricator.services.mozilla.com/D123456\n";
+      }
+
+      if (command.cmd.endsWith("mach")) {
+        return "Created try push: https://treeherder.mozilla.org/jobs?repo=try&revision=abc\n";
+      }
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123\n";
+      }
+
+      if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+        return "Bug 123 - Submit me. r=#reviewers\n\nDifferential Revision: https://phabricator.services.mozilla.com/D123456\n";
+      }
+
+      if (command.args[0] === "log") {
+        return "\x1eabc123\x1f\x1fHEAD -> main\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 123 - Submit me\n";
+      }
+
+      if (command.args[0] === "diff" || command.args[0] === "ls-files") {
+        return "";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/submit", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret", graphIndex: 0, hash: "abc123", snapshotLimit: 1 }),
+  });
+  const start = await startResponse.json();
+  assert.equal(start.ok, true);
+
+  const sessionUrl = new URL(`api/submit/${start.id}?token=secret`, serverInfo.url);
+  let session = await waitForSubmitSession(sessionUrl, (item) => item.status === "prompt");
+  assert.equal(session.prompt.message, "Do you want to run lint? [y/n]:");
+
+  for (const answer of [false, false, true, true]) {
+    const answerResponse = await fetch(new URL(`api/submit/${start.id}/answer`, serverInfo.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret", promptId: session.prompt.id, answer }),
+    });
+    assert.equal(answerResponse.ok, true);
+    session = await waitForSubmitSession(
+      sessionUrl,
+      (item) => item.status === "prompt" || item.status === "complete" || item.status === "error"
+    );
+
+    if (session.status === "complete") {
+      break;
+    }
+
+    assert.equal(session.status, "prompt");
+  }
+
+  assert.equal(session.status, "complete");
+  assert.match(session.output, /\$ moz-phab submit/);
+  assert.match(session.output, /Submitted https:\/\/phabricator\.services\.mozilla\.com\/D123456/);
+  assert.match(session.output, /\$ \.\.\/mach try auto --artifact/);
+  assert.match(session.output, /Created try push: https:\/\/treeherder\.mozilla\.org\/jobs\?repo=try&revision=abc/);
+  assert.deepEqual(session.links, [
+    {
+      label: "D123456",
+      url: "https://phabricator.services.mozilla.com/D123456",
+    },
+    {
+      label: "Try",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
+    },
+  ]);
+  assert.equal(session.snapshot.branch, "main");
+  assert.equal(session.snapshot.commits[0].hash, "abc123");
+  assert.deepEqual(comments, [{
+    message: "try: https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
+    resolve: true,
+    id: "123456",
+  }]);
+  assert.equal(calls.some((call) => call.cmd === "moz-phab" && call.cwd === "/repo/comm" && call.capture), true);
+  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.cwd === "/repo/comm" && call.args.join(" ") === "try auto --artifact"), true);
 
   const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
   await fetch(new URL("api/close", serverInfo.url), {
