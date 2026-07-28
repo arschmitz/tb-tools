@@ -71,13 +71,28 @@ export const trySelector = tryDialog.querySelector(".try-selector");
 export const tryQueryField = tryDialog.querySelector(".try-query-field");
 export const tryTasksField = tryDialog.querySelector(".try-tasks-field");
 export const tryStatus = tryDialog.querySelector(".try-status");
+export const landDialog = document.getElementById("land-dialog");
+export const landStatus = landDialog.querySelector(".land-status");
+export const landPrompt = landDialog.querySelector(".land-prompt");
+export const landQuestion = landDialog.querySelector(".land-question");
+export const landChoiceList = landDialog.querySelector(".land-choice-list");
+export const landLinks = landDialog.querySelector(".land-links");
+export const landDetail = landDialog.querySelector(".land-detail");
+export const landInputForm = landDialog.querySelector(".land-input-form");
+export const landInput = landDialog.querySelector(".land-input");
+export const landOutput = landDialog.querySelector(".land-output");
+export const landStart = landDialog.querySelector(".land-start");
+export const landClose = landDialog.querySelector(".land-close");
 export const uiState = {
   contextMenuState: null,
   amendDialogState: null,
   submitDialogState: null,
   submitPollTimer: null,
+  landDialogState: null,
+  landPollTimer: null,
   activeMachSession: null,
   activeTrySession: null,
+  activeLandSession: null,
   lastMachSession: null,
   machOutputVisible: false,
   machPollTimer: null,

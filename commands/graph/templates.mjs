@@ -1,3 +1,5 @@
+import { DEFAULT_LANDO_REPO } from "../../lib/lando.mjs";
+
 const DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS = 15 * 1000;
 const DEFAULT_GRAPH_SCRIPT_SRCS = [
   "graph-client/init.js",
@@ -67,6 +69,7 @@ export function buildGraphHtml({
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="pull-patch">Pull patch</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="test">Test</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="try">Try</button>
+          <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="land">Land Patches</button>
         </div>
       </div>`
     : "";
@@ -338,6 +341,39 @@ export function buildGraphHtml({
     .try-cancel { background: #fff; color: #20242a; }
     .try-submit { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
     .try-submit:disabled { cursor: wait; opacity: 0.65; }
+    .land-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(760px, calc(100vw - 32px)); padding: 0; width: 720px; }
+    .land-dialog::backdrop { background: rgba(15, 23, 42, 0.36); }
+    .land-panel { display: grid; gap: 12px; padding: 16px; }
+    .land-title { font-size: 16px; margin: 0; }
+    .land-options { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+    .land-field { color: #59616d; display: grid; font-size: 12px; font-weight: 600; gap: 5px; }
+    .land-field input { border: 1px solid #b9c0cc; border-radius: 6px; box-sizing: border-box; color: #20242a; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 6px 8px; width: 100%; }
+    .land-status, .land-question { margin: 0; }
+    .land-status { color: #59616d; font-size: 13px; }
+    .land-status.error { color: #9b1c1c; }
+    .land-prompt { border: 1px solid #d6dae1; border-radius: 6px; display: grid; gap: 10px; padding: 10px; }
+    .land-prompt[hidden], .land-links[hidden], .land-input-form[hidden] { display: none; }
+    .land-detail { background: #f6f8fa; border: 1px solid #d6dae1; border-radius: 6px; color: #24292f; font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; max-height: 180px; overflow: auto; padding: 8px; white-space: pre-wrap; }
+    .land-detail:empty { display: none; }
+    .land-choice-list { display: grid; gap: 6px; max-height: min(42vh, 360px); overflow: auto; }
+    .land-choice-section { color: #59616d; font-size: 12px; font-weight: 700; padding: 8px 4px 2px; }
+    .land-choice { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; color: #20242a; cursor: pointer; font-size: 13px; padding: 7px 9px; text-align: left; }
+    .land-choice:hover, .land-choice:focus { background: #f6f8fa; outline: none; }
+    .land-choice.accepted { border-color: #2da44e; }
+    .land-choice.warning { border-color: #bf8700; }
+    .land-choice.danger { border-color: #cf222e; color: #9b1c1c; }
+    .land-links { display: flex; flex-wrap: wrap; gap: 8px; }
+    .land-links a { border: 1px solid #d0d7de; border-radius: 999px; color: #0969da; font-size: 13px; padding: 5px 9px; text-decoration: none; }
+    .land-links a:hover, .land-links a:focus { background: #f6f8fa; text-decoration: underline; }
+    .land-input-form { display: flex; gap: 8px; }
+    .land-input { border: 1px solid #b9c0cc; border-radius: 6px; box-sizing: border-box; color: #20242a; flex: 1; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 6px 8px; }
+    .land-input-submit { background: #1f5f9f; border: 1px solid #1f5f9f; border-radius: 4px; color: #fff; cursor: pointer; font-size: 13px; padding: 6px 10px; }
+    .land-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .land-actions button, .land-start { border: 1px solid #b9c0cc; border-radius: 4px; cursor: pointer; font-size: 13px; padding: 6px 10px; }
+    .land-start { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
+    .land-close { background: #fff; color: #20242a; }
+    .land-start:disabled, .land-input-submit:disabled { cursor: wait; opacity: 0.65; }
+    .land-output { background: #f6f8fa; border: 1px solid #d6dae1; border-radius: 6px; color: #24292f; font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; max-height: min(36vh, 300px); overflow: auto; padding: 10px; white-space: pre-wrap; }
     .pretty-file { background: var(--diff-bg); border: 1px solid var(--diff-border); border-radius: 6px; margin: 0 0 12px; overflow: hidden; }
     .pretty-file h3 { align-items: center; background: var(--diff-header-bg); border-bottom: 1px solid var(--diff-border); color: var(--diff-code); display: flex; font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; gap: 12px; justify-content: space-between; margin: 0; min-height: 32px; overflow: hidden; padding: 8px 10px; }
     .file-heading { align-items: center; display: flex; gap: 8px; min-width: 0; }
@@ -515,6 +551,22 @@ export function buildGraphHtml({
       .try-status.error { color: #ff9f9f; }
       .try-cancel { background: #191d23; border-color: #424b59; color: #f1f3f6; }
       .try-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .land-dialog { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .land-dialog::backdrop { background: rgba(0, 0, 0, 0.58); }
+      .land-field { color: #acb4c0; }
+      .land-field input, .land-input { background: #0d1117; border-color: #424b59; color: #e6edf3; }
+      .land-status { color: #acb4c0; }
+      .land-status.error { color: #ff9f9f; }
+      .land-prompt { border-color: #424b59; }
+      .land-detail, .land-output { background: #0d1117; border-color: #424b59; color: #e6edf3; }
+      .land-choice-section { color: #acb4c0; }
+      .land-choice { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .land-choice:hover, .land-choice:focus { background: #161b22; }
+      .land-choice.danger { color: #ff9f9f; }
+      .land-links a { border-color: #424b59; color: #79c0ff; }
+      .land-links a:hover, .land-links a:focus { background: #161b22; }
+      .land-start, .land-input-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .land-close { background: #191d23; border-color: #424b59; color: #f1f3f6; }
     }
   </style>
 </head>
@@ -601,6 +653,35 @@ export function buildGraphHtml({
         <button class="try-submit" type="submit">Start Try</button>
       </div>
     </form>
+  </dialog>
+  <dialog class="land-dialog" id="land-dialog">
+    <div class="land-panel">
+      <h2 class="land-title">Land Patches</h2>
+      <div class="land-options">
+        <label class="land-field">Lando repository
+          <input class="land-lando-repo" name="lando-repo" type="text" value="${escapeHtml(DEFAULT_LANDO_REPO)}" autocomplete="off">
+        </label>
+        <label class="land-field">Release branch
+          <input class="land-relbranch" name="relbranch" type="text" autocomplete="off">
+        </label>
+      </div>
+      <p class="land-status" role="status">Ready to land patches marked for checkin.</p>
+      <div class="land-prompt" hidden>
+        <p class="land-question"></p>
+        <div class="land-links" hidden></div>
+        <pre class="land-detail"></pre>
+        <div class="land-choice-list"></div>
+        <form class="land-input-form" hidden>
+          <input class="land-input" type="text" autocomplete="off">
+          <button class="land-input-submit" type="submit">Continue</button>
+        </form>
+      </div>
+      <pre class="land-output" aria-label="Landing output"></pre>
+      <div class="land-actions">
+        <button class="land-start" type="button">Start Landing</button>
+        <button class="land-close" type="button">Close</button>
+      </div>
+    </div>
   </dialog>
   <script type="application/json" id="graph-config">${safeScriptJson({
     graphs,

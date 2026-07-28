@@ -1359,7 +1359,7 @@ async function getGraphChangedFilePaths({
   ]));
 }
 
-async function runGraphMach({
+export async function runGraphMach({
   graph,
   args,
   session,
@@ -1377,7 +1377,7 @@ async function runGraphMach({
     : runInjectedSubmitCommand({ command, session, runCommand });
 }
 
-async function runGraphLint({
+export async function runGraphLint({
   graph,
   session,
   all = false,
@@ -1679,6 +1679,17 @@ export async function runInteractiveSubmitCommand({
     const stderr = [];
     let promptSearchStart = initialOutputLength;
     let promptPromise = Promise.resolve();
+    const previousCancelCurrentCommand = session.cancelCurrentCommand;
+
+    session.cancelCurrentCommand = () => {
+      child.kill("SIGTERM");
+    };
+
+    function clearCurrentCommand() {
+      if (session.cancelCurrentCommand) {
+        session.cancelCurrentCommand = previousCancelCurrentCommand;
+      }
+    }
 
     function handleOutput(chunk, target) {
       const text = Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
@@ -1708,15 +1719,20 @@ export async function runInteractiveSubmitCommand({
 
     child.stdout.on("data", (chunk) => handleOutput(chunk, stdout));
     child.stderr.on("data", (chunk) => handleOutput(chunk, stderr));
-    child.on("error", reject);
-    child.on("exit", (code) => {
+    child.on("error", (error) => {
+      clearCurrentCommand();
+      reject(error);
+    });
+    child.on("exit", (code, signal) => {
+      clearCurrentCommand();
       promptPromise.then(() => {
         const stdoutText = Buffer.concat(stdout).toString();
         const stderrText = Buffer.concat(stderr).toString();
 
-        if (code > 0) {
-          const error = new Error(stderrText || `${command.cmd} exited with code ${code}`);
+        if (code > 0 || signal) {
+          const error = new Error(stderrText || `${command.cmd} exited ${signal ? `with signal ${signal}` : `with code ${code}`}`);
           error.code = code;
+          error.signal = signal;
           error.stdout = stdoutText;
           error.stderr = stderrText;
           reject(error);

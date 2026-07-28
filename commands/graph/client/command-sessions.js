@@ -40,7 +40,7 @@ export function getUpdateActionLabel(mode) {
 }
 
 export function setUpdateBusy(busy) {
-  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='try']").forEach((button) => {
+  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='try'], .graph-menu-command[data-menu-action='land']").forEach((button) => {
     button.disabled = busy;
   });
 }
@@ -97,8 +97,15 @@ export function hasActiveTrySession() {
   return Boolean(uiState.activeTrySession && uiState.activeTrySession.status === "running");
 }
 
+export function hasActiveLandSession() {
+  return Boolean(
+    uiState.activeLandSession &&
+    (uiState.activeLandSession.status === "running" || uiState.activeLandSession.status === "prompt")
+  );
+}
+
 export function hasActiveCommandSession() {
-  return hasActiveMachSession() || hasActiveTrySession();
+  return hasActiveMachSession() || hasActiveTrySession() || hasActiveLandSession();
 }
 
 export function isMachRunSession(session) {

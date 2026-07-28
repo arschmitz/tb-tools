@@ -5,6 +5,10 @@ import {
   amendForm,
   contextMenu,
   graphStates,
+  landClose,
+  landDialog,
+  landInputForm,
+  landStart,
   submitClose,
   submitDialog,
   tryDialog,
@@ -41,6 +45,13 @@ import {
   openTryDialog,
   updateTryDialogFields,
 } from "./command-sessions.js";
+import {
+  answerLandPrompt,
+  cancelOrCloseLandDialog,
+  openLandDialog,
+  startGraphLandSession,
+  submitLandInputPrompt,
+} from "./landing-dialog.js";
 import {
   answerSubmitPrompt,
   checkoutSelectedCommit,
@@ -87,6 +98,10 @@ document.addEventListener("click", (event) => {
 
     if (menuAction === "try") {
       openTryDialog();
+    }
+
+    if (menuAction === "land") {
+      openLandDialog();
     }
 
     return;
@@ -187,6 +202,22 @@ tryDialog.querySelector(".try-cancel").addEventListener("click", () => {
   if (!hasActiveTrySession()) {
     tryDialog.close();
   }
+});
+landStart.addEventListener("click", startGraphLandSession);
+landClose.addEventListener("click", cancelOrCloseLandDialog);
+landInputForm.addEventListener("submit", submitLandInputPrompt);
+landDialog.addEventListener("click", (event) => {
+  const button = event.target.closest(".land-choice");
+
+  if (!button) {
+    return;
+  }
+
+  const answer = button.dataset.answerType === "boolean"
+    ? button.dataset.answer === "true"
+    : button.dataset.answer;
+
+  answerLandPrompt(answer);
 });
 
 window.addEventListener("scroll", () => {
@@ -350,6 +381,9 @@ if (INTERACTIVE.enabled) {
     clearInterval(originMainStatusPoll);
     if (uiState.machPollTimer) {
       window.clearTimeout(uiState.machPollTimer);
+    }
+    if (uiState.landPollTimer) {
+      window.clearTimeout(uiState.landPollTimer);
     }
     if (uiState.commandElapsedTimer) {
       window.clearInterval(uiState.commandElapsedTimer);

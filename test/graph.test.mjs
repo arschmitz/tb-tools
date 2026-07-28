@@ -67,6 +67,7 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "diff-viewer.js", output: "graph-client/diff-viewer.js" },
   { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
   { source: "commit-actions.js", output: "graph-client/commit-actions.js" },
+  { source: "landing-dialog.js", output: "graph-client/landing-dialog.js" },
   { source: "init.js", output: "graph-client/init.js" },
 ];
 
@@ -104,6 +105,21 @@ async function waitForMachSession(url, predicate) {
   }
 
   throw new Error("Timed out waiting for mach session.");
+}
+
+async function waitForLandSession(url, predicate) {
+  for (let index = 0; index < 80; index++) {
+    const response = await fetch(url);
+    const session = await response.json();
+
+    if (predicate(session)) {
+      return session;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error("Timed out waiting for landing session.");
 }
 
 async function waitForSubmitSessionLike(session, predicate) {
@@ -2511,6 +2527,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /data-menu-action="pull-patch">Pull patch<\/button>/);
   assert.match(html, /data-menu-action="test">Test<\/button>/);
   assert.match(html, /data-menu-action="try">Try<\/button>/);
+  assert.match(html, /data-menu-action="land">Land Patches<\/button>/);
   assert.match(html, /\.graph-submenu \{ display: none; position: absolute; right: calc\(100% - 1px\); top: 0; \}/);
   assert.match(html, /class="origin-main-status" role="status" aria-label="origin\/main freshness"/);
   assert.match(html, /class="command-status-bar" role="region" aria-label="Command status" hidden/);
@@ -2525,17 +2542,29 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /<dialog class="try-dialog" id="try-dialog">/);
   assert.match(html, /<option value="fuzzy">fuzzy<\/option>/);
   assert.match(html, /Post try link to Phabricator/);
+  assert.match(html, /<dialog class="land-dialog" id="land-dialog">/);
+  assert.match(html, /class="land-lando-repo"[^>]+value="thunderbird-desktop-main"/);
+  assert.match(html, /class="land-start" type="button">Start Landing<\/button>/);
+  assert.doesNotMatch(html, /\.land-close:disabled/);
   assert.match(client, /\/api\/graph\/" \+ index \+ "\/commits/);
   assert.match(client, /\/api\/commit-action/);
   assert.match(client, /\/api\/update-graphs/);
   assert.match(client, /\/api\/unshelf-graphs/);
   assert.match(client, /\/api\/mach-action/);
   assert.match(client, /\/api\/origin-main-status/);
+  assert.match(client, /\/api\/land/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("the try run"\)/);
+  assert.match(client, /await confirmRemoteBuildRustWarning\("land patches"\)/);
   assert.match(client, /snapshotLimits: getSnapshotLimits\(\)/);
   assert.match(client, /await promptForPostUpdateMachAction\(\)/);
   assert.match(client, /await startGraphMachAction\("run"\)/);
   assert.match(client, /clearInterval\(originMainStatusPoll\)/);
+  assert.match(client, /window\.clearTimeout\(uiState\.landPollTimer\)/);
+  assert.match(client, /function cancelOrCloseLandDialog/);
+  assert.match(client, /landClose\.disabled = false/);
+  assert.match(client, /landClose\.textContent = busy \? "Cancel" : "Close"/);
+  assert.match(client, /\/api\/land\/" \+ encodeURIComponent\(sessionId\) \+ "\/cancel"/);
+  assert.match(client, /landClose\.addEventListener\("click", cancelOrCloseLandDialog\)/);
   assert.match(client, /window\.clearTimeout\(uiState\.originMainStatusRetryTimer\)/);
   assert.match(client, /snapshotLimit: getLoadedGitCommitLimit\(graphStates\[graphIndex\]\)/);
   assert.match(client, /applyGraphSnapshot\(graphIndex, result\.snapshot, \{ force: true \}\)/);
@@ -2547,6 +2576,9 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /submit-commit/);
   assert.match(client, /IntersectionObserver/);
   assert.match(client, /load-sentinel/);
+  assert.match(client, /function openLandDialog/);
+  assert.match(client, /function renderGraphLandSession/);
+  assert.match(client, /function answerLandPrompt/);
   assert.doesNotMatch(client, /window\.innerHeight \+ window\.scrollY/);
 });
 
@@ -3175,6 +3207,266 @@ test("interactive graph server starts a try session and refreshes try links", as
   assert.equal(session.snapshot.commits[0].tryRuns[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=server");
   assert.match(session.output, /\$ \.\.\/mach try auto --tasks-regex browser --artifact/);
   assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "try auto --tasks-regex browser --artifact"), true);
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph server lands patches through browser prompts", async (t) => {
+  const calls = [];
+  const pushes = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    getBugs: async () => [{
+      id: "123456",
+      summary: "Fix the landing flow",
+      target_milestone: "128 Branch",
+    }],
+    getAttachments: async () => [{
+      content_type: "text/x-phabricator-request",
+      file_name: "D987654.diff",
+    }],
+    phab: async ({ route }) => {
+      if (route === "differential.query") {
+        return {
+          result: [{
+            id: 987654,
+            uri: "https://phabricator.services.mozilla.com/D987654",
+            statusName: "Accepted",
+            title: "Bug 123456 - Fix the landing flow. r=#reviewers",
+            reviewers: {
+              "PHID-USER-reviewer": true,
+            },
+          }],
+        };
+      }
+
+      if (route === "user.query") {
+        return {
+          result: [{
+            userName: "alice",
+          }],
+        };
+      }
+
+      return { result: [] };
+    },
+    pushCommits: async (options) => {
+      pushes.push(options);
+      return "Lando stack: https://lando.mozilla.org/D987654\n";
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cmd === "moz-phab") {
+        return "patched D987654\n";
+      }
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "fetch" || command.args[0] === "switch" || command.args[0] === "pull" || command.args[0] === "update-ref") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123abc123abc123abc123abc123abc123abcd\n";
+      }
+
+      if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+        return "Bug 123456 - Fix the landing flow. r=#reviewers\n\nDifferential Revision: https://phabricator.services.mozilla.com/D987654\n";
+      }
+
+      if (command.args[0] === "log" && command.args.includes("--oneline")) {
+        return "def456 Bug 123456 - Fix the landing flow. r=alice\n";
+      }
+
+      if (command.args[0] === "log") {
+        return "\x1edef456\x1fabc123\x1fHEAD -> main\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 123456 - Fix the landing flow. r=alice\n";
+      }
+
+      if (command.args[0] === "diff" || command.args[0] === "ls-files") {
+        return "";
+      }
+
+      if (command.args[0] === "commit" && command.args[1] === "--amend") {
+        return "[main def456] Bug 123456 - Fix the landing flow. r=alice\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  async function answer(session, value) {
+    const response = await fetch(new URL(`api/land/${session.id}/answer`, serverInfo.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        promptId: session.prompt.id,
+        answer: value,
+      }),
+    });
+
+    return response.json();
+  }
+
+  const startResponse = await fetch(new URL("api/land", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      options: {
+        landoRepo: "test-lando",
+      },
+      snapshotLimits: [1],
+    }),
+  });
+  const start = await startResponse.json();
+  assert.equal(start.ok, true);
+  assert.equal(start.status, "running");
+
+  const statusUrl = new URL(`api/land/${start.id}?token=secret`, serverInfo.url);
+  let session = await waitForLandSession(statusUrl, (item) => item.prompt?.kind === "patch-select");
+  assert.equal(session.prompt.choices.some((choice) => choice.id === "patch:123456:987654"), true);
+
+  session = await answer(session, "patch:123456:987654");
+  session = await waitForLandSession(statusUrl, (item) => item.prompt?.type === "patch-action");
+  assert.match(session.prompt.detail, /Reviewers: alice/);
+  assert.equal(session.prompt.links[0].url, "https://bugzilla.mozilla.org/show_bug.cgi?id=123456");
+
+  session = await answer(session, "merge");
+  session = await waitForLandSession(statusUrl, (item) => item.prompt?.message === "Do you want to run lint?");
+  assert.equal(calls.some((call) => call.cmd === "moz-phab" && call.args.join(" ") === "patch D987654 --skip-dependencies --apply-to here"), true);
+  assert.equal(calls.some((call) => (
+    call.args[0] === "commit" &&
+    call.args[1] === "--amend" &&
+    call.args.some((arg) => String(arg).includes("Bug 123456 - Fix the landing flow. r=alice"))
+  )), true);
+
+  session = await answer(session, false);
+  session = await waitForLandSession(statusUrl, (item) => item.prompt?.message === "Do you want to run build?");
+  session = await answer(session, false);
+  session = await waitForLandSession(statusUrl, (item) => item.prompt?.kind === "approval");
+  assert.match(session.prompt.detail, /def456 Bug 123456/);
+
+  session = await answer(session, "approve");
+  session = await waitForLandSession(statusUrl, (item) => item.status === "complete");
+  assert.equal(session.message, "Landing complete.");
+  assert.equal(session.links[0].url, "https://lando.mozilla.org/D987654");
+  assert.equal(session.snapshots[0].commits[0].hash, "def456");
+  assert.deepEqual(pushes, [{
+    landoRepo: "test-lando",
+    relbranch: undefined,
+    localRepo: "/repo/comm",
+    yes: true,
+  }]);
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph server cancels landing sessions waiting on browser prompts", async (t) => {
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    getBugs: async () => [],
+    runCommand: async (command) => {
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "fetch" || command.args[0] === "switch" || command.args[0] === "pull" || command.args[0] === "update-ref") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123abc123abc123abc123abc123abc123abcd\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/land", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      snapshotLimits: [1],
+    }),
+  });
+  const start = await startResponse.json();
+  const statusUrl = new URL(`api/land/${start.id}?token=secret`, serverInfo.url);
+  const waiting = await waitForLandSession(
+    statusUrl,
+    (item) => item.prompt?.message === "No bugs are marked for checkin. Bump build/dummy instead?"
+  );
+
+  assert.equal(waiting.status, "prompt");
+
+  const cancelResponse = await fetch(new URL(`api/land/${start.id}/cancel`, serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  const canceled = await cancelResponse.json();
+
+  assert.equal(canceled.status, "canceled");
+  assert.equal(canceled.message, "Landing canceled.");
+  assert.equal(canceled.prompt, null);
+  assert.match(canceled.output, /Landing canceled\./);
+
+  const afterCancel = await waitForLandSession(statusUrl, (item) => item.status === "canceled");
+  assert.equal(afterCancel.status, "canceled");
 
   const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
   await fetch(new URL("api/close", serverInfo.url), {

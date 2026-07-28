@@ -1,7 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { pushCommits as defaultPushCommits } from "../../lib/lando.mjs";
 import { run } from "../../lib/utils.mjs";
-import { getBug as defaultGetBug, updateBug as defaultUpdateBug } from "../../lib/bugzilla.mjs";
+import {
+  getAttachments as defaultGetAttachments,
+  getBug as defaultGetBug,
+  getBugs as defaultGetBugs,
+  updateBug as defaultUpdateBug,
+} from "../../lib/bugzilla.mjs";
 import defaultPhab, { comment as defaultComment } from "../../lib/phab.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
 import {
@@ -38,6 +44,10 @@ import {
   serializeSubmitSession,
   unshelfGraphShelves,
 } from "./actions.mjs";
+import {
+  createGraphLandSession,
+  serializeGraphLandSession,
+} from "./landing.mjs";
 
 async function readRequestJson(request) {
   const chunks = [];
@@ -101,10 +111,13 @@ export async function startInteractiveGraphServer({
   heartbeatIntervalMs = 2000,
   heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
   runCommand = run,
+  getBugs = defaultGetBugs,
+  getAttachments = defaultGetAttachments,
   getBug = defaultGetBug,
   updateBug = defaultUpdateBug,
   phab = defaultPhab,
   postComment = defaultComment,
+  pushCommits = defaultPushCommits,
   getRustUpstreamStatus = getGraphRustUpstreamStatus,
   serverFactory = createServer,
 }) {
@@ -118,6 +131,7 @@ export async function startInteractiveGraphServer({
   const submitSessions = new Map();
   const machSessions = new Map();
   const trySessions = new Map();
+  const landSessions = new Map();
   const sockets = new Set();
   let closeTimer;
   let lastHeartbeat;
@@ -628,6 +642,88 @@ export async function startInteractiveGraphServer({
 
         trySessions.set(session.id, session);
         sendJson(response, 200, { ok: true, ...serializeGraphTrySession(session) });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/land") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+
+        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+
+        if (graph.error) {
+          sendJson(response, 500, { ok: false, error: graph.error });
+          return;
+        }
+
+        const session = createGraphLandSession({
+          graphs: serverGraphs,
+          graph,
+          graphIndex: index,
+          snapshotLimits: Array.isArray(body.snapshotLimits) ? body.snapshotLimits.map(getRequestLimit) : [],
+          getSnapshots: (snapshotLimits) => getServerGraphSnapshots({ snapshotLimits }),
+          options: body.options || {},
+          runCommand,
+          getBugs,
+          getAttachments,
+          updateBug,
+          phab,
+          postComment,
+          pushCommits,
+        });
+
+        landSessions.set(session.id, session);
+        sendJson(response, 200, { ok: true, ...serializeGraphLandSession(session) });
+        return;
+      }
+
+      const landStatusMatch = url.pathname.match(/^\/api\/land\/([^/]+)$/);
+      if (request.method === "GET" && landStatusMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        lastHeartbeat = Date.now();
+        const session = landSessions.get(decodeURIComponent(landStatusMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown landing session." });
+          return;
+        }
+
+        sendJson(response, 200, { ok: true, ...serializeGraphLandSession(session) });
+        return;
+      }
+
+      const landAnswerMatch = url.pathname.match(/^\/api\/land\/([^/]+)\/answer$/);
+      if (request.method === "POST" && landAnswerMatch) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+        const session = landSessions.get(decodeURIComponent(landAnswerMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown landing session." });
+          return;
+        }
+
+        session.answer(body.promptId, body.answer);
+        sendJson(response, 200, { ok: true, ...serializeGraphLandSession(session) });
+        return;
+      }
+
+      const landCancelMatch = url.pathname.match(/^\/api\/land\/([^/]+)\/cancel$/);
+      if (request.method === "POST" && landCancelMatch) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+        const session = landSessions.get(decodeURIComponent(landCancelMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown landing session." });
+          return;
+        }
+
+        session.cancel();
+        sendJson(response, 200, { ok: true, ...serializeGraphLandSession(session) });
         return;
       }
 
