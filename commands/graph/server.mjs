@@ -12,6 +12,7 @@ import {
 import defaultPhab, { comment as defaultComment } from "../../lib/phab.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
 import {
+  DEFAULT_CLIENT_DISCONNECT_GRACE_MS,
   DEFAULT_HEARTBEAT_TIMEOUT_MS,
   DEFAULT_MAX_DIFF_BYTES,
   DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS,
@@ -125,6 +126,7 @@ export async function startInteractiveGraphServer({
   host = "127.0.0.1",
   heartbeatIntervalMs = 2000,
   heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
+  clientDisconnectGraceMs = DEFAULT_CLIENT_DISCONNECT_GRACE_MS,
   runCommand = run,
   getBugs = defaultGetBugs,
   getAttachments = defaultGetAttachments,
@@ -153,14 +155,75 @@ export async function startInteractiveGraphServer({
   const landSessions = new Map();
   const testSessions = new Map();
   const sockets = new Set();
+  const browserClients = new Map();
   let closeTimer;
-  let lastHeartbeat;
+  let noClientCloseTimer;
+  let browserMonitorStarted = false;
+  let lastBrowserActivity = 0;
   let shuttingDown = false;
   let rustUpstreamStatus;
   let rustUpstreamStatusCheckedAt = 0;
   let rustUpstreamStatusPromise = null;
+
+  function clearNoClientCloseTimer() {
+    if (!noClientCloseTimer) {
+      return;
+    }
+
+    clearTimeout(noClientCloseTimer);
+    noClientCloseTimer = undefined;
+  }
+
+  function noteBrowserActivity(now = Date.now()) {
+    browserMonitorStarted = true;
+    lastBrowserActivity = now;
+  }
+
+  function registerBrowserClient(clientId, now = Date.now()) {
+    noteBrowserActivity(now);
+
+    if (!clientId) {
+      return;
+    }
+
+    clearNoClientCloseTimer();
+    browserClients.set(String(clientId), now);
+  }
+
+  function pruneStaleBrowserClients(now = Date.now()) {
+    for (const [clientId, lastSeen] of browserClients) {
+      if (now - lastSeen > heartbeatTimeoutMs) {
+        browserClients.delete(clientId);
+      }
+    }
+  }
+
+  function scheduleNoBrowserClientsShutdown(delay = clientDisconnectGraceMs, reason = "all browser tabs closed") {
+    if (shuttingDown || noClientCloseTimer) {
+      return;
+    }
+
+    noClientCloseTimer = setTimeout(() => {
+      noClientCloseTimer = undefined;
+      pruneStaleBrowserClients();
+
+      if (!browserClients.size) {
+        shutdown(0, reason);
+      }
+    }, Math.max(0, Number(delay) || 0));
+    noClientCloseTimer.unref?.();
+  }
+
   const heartbeatTimer = setInterval(() => {
-    if (lastHeartbeat && Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
+    const now = Date.now();
+
+    pruneStaleBrowserClients(now);
+
+    if (browserClients.size || noClientCloseTimer) {
+      return;
+    }
+
+    if (browserMonitorStarted && lastBrowserActivity && now - lastBrowserActivity > heartbeatTimeoutMs) {
       shutdown(0, `browser heartbeat timed out after ${formatDurationLabel(heartbeatTimeoutMs)}`);
     }
   }, heartbeatIntervalMs);
@@ -178,6 +241,7 @@ export async function startInteractiveGraphServer({
     server.closeReason = reason;
     closeTimer = setTimeout(() => {
       clearInterval(heartbeatTimer);
+      clearNoClientCloseTimer();
 
       if (server.listening) {
         server.close();
@@ -351,7 +415,7 @@ export async function startInteractiveGraphServer({
       const url = new URL(request.url, `http://${request.headers.host}`);
 
       if (request.method === "GET" && ["/", "/index.html"].includes(url.pathname)) {
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         response.writeHead(200, {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store",
@@ -362,7 +426,7 @@ export async function startInteractiveGraphServer({
 
       const clientScript = GRAPH_CLIENT_SCRIPTS.find((script) => url.pathname === `/assets/${script.output}`);
       if (request.method === "GET" && clientScript) {
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         sendText(
           response,
           200,
@@ -374,7 +438,7 @@ export async function startInteractiveGraphServer({
 
       if (request.method === "GET" && url.pathname === "/api/origin-main-status") {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const statuses = await getServerOriginMainStatuses({
           force: url.searchParams.get("force") === "1",
         });
@@ -420,7 +484,7 @@ export async function startInteractiveGraphServer({
       const snapshotMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/snapshot$/);
       if (request.method === "GET" && snapshotMatch) {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const graph = serverGraphs[Number(snapshotMatch[1])];
 
         if (!graph) {
@@ -513,7 +577,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/bugzilla/checkin") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const graph = serverGraphs[Number(body.graphIndex)];
         const hash = String(body.hash || "");
 
@@ -599,7 +663,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/update-graphs") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
 
         const result = await runGraphRepositoryUpdate({
           graphs: serverGraphs,
@@ -616,7 +680,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/unshelf-graphs") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
 
         const result = await unshelfGraphShelves({
           graphs: serverGraphs,
@@ -632,7 +696,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/mach-action") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
 
         const { graph, index } = chooseGraphMachCheckout(serverGraphs);
         const session = createGraphMachSession({
@@ -650,7 +714,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/try") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
 
         const { graph, index } = chooseGraphMachCheckout(serverGraphs);
         const session = createGraphTrySession({
@@ -671,7 +735,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/lint") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
 
         const { graph, index } = chooseGraphMachCheckout(serverGraphs);
         const session = createGraphLintSession({
@@ -689,7 +753,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/test") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
 
         const { graph, index } = chooseGraphMachCheckout(serverGraphs);
         const session = createGraphTestSession({
@@ -707,7 +771,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/new-patch") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
 
         const { graph, index } = chooseGraphMachCheckout(serverGraphs);
         const snapshotLimits = Array.isArray(body.snapshotLimits) ? body.snapshotLimits.map(getRequestLimit) : [];
@@ -731,7 +795,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/patch") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
 
         const { graph, index } = chooseGraphMachCheckout(serverGraphs);
         const session = createGraphPatchSession({
@@ -751,7 +815,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/land") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
 
         const { graph, index } = chooseGraphMachCheckout(serverGraphs);
 
@@ -784,7 +848,7 @@ export async function startInteractiveGraphServer({
       const landStatusMatch = url.pathname.match(/^\/api\/land\/([^/]+)$/);
       if (request.method === "GET" && landStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = landSessions.get(decodeURIComponent(landStatusMatch[1]));
 
         if (!session) {
@@ -800,7 +864,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && landAnswerMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = landSessions.get(decodeURIComponent(landAnswerMatch[1]));
 
         if (!session) {
@@ -817,7 +881,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && landCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = landSessions.get(decodeURIComponent(landCancelMatch[1]));
 
         if (!session) {
@@ -833,7 +897,7 @@ export async function startInteractiveGraphServer({
       const tryStatusMatch = url.pathname.match(/^\/api\/try\/([^/]+)$/);
       if (request.method === "GET" && tryStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = trySessions.get(decodeURIComponent(tryStatusMatch[1]));
 
         if (!session) {
@@ -848,7 +912,7 @@ export async function startInteractiveGraphServer({
       const lintStatusMatch = url.pathname.match(/^\/api\/lint\/([^/]+)$/);
       if (request.method === "GET" && lintStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = lintSessions.get(decodeURIComponent(lintStatusMatch[1]));
 
         if (!session) {
@@ -863,7 +927,7 @@ export async function startInteractiveGraphServer({
       const testStatusMatch = url.pathname.match(/^\/api\/test\/([^/]+)$/);
       if (request.method === "GET" && testStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = testSessions.get(decodeURIComponent(testStatusMatch[1]));
 
         if (!session) {
@@ -879,7 +943,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && testCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = testSessions.get(decodeURIComponent(testCancelMatch[1]));
 
         if (!session) {
@@ -895,7 +959,7 @@ export async function startInteractiveGraphServer({
       const newPatchStatusMatch = url.pathname.match(/^\/api\/new-patch\/([^/]+)$/);
       if (request.method === "GET" && newPatchStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = newPatchSessions.get(decodeURIComponent(newPatchStatusMatch[1]));
 
         if (!session) {
@@ -911,7 +975,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && newPatchCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = newPatchSessions.get(decodeURIComponent(newPatchCancelMatch[1]));
 
         if (!session) {
@@ -927,7 +991,7 @@ export async function startInteractiveGraphServer({
       const patchStatusMatch = url.pathname.match(/^\/api\/patch\/([^/]+)$/);
       if (request.method === "GET" && patchStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = patchSessions.get(decodeURIComponent(patchStatusMatch[1]));
 
         if (!session) {
@@ -943,7 +1007,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && patchAnswerMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = patchSessions.get(decodeURIComponent(patchAnswerMatch[1]));
 
         if (!session) {
@@ -960,7 +1024,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && patchCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = patchSessions.get(decodeURIComponent(patchCancelMatch[1]));
 
         if (!session) {
@@ -976,7 +1040,7 @@ export async function startInteractiveGraphServer({
       const machStatusMatch = url.pathname.match(/^\/api\/mach-action\/([^/]+)$/);
       if (request.method === "GET" && machStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = machSessions.get(decodeURIComponent(machStatusMatch[1]));
 
         if (!session) {
@@ -992,7 +1056,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && machCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = machSessions.get(decodeURIComponent(machCancelMatch[1]));
 
         if (!session) {
@@ -1040,7 +1104,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/submit") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const graphIndex = Number(body.graphIndex);
         const graph = serverGraphs[graphIndex];
 
@@ -1079,7 +1143,7 @@ export async function startInteractiveGraphServer({
       const submitStatusMatch = url.pathname.match(/^\/api\/submit\/([^/]+)$/);
       if (request.method === "GET" && submitStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = submitSessions.get(decodeURIComponent(submitStatusMatch[1]));
 
         if (!session) {
@@ -1095,7 +1159,7 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && submitAnswerMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
+        noteBrowserActivity();
         const session = submitSessions.get(decodeURIComponent(submitAnswerMatch[1]));
 
         if (!session) {
@@ -1111,14 +1175,28 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/ping") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        lastHeartbeat = Date.now();
-        sendJson(response, 200, { ok: true });
+        registerBrowserClient(body.clientId);
+        sendJson(response, 200, { ok: true, clientId: body.clientId || "" });
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/close") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
+        const clientId = body.clientId ? String(body.clientId) : "";
+
+        if (clientId) {
+          browserClients.delete(clientId);
+          noteBrowserActivity();
+          sendJson(response, 200, { ok: true, remainingClients: browserClients.size });
+
+          if (!browserClients.size) {
+            scheduleNoBrowserClientsShutdown(clientDisconnectGraceMs, "all browser tabs closed");
+          }
+
+          return;
+        }
+
         sendJson(response, 200, { ok: true });
         shutdown(50, "browser tab closed");
         return;
@@ -1153,6 +1231,8 @@ export async function startInteractiveGraphServer({
 
   server.once("close", () => {
     clearInterval(heartbeatTimer);
+    clearNoClientCloseTimer();
+
     if (closeTimer) {
       clearTimeout(closeTimer);
     }

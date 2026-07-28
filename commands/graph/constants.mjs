@@ -2,6 +2,7 @@ export const FIELD_SEPARATOR = "\x1f";
 export const RECORD_SEPARATOR = "\x1e";
 export const DEFAULT_MAX_DIFF_BYTES = 200000;
 export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;
+export const DEFAULT_CLIENT_DISCONNECT_GRACE_MS = 4000;
 export const DEFAULT_SUBMIT_OUTPUT_LIMIT = 160000;
 export const DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS = 15 * 1000;
 export const CHECKIN_NEEDED_KEYWORD = "checkin-needed-tb";

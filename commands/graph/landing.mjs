@@ -20,6 +20,14 @@ import {
 
 const BUGZILLA_BUG_URL = "https://bugzilla.mozilla.org/show_bug.cgi?id=";
 const REBASE_COMMENT = "Conflicts found while landing. Please Rebase.";
+const TREEHERDER_JOBS_URL_PATTERN = /https?:\/\/treeherder\.mozilla\.org\/jobs[^\s<>"']*/gi;
+const CHANGE_TRANSACTION_TYPES = new Set([
+  "diff",
+  "differential.diff",
+  "differential.update",
+  "revision.update",
+  "update",
+]);
 
 function stripAnsi(value = "") {
   const escapeCharacter = String.fromCharCode(27);
@@ -48,6 +56,234 @@ function createLandingCanceledError() {
 
   error.canceled = true;
   return error;
+}
+
+function cleanTreeherderUrl(url = "") {
+  return String(url).replace(/[),.;]+$/g, "");
+}
+
+export function getTreeherderUrlsFromText(value = "") {
+  return Array.from(String(value || "").matchAll(TREEHERDER_JOBS_URL_PATTERN))
+    .map((match) => cleanTreeherderUrl(match[0]))
+    .filter(Boolean);
+}
+
+function normalizeTimestamp(value) {
+  const number = Number(value || 0);
+
+  if (!Number.isFinite(number) || number <= 0) {
+    return 0;
+  }
+
+  return number < 100000000000 ? number * 1000 : number;
+}
+
+function getRecordTimestamp(record) {
+  if (!record || typeof record !== "object") {
+    return 0;
+  }
+
+  return normalizeTimestamp(
+    record.dateCreated ||
+    record.dateModified ||
+    record.epoch ||
+    record.timestamp ||
+    record.date
+  );
+}
+
+function getCommentText(comment) {
+  if (!comment) {
+    return "";
+  }
+
+  if (typeof comment === "string") {
+    return comment;
+  }
+
+  return String(
+    comment.text ||
+    comment.body ||
+    comment.message ||
+    comment.content?.raw ||
+    comment.content?.html ||
+    comment.content ||
+    comment.comment ||
+    ""
+  );
+}
+
+function collectCommentRecords(record, fallbackTimestamp = 0) {
+  if (!record || typeof record === "string") {
+    return [{
+      text: getCommentText(record),
+      timestamp: fallbackTimestamp,
+    }];
+  }
+
+  const timestamp = getRecordTimestamp(record) || fallbackTimestamp;
+  const comments = Array.isArray(record.comments)
+    ? record.comments
+    : [record.comment, record.content, record.text, record.body, record.message].filter(Boolean);
+
+  return comments.map((comment) => ({
+    text: getCommentText(comment),
+    timestamp: getRecordTimestamp(comment) || timestamp,
+  }));
+}
+
+function normalizePhabricatorTransactions(response) {
+  if (Array.isArray(response)) {
+    return response;
+  }
+
+  if (Array.isArray(response?.result?.data)) {
+    return response.result.data;
+  }
+
+  if (Array.isArray(response?.result)) {
+    return response.result;
+  }
+
+  if (Array.isArray(response?.data)) {
+    return response.data;
+  }
+
+  return [];
+}
+
+function getPatchCommentRecords(patch = {}, transactions = []) {
+  return [
+    ...(Array.isArray(patch.comments) ? patch.comments : []),
+    ...(Array.isArray(patch.transactions) ? patch.transactions : []),
+    ...transactions,
+  ].flatMap((record) => collectCommentRecords(record));
+}
+
+function isPatchChangeTransaction(transaction = {}) {
+  const type = String(transaction.type || transaction.transactionType || "").toLowerCase();
+  const fields = transaction.fields || {};
+  const text = [
+    transaction.description,
+    transaction.summary,
+    transaction.title,
+    transaction.oldValue,
+    transaction.newValue,
+  ].filter(Boolean).join("\n");
+
+  return CHANGE_TRANSACTION_TYPES.has(type) ||
+    type.includes("diff") ||
+    Boolean(transaction.diff || transaction.diffID || transaction.diffId || transaction.newDiff || fields.diff) ||
+    /updated .*diff|uploaded .*diff|changed .*diff|added .*diff/i.test(text);
+}
+
+function getPatchChangeTimestamps(patch = {}, transactions = []) {
+  const diffRecords = [
+    ...(Array.isArray(patch.diffs) ? patch.diffs : []),
+    patch.diff,
+    patch.activeDiff,
+    patch.latestDiff,
+  ].filter(Boolean);
+  const diffTimestamps = diffRecords
+    .map(getRecordTimestamp)
+    .filter(Boolean);
+  const transactionTimestamps = [
+    ...(Array.isArray(patch.transactions) ? patch.transactions : []),
+    ...transactions,
+  ]
+    .filter(isPatchChangeTransaction)
+    .map(getRecordTimestamp)
+    .filter(Boolean);
+
+  return [...diffTimestamps, ...transactionTimestamps];
+}
+
+export function getLatestLandingPatchTryRun({ patch = {}, transactions = [] } = {}) {
+  return getPatchCommentRecords(patch, transactions).reduce((latest, record, index) => {
+    const urls = getTreeherderUrlsFromText(record.text);
+
+    if (!urls.length) {
+      return latest;
+    }
+
+    const timestamp = record.timestamp || 0;
+    const candidate = {
+      url: urls.at(-1),
+      createdAt: timestamp ? new Date(timestamp).toISOString() : "",
+      timestamp,
+      index,
+    };
+
+    if (!latest || candidate.timestamp > latest.timestamp || (
+      candidate.timestamp === latest.timestamp &&
+      candidate.index > latest.index
+    )) {
+      return candidate;
+    }
+
+    return latest;
+  }, null);
+}
+
+export function getLandingPatchTryStatus({ patch = {}, transactions = [] } = {}) {
+  const latestTryRun = getLatestLandingPatchTryRun({ patch, transactions });
+  const changeTimestamps = getPatchChangeTimestamps(patch, transactions);
+  const latestChangeTimestamp = changeTimestamps.length ? Math.max(...changeTimestamps) : 0;
+
+  if (!latestTryRun) {
+    return {
+      state: "missing",
+      latestTryRun: null,
+      warning: "No Treeherder try run was found in Phabricator comments.",
+    };
+  }
+
+  if (latestTryRun.timestamp && latestChangeTimestamp > latestTryRun.timestamp) {
+    return {
+      state: "stale",
+      latestTryRun,
+      warning: "Patch changes were posted after the latest Treeherder try run.",
+    };
+  }
+
+  return {
+    state: "current",
+    latestTryRun,
+    warning: "",
+  };
+}
+
+async function getLandingPatchTransactions(patch, phab = defaultPhab) {
+  if (!patch?.phid && !patch?.id) {
+    return [];
+  }
+
+  const response = await phab({
+    route: "transaction.search",
+    params: {
+      objectIdentifier: patch.phid || `D${patch.id}`,
+      limit: 100,
+    },
+  });
+
+  return normalizePhabricatorTransactions(response);
+}
+
+async function loadLandingPatchTryStatus({
+  patch,
+  phab = defaultPhab,
+}) {
+  try {
+    const transactions = await getLandingPatchTransactions(patch, phab);
+
+    return getLandingPatchTryStatus({ patch, transactions });
+  } catch (error) {
+    return {
+      state: "unknown",
+      latestTryRun: null,
+      warning: `Could not check Phabricator comments for Treeherder try runs: ${error?.message || error}`,
+    };
+  }
 }
 
 function throwIfLandingCanceled(session) {
@@ -142,9 +378,32 @@ function askLandingPrompt(session, prompt) {
 }
 
 function getChoiceLabel(prompt, answer) {
-  const choice = (prompt.choices || []).find((item) => item.id === answer);
+  const choice = [
+    ...(prompt.choices || []),
+    ...(prompt.actions || []),
+  ].find((item) => item.id === answer || item.mergeAnswer === answer);
 
   return choice?.label || answer;
+}
+
+function getPromptValidChoiceAnswers(prompt) {
+  const validChoices = new Set();
+
+  for (const choice of [...(prompt.choices || []), ...(prompt.actions || [])]) {
+    if (!choice || choice.separator) {
+      continue;
+    }
+
+    if (choice.id) {
+      validChoices.add(choice.id);
+    }
+
+    if (choice.mergeAnswer) {
+      validChoices.add(choice.mergeAnswer);
+    }
+  }
+
+  return validChoices;
 }
 
 export function answerGraphLandSessionPrompt(session, promptId, answer) {
@@ -169,9 +428,7 @@ export function answerGraphLandSessionPrompt(session, promptId, answer) {
     appendLandingOutput(session, `\n> ${value ? "yes" : "no"}\n`);
   } else if (prompt.type === "choice") {
     value = String(answer || "");
-    const validChoices = new Set((prompt.choices || [])
-      .filter((choice) => choice && !choice.separator)
-      .map((choice) => choice.id));
+    const validChoices = getPromptValidChoiceAnswers(prompt);
 
     if (!validChoices.has(value)) {
       const error = new Error("Unknown landing choice.");
@@ -291,6 +548,7 @@ async function getLandingBugs({
         ...patch,
         bugId: bug.id,
         reviewers,
+        landingTryStatus: await loadLandingPatchTryStatus({ patch, phab }),
       });
     }
   }
@@ -408,11 +666,33 @@ function removeLandingPatch(session, bug, patch, result) {
   session.bugs = session.bugs.filter((item) => String(item.id) !== String(bug.id));
 }
 
+function getPatchLinks(bug, patch) {
+  return [
+    {
+      label: `Bug ${bug.id}`,
+      url: `${BUGZILLA_BUG_URL}${bug.id}`,
+    },
+    {
+      label: `D${patch.id}`,
+      url: patch.uri,
+    },
+  ].filter((link) => link.url);
+}
+
+function getPatchReviewersLabel(patch) {
+  return (patch.reviewers || []).join(", ") || "none";
+}
+
+function getPatchStatusKind(patch) {
+  if (patch.statusName === "Accepted") {
+    return "accepted";
+  }
+
+  return "warning";
+}
+
 function getPatchSelectChoices(session) {
-  const choices = [
-    { id: "continue", label: "Continue", kind: "action" },
-    { id: "abort", label: "Abort", kind: "danger" },
-  ];
+  const choices = [];
 
   for (const bug of [...session.bugs].reverse()) {
     choices.push({
@@ -423,11 +703,18 @@ function getPatchSelectChoices(session) {
     for (const patch of getVisibleBugPatches(bug)) {
       choices.push({
         id: `patch:${bug.id}:${patch.id}`,
+        mergeAnswer: `merge:${bug.id}:${patch.id}`,
         label: `D${patch.id} [${patch.statusName || "Unknown"}] - ${patch.title || ""}`,
-        kind: patch.statusName === "Accepted" ? "accepted" : "warning",
+        kind: "patch-card",
+        statusKind: getPatchStatusKind(patch),
         bugId: bug.id,
+        bugSummary: bug.summary || "",
         patchId: patch.id,
+        title: patch.title || "",
         statusName: patch.statusName || "",
+        reviewers: patch.reviewers || [],
+        links: getPatchLinks(bug, patch),
+        tryStatus: patch.landingTryStatus || null,
       });
     }
   }
@@ -438,17 +725,8 @@ function getPatchSelectChoices(session) {
 function getPatchActionPrompt(bug, patch) {
   return {
     type: "patch-action",
-    links: [
-      {
-        label: `Bug ${bug.id}`,
-        url: `${BUGZILLA_BUG_URL}${bug.id}`,
-      },
-      {
-        label: `D${patch.id}`,
-        url: patch.uri,
-      },
-    ].filter((link) => link.url),
-    detail: `${patch.title || ""}\nStatus: ${patch.statusName || "Unknown"}\nReviewers: ${(patch.reviewers || []).join(", ") || "none"}`,
+    links: getPatchLinks(bug, patch),
+    detail: `${patch.title || ""}\nStatus: ${patch.statusName || "Unknown"}\nReviewers: ${getPatchReviewersLabel(patch)}`,
   };
 }
 
@@ -458,7 +736,13 @@ async function selectLandingPatches(session) {
       session,
       "Select a patch to land or an action.",
       getPatchSelectChoices(session),
-      { kind: "patch-select" }
+      {
+        kind: "patch-select",
+        actions: [
+          { id: "continue", label: "Continue", kind: "accepted" },
+          { id: "abort", label: "Abort", kind: "danger" },
+        ],
+      }
     );
 
     if (answer === "continue") {
@@ -469,13 +753,16 @@ async function selectLandingPatches(session) {
       throw new Error("Landing aborted.");
     }
 
-    const { bug, patch } = findLandingPatch(session, answer);
+    const patchAnswer = String(answer || "");
+    const { bug, patch } = findLandingPatch(session, patchAnswer);
 
     if (!bug || !patch) {
       throw new Error("Selected patch is no longer available.");
     }
 
-    const result = await runLandingPatchAction(session, bug, patch);
+    const result = patchAnswer.startsWith("merge:")
+      ? await mergeLandingPatch(session, patch)
+      : await runLandingPatchAction(session, bug, patch);
 
     if (result === "landed" || result === "skipped") {
       removeLandingPatch(session, bug, patch, result);

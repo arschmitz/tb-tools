@@ -258,8 +258,22 @@ tryDialog.querySelector(".try-cancel").addEventListener("click", () => {
     tryDialog.close();
   }
 });
-landStart.addEventListener("click", startGraphLandSession);
-landClose.addEventListener("click", cancelOrCloseLandDialog);
+landStart.addEventListener("click", () => {
+  if (landStart.dataset.landAnswer) {
+    answerLandPrompt(landStart.dataset.landAnswer);
+    return;
+  }
+
+  startGraphLandSession();
+});
+landClose.addEventListener("click", () => {
+  if (landClose.dataset.landAnswer) {
+    answerLandPrompt(landClose.dataset.landAnswer);
+    return;
+  }
+
+  cancelOrCloseLandDialog();
+});
 landInputForm.addEventListener("submit", submitLandInputPrompt);
 newPatchForm.addEventListener("submit", startGraphNewPatchSession);
 newPatchClose.addEventListener("click", cancelOrCloseNewPatchDialog);
@@ -275,15 +289,15 @@ testClose.addEventListener("click", () => {
 });
 testOutputTab.addEventListener("click", showTestOutputTab);
 landDialog.addEventListener("click", (event) => {
-  const button = event.target.closest(".land-choice");
+  const button = event.target.closest("[data-land-answer], .land-choice");
 
   if (!button) {
     return;
   }
 
   const answer = button.dataset.answerType === "boolean"
-    ? button.dataset.answer === "true"
-    : button.dataset.answer;
+    ? button.dataset.landAnswer === "true"
+    : button.dataset.landAnswer || button.dataset.answer;
 
   answerLandPrompt(answer);
 });
@@ -421,8 +435,28 @@ window.addEventListener("resize", () => {
 }, { passive: true });
 
 if (INTERACTIVE.enabled) {
+  function createClientId() {
+    if (window.crypto?.randomUUID) {
+      return window.crypto.randomUUID();
+    }
+
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  const clientId = createClientId();
+  let closeSignalSent = false;
+
+  function getClientPayload() {
+    return JSON.stringify({ token: INTERACTIVE.token, clientId });
+  }
+
   function sendCloseSignal() {
-    const payload = JSON.stringify({ token: INTERACTIVE.token });
+    if (closeSignalSent) {
+      return;
+    }
+
+    closeSignalSent = true;
+    const payload = getClientPayload();
 
     if (navigator.sendBeacon) {
       navigator.sendBeacon("/api/close", new Blob([payload], { type: "application/json" }));
@@ -437,20 +471,23 @@ if (INTERACTIVE.enabled) {
     });
   }
 
-  const heartbeat = setInterval(() => {
-    fetch("/api/ping", {
+  function sendHeartbeat() {
+    return fetch("/api/ping", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: INTERACTIVE.token }),
+      body: getClientPayload(),
       keepalive: true,
     }).catch(() => {});
-  }, 2000);
+  }
+
+  const heartbeat = setInterval(sendHeartbeat, 2000);
   const graphPoll = setInterval(pollGraphUpdates, INTERACTIVE.pollIntervalMs);
   const originMainStatusPoll = setInterval(
     refreshOriginMainStatus,
     Math.max(INTERACTIVE.pollIntervalMs, DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS)
   );
 
+  sendHeartbeat();
   refreshOriginMainStatus();
 
   window.addEventListener("pagehide", () => {
@@ -483,7 +520,6 @@ if (INTERACTIVE.enabled) {
     }
     sendCloseSignal();
   }, { once: true });
-  window.addEventListener("beforeunload", sendCloseSignal, { once: true });
 }
 
 restoreGraphPaneWidth(0);

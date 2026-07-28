@@ -506,6 +506,23 @@ export function buildGraphHtml({
     .land-choice.accepted { border-color: #2da44e; }
     .land-choice.warning { border-color: #bf8700; }
     .land-choice.danger { border-color: #cf222e; color: #9b1c1c; }
+    .land-choice-list.patch-card-list { gap: 8px; }
+    .land-patch-card { align-items: start; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) auto; padding: 10px; }
+    .land-patch-card.accepted { border-color: #2da44e; }
+    .land-patch-card.warning { border-color: #bf8700; }
+    .land-patch-content { display: grid; gap: 8px; min-width: 0; }
+    .land-patch-header { display: grid; gap: 3px; min-width: 0; }
+    .land-patch-title { color: #20242a; font-size: 13px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .land-patch-meta { color: #59616d; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .land-patch-links, .land-patch-try { align-items: center; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+    .land-patch-link { border: 1px solid #d0d7de; border-radius: 999px; color: #0969da; font-size: 12px; line-height: 1.2; padding: 4px 8px; text-decoration: none; white-space: nowrap; }
+    .land-patch-link:hover, .land-patch-link:focus { background: #f6f8fa; text-decoration: underline; }
+    .land-patch-link.try { background: #ddf4ff; border-color: #54aeff; }
+    .land-patch-warning { background: #fff8c5; border: 1px solid #bf8700; border-radius: 999px; color: #7d4e00; font-size: 12px; line-height: 1.2; max-width: 100%; overflow: hidden; padding: 4px 8px; text-overflow: ellipsis; white-space: nowrap; }
+    .land-patch-current { color: #59616d; font-size: 12px; }
+    .land-patch-merge { align-self: center; background: #1f5f9f; border: 1px solid #1f5f9f; border-radius: 4px; color: #fff; cursor: pointer; font-size: 13px; padding: 6px 10px; white-space: nowrap; }
+    .land-patch-merge:hover, .land-patch-merge:focus { background: #174a80; outline: none; }
+    .land-patch-merge:disabled { cursor: wait; opacity: 0.65; }
     .land-links { display: flex; flex-wrap: wrap; gap: 8px; }
     .land-links a { border: 1px solid #d0d7de; border-radius: 999px; color: #0969da; font-size: 13px; padding: 5px 9px; text-decoration: none; }
     .land-links a:hover, .land-links a:focus { background: #f6f8fa; text-decoration: underline; }
@@ -516,6 +533,8 @@ export function buildGraphHtml({
     .land-actions button, .land-start { border: 1px solid #b9c0cc; border-radius: 4px; cursor: pointer; font-size: 13px; padding: 6px 10px; }
     .land-start { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
     .land-close { background: #fff; color: #20242a; }
+    .land-close.danger, .land-start.danger { border-color: #cf222e; color: #9b1c1c; }
+    .land-close.danger { background: #fff; }
     .land-start:disabled, .land-input-submit:disabled { cursor: wait; opacity: 0.65; }
     .land-output { background: #f6f8fa; border: 1px solid #d6dae1; border-radius: 6px; color: #24292f; font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; max-height: min(36vh, 300px); overflow: auto; padding: 10px; white-space: pre-wrap; }
     .pretty-file { background: var(--diff-bg); border: 1px solid var(--diff-border); border-radius: 6px; margin: 0 0 12px; overflow: hidden; }
@@ -567,6 +586,8 @@ export function buildGraphHtml({
       .workspace { grid-template-columns: 1fr; }
       .pane-resizer { display: none; }
       .diff-viewer { position: static; max-height: none; }
+      .land-patch-card { grid-template-columns: 1fr; }
+      .land-patch-merge { justify-self: end; }
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -767,10 +788,22 @@ export function buildGraphHtml({
       .land-choice { background: #191d23; border-color: #424b59; color: #f1f3f6; }
       .land-choice:hover, .land-choice:focus { background: #161b22; }
       .land-choice.danger { color: #ff9f9f; }
+      .land-patch-card { background: #191d23; border-color: #424b59; }
+      .land-patch-card.accepted { border-color: #2ea043; }
+      .land-patch-card.warning { border-color: #9e6a03; }
+      .land-patch-title { color: #f1f3f6; }
+      .land-patch-meta, .land-patch-current { color: #acb4c0; }
+      .land-patch-link { border-color: #424b59; color: #79c0ff; }
+      .land-patch-link:hover, .land-patch-link:focus { background: #161b22; }
+      .land-patch-link.try { background: #0b2538; border-color: #4b9eff; }
+      .land-patch-warning { background: #341a00; border-color: #9e6a03; color: #f2cc60; }
+      .land-patch-merge { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .land-patch-merge:hover, .land-patch-merge:focus { background: #79c0ff; }
       .land-links a { border-color: #424b59; color: #79c0ff; }
       .land-links a:hover, .land-links a:focus { background: #161b22; }
       .land-start, .land-input-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
       .land-close { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .land-close.danger, .land-start.danger { border-color: #ff9f9f; color: #ff9f9f; }
     }
   </style>
 </head>

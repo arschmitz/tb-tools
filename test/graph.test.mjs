@@ -24,6 +24,8 @@ import {
   getGraphOriginMainStatus,
   getGraphRustUpstreamStatus,
   getGraphTryRunsForCommit,
+  getLandingPatchTryStatus,
+  getLatestLandingPatchTryRun,
   getCheckoutCommitPage,
   getCheckoutGraphData,
   getCheckoutGraphMetadata,
@@ -31,6 +33,7 @@ import {
   getWorkingTreeCommits,
   getWorkingTreeDiff,
   getGraphOutputPath,
+  getTreeherderUrlsFromText,
   isWorkingTreeCommitHash,
   markGraphBugForCheckin,
   cleanGraphTestTerminalOutput,
@@ -728,6 +731,77 @@ test("runGraphTrySubmission records mach try output for the current commit", asy
     commit: { hash: "rebased456", subject: "Bug 123 - Try me" },
   });
   assert.equal(runs[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=abc");
+});
+
+test("landing patch try status reads Treeherder links from Phabricator comments", () => {
+  assert.deepEqual(
+    getTreeherderUrlsFromText("any comment https://treeherder.mozilla.org/jobs?repo=try&revision=abc."),
+    ["https://treeherder.mozilla.org/jobs?repo=try&revision=abc"]
+  );
+
+  const transactions = [
+    {
+      type: "comment",
+      dateCreated: 1700000000,
+      comments: [{
+        content: {
+          raw: "Green enough: https://treeherder.mozilla.org/jobs?repo=try&revision=old",
+        },
+      }],
+    },
+    {
+      type: "comment",
+      dateCreated: 1700000600,
+      comments: [{
+        content: {
+          raw: "Latest remote run https://treeherder.mozilla.org/jobs?repo=try-comm-central&revision=new",
+        },
+      }],
+    },
+  ];
+  const latest = getLatestLandingPatchTryRun({ transactions });
+
+  assert.equal(
+    latest.url,
+    "https://treeherder.mozilla.org/jobs?repo=try-comm-central&revision=new"
+  );
+  assert.deepEqual(getLandingPatchTryStatus({ transactions }), {
+    state: "current",
+    latestTryRun: latest,
+    warning: "",
+  });
+});
+
+test("landing patch try status warns for missing and stale Treeherder runs", () => {
+  assert.deepEqual(getLandingPatchTryStatus(), {
+    state: "missing",
+    latestTryRun: null,
+    warning: "No Treeherder try run was found in Phabricator comments.",
+  });
+
+  const status = getLandingPatchTryStatus({
+    patch: {
+      diffs: [{
+        dateCreated: 1700000800,
+      }],
+    },
+    transactions: [{
+      type: "comment",
+      dateCreated: 1700000600,
+      comments: [{
+        content: {
+          raw: "https://treeherder.mozilla.org/jobs?repo=try&revision=before-diff",
+        },
+      }],
+    }],
+  });
+
+  assert.equal(status.state, "stale");
+  assert.equal(
+    status.latestTryRun.url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=before-diff"
+  );
+  assert.equal(status.warning, "Patch changes were posted after the latest Treeherder try run.");
 });
 
 test("chooseCheckoutBranch prefers the current branch when available", () => {
@@ -3426,13 +3500,18 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /landClose\.disabled = false/);
   assert.match(client, /landClose\.textContent = busy \? "Cancel" : "Close"/);
   assert.match(client, /\/api\/land\/" \+ encodeURIComponent\(sessionId\) \+ "\/cancel"/);
-  assert.match(client, /landClose\.addEventListener\("click", cancelOrCloseLandDialog\)/);
+  assert.match(client, /landClose\.addEventListener\("click", \(\) =>/);
+  assert.match(client, /landClose\.dataset\.landAnswer/);
   assert.match(client, /window\.clearTimeout\(uiState\.originMainStatusRetryTimer\)/);
   assert.match(client, /snapshotLimit: getLoadedGitCommitLimit\(graphStates\[graphIndex\]\)/);
   assert.match(client, /applyGraphSnapshot\(graphIndex, result\.snapshot, \{ force: true \}\)/);
   assert.match(client, /\/api\/close/);
   assert.match(client, /\/api\/ping/);
-  assert.match(client, /beforeunload/);
+  assert.match(client, /clientId/);
+  assert.match(client, /function sendHeartbeat/);
+  assert.match(client, /sendHeartbeat\(\)/);
+  assert.match(client, /window\.addEventListener\("pagehide"/);
+  assert.doesNotMatch(client, /beforeunload/);
   assert.match(html, /checkout-commit/);
   assert.match(html, /amend-commit/);
   assert.match(html, /submit-commit/);
@@ -4599,6 +4678,7 @@ test("interactive graph server lands patches through browser prompts", async (t)
         return {
           result: [{
             id: 987654,
+            phid: "PHID-DREV-landing",
             uri: "https://phabricator.services.mozilla.com/D987654",
             statusName: "Accepted",
             title: "Bug 123456 - Fix the landing flow. r=#reviewers",
@@ -4606,6 +4686,29 @@ test("interactive graph server lands patches through browser prompts", async (t)
               "PHID-USER-reviewer": true,
             },
           }],
+        };
+      }
+
+      if (route === "transaction.search") {
+        return {
+          result: {
+            data: [
+              {
+                type: "comment",
+                dateCreated: 1700000000,
+                comments: [{
+                  content: {
+                    raw: "Treeherder https://treeherder.mozilla.org/jobs?repo=try&revision=landing",
+                  },
+                }],
+              },
+              {
+                type: "update",
+                dateCreated: 1700000600,
+                summary: "updated the diff",
+              },
+            ],
+          },
         };
       }
 
@@ -4706,14 +4809,20 @@ test("interactive graph server lands patches through browser prompts", async (t)
 
   const statusUrl = new URL(`api/land/${start.id}?token=secret`, serverInfo.url);
   let session = await waitForLandSession(statusUrl, (item) => item.prompt?.kind === "patch-select");
-  assert.equal(session.prompt.choices.some((choice) => choice.id === "patch:123456:987654"), true);
+  const patchChoice = session.prompt.choices.find((choice) => choice.id === "patch:123456:987654");
 
-  session = await answer(session, "patch:123456:987654");
-  session = await waitForLandSession(statusUrl, (item) => item.prompt?.type === "patch-action");
-  assert.match(session.prompt.detail, /Reviewers: alice/);
-  assert.equal(session.prompt.links[0].url, "https://bugzilla.mozilla.org/show_bug.cgi?id=123456");
+  assert.equal(Boolean(patchChoice), true);
+  assert.equal(patchChoice.mergeAnswer, "merge:123456:987654");
+  assert.equal(patchChoice.links[0].url, "https://bugzilla.mozilla.org/show_bug.cgi?id=123456");
+  assert.equal(patchChoice.links[1].url, "https://phabricator.services.mozilla.com/D987654");
+  assert.equal(patchChoice.tryStatus.state, "stale");
+  assert.equal(patchChoice.tryStatus.latestTryRun.url, "https://treeherder.mozilla.org/jobs?repo=try&revision=landing");
+  assert.equal(session.prompt.actions.some((action) => action.id === "continue"), true);
+  assert.equal(session.prompt.actions.some((action) => action.id === "abort"), true);
+  assert.equal(session.prompt.choices.some((choice) => choice.id === "continue"), false);
+  assert.equal(session.prompt.choices.some((choice) => choice.id === "abort"), false);
 
-  session = await answer(session, "merge");
+  session = await answer(session, "merge:123456:987654");
   session = await waitForLandSession(statusUrl, (item) => item.prompt?.message === "Do you want to run lint?");
   assert.equal(calls.some((call) => call.cmd === "moz-phab" && call.args.join(" ") === "patch D987654 --skip-dependencies --apply-to here"), true);
   assert.equal(calls.some((call) => (
@@ -4997,6 +5106,73 @@ test("interactive graph server closes when page heartbeats stop", async (t) => {
   await new Promise((resolve) => serverInfo.server.once("close", resolve));
   assert.equal(serverInfo.server.listening, false);
   assert.equal(serverInfo.server.closeReason, "browser heartbeat timed out after 1 second");
+});
+
+test("interactive graph server survives refreshes and multiple browser clients", async (t) => {
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    heartbeatIntervalMs: 10,
+    heartbeatTimeoutMs: 500,
+    clientDisconnectGraceMs: 80,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    runCommand: async () => "",
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  async function ping(clientId) {
+    const response = await fetch(new URL("api/ping", serverInfo.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret", clientId }),
+    });
+
+    assert.equal(response.ok, true);
+    return response.json();
+  }
+
+  async function close(clientId) {
+    const response = await fetch(new URL("api/close", serverInfo.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret", clientId }),
+    });
+
+    assert.equal(response.ok, true);
+    return response.json();
+  }
+
+  assert.deepEqual(await ping("tab-one"), { ok: true, clientId: "tab-one" });
+  assert.deepEqual(await ping("tab-two"), { ok: true, clientId: "tab-two" });
+  assert.deepEqual(await close("tab-one"), { ok: true, remainingClients: 1 });
+
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(serverInfo.server.listening, true);
+
+  assert.deepEqual(await close("tab-two"), { ok: true, remainingClients: 0 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(await ping("tab-three"), { ok: true, clientId: "tab-three" });
+
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(serverInfo.server.listening, true);
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  assert.deepEqual(await close("tab-three"), { ok: true, remainingClients: 0 });
+  await closePromise;
+
+  assert.equal(serverInfo.server.listening, false);
+  assert.equal(serverInfo.server.closeReason, "all browser tabs closed");
 });
 
 test("waitForInteractiveServerClose routes signals through the interactive shutdown hook", async () => {
