@@ -131,7 +131,7 @@ export async function showDiff(graph, index, commit) {
   setDiffText(body, diff.text || "No diff for this commit.");
 }
 
-export function getCommitActionDetails(action, label, hash) {
+export function getCommitActionDetails(action, label, hash, { workingTree = false } = {}) {
   const shortHash = hash.substring(0, 12);
 
   if (action === "checkout") {
@@ -149,6 +149,13 @@ export function getCommitActionDetails(action, label, hash) {
   }
 
   if (action === "prune") {
+    if (workingTree) {
+      return {
+        confirm: "Discard all uncommitted changes in " + label + "? This will reset the current checkout and remove untracked files.",
+        progress: "Discarding uncommitted changes...",
+      };
+    }
+
     return {
       confirm: "Prune commit " + shortHash + " from local branch history in " + label + "?",
       progress: "Pruning commit...",
@@ -161,8 +168,8 @@ export function getCommitActionDetails(action, label, hash) {
   };
 }
 
-export async function runCommitAction(action, { graphIndex, hash, label }) {
-  const details = getCommitActionDetails(action, label, hash);
+export async function runCommitAction(action, { graphIndex, hash, label, workingTree = false }) {
+  const details = getCommitActionDetails(action, label, hash, { workingTree });
   const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
 
   if (!confirm(details.confirm)) {

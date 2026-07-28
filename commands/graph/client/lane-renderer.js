@@ -353,28 +353,37 @@ export function hideCommitContextMenu() {
 }
 
 export function showCommitContextMenu(event, index, commit) {
-  if (!INTERACTIVE.enabled || isWorkingTreeCommit(commit)) {
+  if (!INTERACTIVE.enabled) {
     return;
   }
 
   event.preventDefault();
   event.stopPropagation();
+  const workingTree = isWorkingTreeCommit(commit);
 
   uiState.contextMenuState = {
     graphIndex: index,
     hash: commit.hash,
     label: graphStates[index].graph.label,
     subject: commit.subject,
+    workingTree,
   };
-  contextMenu.querySelector(".context-menu-title").textContent =
-    commit.hash.substring(0, 12) + " " + commit.subject;
+  contextMenu.querySelectorAll("button[data-action]").forEach((button) => {
+    const hidden = workingTree ? button.dataset.action !== "prune" : false;
+
+    button.hidden = hidden;
+    button.style.display = hidden ? "none" : "";
+  });
+  contextMenu.querySelector(".context-menu-title").textContent = workingTree
+    ? "Uncommitted changes"
+    : commit.hash.substring(0, 12) + " " + commit.subject;
   contextMenu.hidden = false;
 
   const x = Math.max(8, Math.min(event.clientX, window.innerWidth - contextMenu.offsetWidth - 8));
   const y = Math.max(8, Math.min(event.clientY, window.innerHeight - contextMenu.offsetHeight - 8));
   contextMenu.style.left = x + "px";
   contextMenu.style.top = y + "px";
-  contextMenu.querySelector("button").focus();
+  contextMenu.querySelector("button:not([hidden])")?.focus();
 }
 
 export function ensureCommitRowHitbox(commitGroup, width) {

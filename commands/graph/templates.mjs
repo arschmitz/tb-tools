@@ -316,6 +316,7 @@ export function buildGraphHtml({
     .context-menu[hidden] { display: none; }
     .context-menu-title { color: #59616d; font-size: 12px; max-width: 260px; overflow: hidden; padding: 6px 8px 4px; text-overflow: ellipsis; white-space: nowrap; }
     .context-menu button { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: pointer; display: block; font: inherit; padding: 7px 8px; text-align: left; width: 100%; }
+    .context-menu button[hidden] { display: none; }
     .context-menu button:hover, .context-menu button:focus { background: rgba(31, 95, 159, 0.1); outline: none; }
     .context-menu button[data-action="prune"] { color: #9b1c1c; }
     .amend-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(720px, calc(100vw - 32px)); padding: 0; width: 680px; }

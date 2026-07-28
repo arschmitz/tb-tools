@@ -2720,6 +2720,55 @@ export async function pruneCommitBranches({
   };
 }
 
+export async function discardWorkingTreeChanges({
+  graph,
+  hash,
+  runCommand = run,
+}) {
+  ensureKnownGraphCommit(graph, hash);
+
+  if (!isWorkingTreeCommitHash(hash)) {
+    const error = new Error("Only uncommitted changes can be discarded with this action.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  await runCommand({
+    cmd: "git",
+    args: ["reset", "--hard", "HEAD"],
+    cwd: graph.path,
+    silent: true,
+  });
+  await runCommand({
+    cmd: "git",
+    args: ["clean", "-fd"],
+    cwd: graph.path,
+    silent: true,
+  });
+
+  const [branch, currentHash] = await Promise.all([
+    getCurrentGraphBranch(graph, runCommand),
+    runCommand({
+      cmd: "git",
+      args: ["rev-parse", "HEAD"],
+      cwd: graph.path,
+      capture: true,
+      silent: true,
+    }),
+  ]);
+  graph.branch = branch.trim() || "(detached)";
+
+  return {
+    action: "prune",
+    label: graph.label,
+    path: graph.path,
+    hash,
+    branch: graph.branch,
+    currentHash: currentHash.trim(),
+    message: `${graph.label} discarded uncommitted changes.`,
+  };
+}
+
 export async function checkoutGraphCommit({
   graphs,
   graphIndex,
@@ -2748,6 +2797,10 @@ export async function runGraphCommitAction({
     case "rebase":
       return rebaseCommit({ graph, hash, runCommand });
     case "prune":
+      if (isWorkingTreeCommitHash(hash)) {
+        return discardWorkingTreeChanges({ graph, hash, runCommand });
+      }
+
       return pruneCommitBranches({ graph, hash, runCommand });
     default: {
       const error = new Error(`Unknown graph action: ${action}`);

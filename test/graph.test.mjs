@@ -20,6 +20,7 @@ import {
   getGraphCommitMessage,
   getGraphCommitIntegrationStatus,
   getGraphCurrentCommitMessage,
+  discardWorkingTreeChanges,
   getGraphOriginMainStatus,
   getGraphRustUpstreamStatus,
   getGraphTryRunsForCommit,
@@ -46,6 +47,7 @@ import {
   rebaseCommit,
   recordGraphTryRun,
   runGraphTrySubmission,
+  runGraphCommitAction,
   getInteractiveYesNoPrompt,
   runGraphMachActionSession,
   runGraphRepositoryUpdate,
@@ -2595,6 +2597,79 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
   ]);
 });
 
+test("discardWorkingTreeChanges resets tracked changes and removes untracked files", async () => {
+  const calls = [];
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "main",
+    knownHashes: new Set(["uncommitted-changes"]),
+  };
+  const result = await discardWorkingTreeChanges({
+    graph,
+    hash: "uncommitted-changes",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm discarded uncommitted changes.");
+  assert.equal(result.currentHash, "abc123");
+  assert.equal(result.branch, "main");
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["reset", "--hard", "HEAD"],
+    ["clean", "-fd"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("runGraphCommitAction prunes uncommitted changes by discarding the working tree", async () => {
+  const calls = [];
+  const result = await runGraphCommitAction({
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["uncommitted-changes"]),
+    }],
+    graphIndex: 0,
+    hash: "uncommitted-changes",
+    action: "prune",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm discarded uncommitted changes.");
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["reset", "--hard", "HEAD"],
+    ["clean", "-fd"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
 test("checkoutCommit refuses dirty working trees", async () => {
   await assert.rejects(
     checkoutCommit({
@@ -2732,6 +2807,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /\.commit-row\.working-tree \.commit-row-hitbox/);
   assert.match(html, /\.commit-row\.current \.commit-row-hitbox/);
   assert.match(html, /\.context-menu button\[data-action="prune"\]/);
+  assert.match(html, /\.context-menu button\[hidden\] \{ display: none; \}/);
   assert.match(html, /\.checkout-commit, \.amend-commit, \.submit-commit, \.load-more/);
   assert.match(html, /\.amend-dialog \{/);
   assert.match(html, /\.amend-message \{/);
@@ -2899,6 +2975,10 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /button\.dataset\.answer === "true"/);
   assert.match(client, /scheduleGraphEnhancements\(index\)/);
   assert.match(client, /Branch tips will check out the branch/);
+  assert.match(client, /Discard all uncommitted changes/);
+  assert.match(client, /button\.dataset\.action !== "prune"/);
+  assert.match(client, /button\.style\.display = hidden \? "none" : ""/);
+  assert.match(client, /Uncommitted changes/);
   assert.match(client, /commitGroup\.addEventListener\("contextmenu"/);
   assert.match(client, /runCommitAction\(button\.dataset\.action, actionState\)/);
   assert.doesNotMatch(client, /window\.[A-Z][A-Za-z]+JS/);
