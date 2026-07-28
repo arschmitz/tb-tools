@@ -2534,6 +2534,8 @@ test("pruneCommitBranches drops a commit from the current branch history", async
     ["branch", "--show-current"],
     ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
     ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
     ["rev-list", "--parents", "-n", "1", "abc123"],
     ["rebase", "--onto", "parent123", "abc123", "main"],
     ["branch", "--show-current"],
@@ -2590,10 +2592,322 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
     ["branch", "--show-current"],
     ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
     ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
     ["rev-list", "--parents", "-n", "1", "abc123"],
     ["rebase", "--onto", "parent123", "abc123", "main"],
     ["branch", "--show-current"],
     ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("pruneCommitBranches drops a tb-tools checkpoint ref tip", async () => {
+  const calls = [];
+  const result = await pruneCommitBranches({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "(detached)",
+      knownHashes: new Set(["abc123"]),
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "";
+      }
+
+      if (command.args[0] === "for-each-ref" && command.args.includes("refs/heads")) {
+        return "";
+      }
+
+      if (command.args[0] === "for-each-ref" && command.args.includes("refs/tb-tools")) {
+        return "refs/tb-tools/rust-checkpoint\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "abc123 parent123\n";
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        return "abc123\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "current789\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm pruned abc123 from ref refs/tb-tools/rust-checkpoint.");
+  assert.deepEqual(result.branches, []);
+  assert.deepEqual(result.refs, [{ ref: "refs/tb-tools/rust-checkpoint", hash: "parent123" }]);
+  assert.equal(result.parent, "parent123");
+  assert.equal(result.currentHash, "current789");
+  assert.equal(result.branch, "(detached)");
+  assert.equal(result.detached, true);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["branch", "--show-current"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
+    ["rev-list", "--parents", "-n", "1", "abc123"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+    ["rev-parse", "--verify", "refs/tb-tools/rust-checkpoint"],
+    ["update-ref", "refs/tb-tools/rust-checkpoint", "parent123", "abc123"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("pruneCommitBranches rewrites a tb-tools checkpoint ref stack", async () => {
+  const calls = [];
+  const result = await pruneCommitBranches({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["abc123"]),
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "for-each-ref" && command.args.includes("refs/heads")) {
+        return "";
+      }
+
+      if (command.args[0] === "for-each-ref" && command.args.includes("refs/tb-tools")) {
+        return command.args.includes("--points-at")
+          ? ""
+          : "refs/tb-tools/stack\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "abc123 parent123\n";
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        return "tip789\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return calls.filter((call) => call.args[0] === "rev-parse").length === 3
+          ? "rewritten456\n"
+          : "current789\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm pruned abc123 from ref refs/tb-tools/stack.");
+  assert.deepEqual(result.branches, []);
+  assert.deepEqual(result.refs, [{ ref: "refs/tb-tools/stack", hash: "rewritten456" }]);
+  assert.equal(result.parent, "parent123");
+  assert.equal(result.currentHash, "current789");
+  assert.equal(result.branch, "main");
+  assert.equal(result.detached, false);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["branch", "--show-current"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
+    ["rev-list", "--parents", "-n", "1", "abc123"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+    ["rev-parse", "--verify", "refs/tb-tools/stack"],
+    ["switch", "--detach", "tip789"],
+    ["rebase", "--onto", "parent123", "abc123", "HEAD"],
+    ["rev-parse", "HEAD"],
+    ["update-ref", "refs/tb-tools/stack", "rewritten456", "tip789"],
+    ["switch", "main"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("pruneCommitBranches drops a commit from detached current history", async () => {
+  const calls = [];
+  const result = await pruneCommitBranches({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "(detached)",
+      knownHashes: new Set(["abc123"]),
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        return "";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "abc123 parent123\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return calls.filter((call) => call.args[0] === "rev-parse").length === 1
+          ? "tip789\n"
+          : "rebased456\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm pruned abc123 from current checkout.");
+  assert.deepEqual(result.branches, []);
+  assert.equal(result.parent, "parent123");
+  assert.equal(result.currentHash, "rebased456");
+  assert.equal(result.branch, "(detached)");
+  assert.equal(result.detached, true);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["branch", "--show-current"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
+    ["rev-list", "--parents", "-n", "1", "abc123"],
+    ["rev-parse", "HEAD"],
+    ["merge-base", "--is-ancestor", "abc123", "HEAD"],
+    ["rebase", "--onto", "parent123", "abc123", "HEAD"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("pruneCommitBranches drops a detached HEAD tip commit", async () => {
+  const calls = [];
+  const result = await pruneCommitBranches({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "(detached)",
+      knownHashes: new Set(["abc123"]),
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        return "";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "abc123 parent123\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return calls.filter((call) => call.args[0] === "rev-parse").length === 1
+          ? "abc123\n"
+          : "parent123\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm pruned abc123 from current checkout.");
+  assert.deepEqual(result.branches, []);
+  assert.equal(result.parent, "parent123");
+  assert.equal(result.currentHash, "parent123");
+  assert.equal(result.branch, "(detached)");
+  assert.equal(result.detached, true);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["branch", "--show-current"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
+    ["rev-list", "--parents", "-n", "1", "abc123"],
+    ["rev-parse", "HEAD"],
+    ["switch", "--detach", "parent123"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+  ]);
+});
+
+test("pruneCommitBranches rejects an unbranched commit outside the current checkout", async () => {
+  const calls = [];
+  await assert.rejects(
+    pruneCommitBranches({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "(detached)",
+        knownHashes: new Set(["abc123"]),
+      },
+      hash: "abc123",
+      runCommand: async (command) => {
+        calls.push(command);
+
+        if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+          return "";
+        }
+
+        if (command.args[0] === "for-each-ref") {
+          return "";
+        }
+
+        if (command.args[0] === "rev-list") {
+          return "abc123 parent123\n";
+        }
+
+        if (command.args[0] === "rev-parse") {
+          return "tip789\n";
+        }
+
+        if (command.args[0] === "merge-base") {
+          const error = new Error("not an ancestor");
+          error.code = 1;
+          throw error;
+        }
+
+        return "";
+      },
+    }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.match(error.message, /No local branches or the current checkout contain abc123/);
+      return true;
+    },
+  );
+
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["status", "--porcelain"],
+    ["branch", "--show-current"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
+    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
+    ["rev-list", "--parents", "-n", "1", "abc123"],
+    ["rev-parse", "HEAD"],
+    ["merge-base", "--is-ancestor", "abc123", "HEAD"],
   ]);
 });
 
@@ -2875,6 +3189,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function renderSubmitSession/);
   assert.match(client, /function answerSubmitPrompt/);
   assert.match(client, /function confirmRemoteBuildRustWarning/);
+  assert.doesNotMatch(client, /function confirmRemoteBuildRustWarning[\s\S]*?refreshOriginMainStatus\(\{ force: true \}\)[\s\S]*?Remote builds may fail/);
   assert.match(client, /Rust dependencies are out of sync with Firefox remote main/);
   assert.match(client, /function scheduleOriginMainStatusRetry/);
   assert.match(client, /originMainStatusRetryTimer/);
@@ -3099,7 +3414,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /function openPatchDialog/);
   assert.match(client, /openPatchDialog\(\)/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("the try run"\)/);
-  assert.match(client, /await confirmRemoteBuildRustWarning\("land patches"\)/);
+  assert.doesNotMatch(client, /confirmRemoteBuildRustWarning\("land patches"\)/);
   assert.match(client, /snapshotLimits: getSnapshotLimits\(\)/);
   assert.match(client, /await promptForPostUpdateMachAction\(\)/);
   assert.match(client, /await startGraphMachAction\("run"\)/);

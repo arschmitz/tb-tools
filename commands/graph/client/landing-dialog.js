@@ -16,7 +16,6 @@ import {
 } from "./config.js";
 import {
   applyGraphSnapshots,
-  confirmRemoteBuildRustWarning,
   getSnapshotLimits,
   hasActiveCommandSession,
   hasActiveLandSession,
@@ -286,10 +285,6 @@ export async function cancelOrCloseLandDialog() {
 export async function startGraphLandSession() {
   if (hasActiveCommandSession()) {
     alert("A command is already active.");
-    return;
-  }
-
-  if (!await confirmRemoteBuildRustWarning("land patches")) {
     return;
   }
 

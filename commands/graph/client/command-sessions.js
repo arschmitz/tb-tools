@@ -445,8 +445,6 @@ export function getRustRemoteBuildWarning(status = uiState.rustUpstreamStatus) {
 }
 
 export async function confirmRemoteBuildRustWarning(actionLabel) {
-  await refreshOriginMainStatus({ force: true });
-
   const warning = getRustRemoteBuildWarning();
   if (!warning) {
     return true;

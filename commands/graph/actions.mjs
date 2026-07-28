@@ -423,6 +423,26 @@ async function getLocalBranchesContainingCommit(graph, hash, runCommand) {
   });
 }
 
+async function getToolRefsAtCommit(graph, hash, runCommand) {
+  return runCommand({
+    cmd: "git",
+    args: ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", hash, "refs/tb-tools"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+}
+
+async function getToolRefsContainingCommit(graph, hash, runCommand) {
+  return runCommand({
+    cmd: "git",
+    args: ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", hash, "refs/tb-tools"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+}
+
 async function getCurrentGraphBranch(graph, runCommand) {
   const branch = await runCommand({
     cmd: "git",
@@ -450,6 +470,24 @@ async function getCommitParents(graph, hash, runCommand) {
   }
 
   return parents;
+}
+
+function choosePruneRefs({
+  containingRefs = "",
+  tipRefs = "",
+} = {}) {
+  const containing = parseBranchRefs(containingRefs);
+  const tips = parseBranchRefs(tipRefs).filter((ref) => containing.includes(ref));
+
+  if (tips.length) {
+    return [...new Set(tips)];
+  }
+
+  if (containing.length === 1) {
+    return containing;
+  }
+
+  return [];
 }
 
 async function getRebaseCommitStack(graph, hash, branch, runCommand) {
@@ -485,6 +523,58 @@ export async function getCurrentGraphBase(graph, runCommand) {
     branch,
     hash: hash.trim(),
   };
+}
+
+async function getCurrentGraphHeadHash(graph, runCommand) {
+  const hash = await runCommand({
+    cmd: "git",
+    args: ["rev-parse", "HEAD"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+
+  return hash.trim();
+}
+
+async function isCommitReachableFromCurrentHead(graph, hash, runCommand) {
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["merge-base", "--is-ancestor", hash, "HEAD"],
+      cwd: graph.path,
+      silent: true,
+    });
+    return true;
+  } catch (error) {
+    if (error?.code === 1) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function getRefHash(graph, ref, runCommand) {
+  const hash = await runCommand({
+    cmd: "git",
+    args: ["rev-parse", "--verify", ref],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+
+  return hash.trim();
+}
+
+async function restoreGraphCheckout(graph, base, runCommand) {
+  await runCommand({
+    cmd: "git",
+    args: base.branch
+      ? ["switch", base.branch]
+      : ["switch", "--detach", base.hash],
+    cwd: graph.path,
+    silent: true,
+  });
 }
 
 function normalizeGraphUpdateMode(mode = GRAPH_UPDATE_MODE_UPDATE) {
@@ -2651,10 +2741,19 @@ export async function pruneCommitBranches({
 
   await ensureCleanGraph(graph, runCommand);
 
-  const [currentBranch, branchRefs, containingBranchRefs, parents] = await Promise.all([
+  const [
+    currentBranch,
+    branchRefs,
+    containingBranchRefs,
+    toolTipRefs,
+    containingToolRefs,
+    parents,
+  ] = await Promise.all([
     getCurrentGraphBranch(graph, runCommand),
     getLocalBranchesAtCommit(graph, hash, runCommand),
     getLocalBranchesContainingCommit(graph, hash, runCommand),
+    getToolRefsAtCommit(graph, hash, runCommand),
+    getToolRefsContainingCommit(graph, hash, runCommand),
     getCommitParents(graph, hash, runCommand),
   ]);
   const containingBranches = parseBranchRefs(containingBranchRefs);
@@ -2663,18 +2762,11 @@ export async function pruneCommitBranches({
     tipRefs: branchRefs,
     currentBranch,
   });
-
-  if (!containingBranches.length) {
-    const error = new Error(`No local branches contain ${hash.slice(0, 12)}.`);
-    error.statusCode = 409;
-    throw error;
-  }
-
-  if (!branches.length) {
-    const error = new Error(`Commit ${hash.slice(0, 12)} is contained by multiple local branches (${containingBranches.join(", ")}). Check out the branch to prune and try again.`);
-    error.statusCode = 409;
-    throw error;
-  }
+  const containingToolRefNames = parseBranchRefs(containingToolRefs);
+  const toolRefs = choosePruneRefs({
+    containingRefs: containingToolRefs,
+    tipRefs: toolTipRefs,
+  });
 
   if (parents.length !== 1) {
     const error = new Error(parents.length
@@ -2685,6 +2777,141 @@ export async function pruneCommitBranches({
   }
 
   const parent = parents[0];
+
+  if (!containingBranches.length) {
+    if (containingToolRefNames.length) {
+      if (!toolRefs.length) {
+        const error = new Error(`Commit ${hash.slice(0, 12)} is contained by multiple tb-tools refs (${containingToolRefNames.join(", ")}). Clean up old refs or leave one checkpoint containing the commit, then try again.`);
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const base = await getCurrentGraphBase(graph, runCommand);
+      const rewrittenRefs = [];
+
+      for (const ref of toolRefs) {
+        const refHash = await getRefHash(graph, ref, runCommand);
+
+        if (refHash === hash) {
+          await runCommand({
+            cmd: "git",
+            args: ["update-ref", ref, parent, refHash],
+            cwd: graph.path,
+            silent: true,
+          });
+          rewrittenRefs.push({ ref, hash: parent });
+          continue;
+        }
+
+        let shouldRestoreCheckout = true;
+        let rebaseCompleted = false;
+        let rewrittenHash = "";
+
+        try {
+          await runCommand({
+            cmd: "git",
+            args: ["switch", "--detach", refHash],
+            cwd: graph.path,
+            silent: true,
+          });
+          await runCommand({
+            cmd: "git",
+            args: ["rebase", "--onto", parent, hash, "HEAD"],
+            cwd: graph.path,
+            silent: true,
+          });
+          rebaseCompleted = true;
+          rewrittenHash = await getCurrentGraphHeadHash(graph, runCommand);
+          await runCommand({
+            cmd: "git",
+            args: ["update-ref", ref, rewrittenHash, refHash],
+            cwd: graph.path,
+            silent: true,
+          });
+        } catch (error) {
+          shouldRestoreCheckout = rebaseCompleted;
+          throw error;
+        } finally {
+          if (shouldRestoreCheckout) {
+            await restoreGraphCheckout(graph, base, runCommand);
+          }
+        }
+
+        rewrittenRefs.push({ ref, hash: rewrittenHash });
+      }
+
+      const [newBranch, newCurrentHash] = await Promise.all([
+        getCurrentGraphBranch(graph, runCommand),
+        getCurrentGraphHeadHash(graph, runCommand),
+      ]);
+      graph.branch = newBranch.trim() || "(detached)";
+
+      return {
+        action: "prune",
+        label: graph.label,
+        path: graph.path,
+        hash,
+        branches: [],
+        refs: rewrittenRefs,
+        parent,
+        currentHash: newCurrentHash,
+        branch: graph.branch,
+        detached: !newBranch.trim(),
+        message: `${graph.label} pruned ${hash.slice(0, 12)} from ${toolRefs.length === 1 ? "ref" : "refs"} ${toolRefs.join(", ")}.`,
+      };
+    }
+
+    const currentHead = await getCurrentGraphHeadHash(graph, runCommand);
+
+    if (currentHead === hash) {
+      await runCommand({
+        cmd: "git",
+        args: ["switch", "--detach", parent],
+        cwd: graph.path,
+        silent: true,
+      });
+    } else {
+      const reachable = await isCommitReachableFromCurrentHead(graph, hash, runCommand);
+
+      if (!reachable) {
+        const error = new Error(`No local branches or the current checkout contain ${hash.slice(0, 12)}.`);
+        error.statusCode = 409;
+        throw error;
+      }
+
+      await runCommand({
+        cmd: "git",
+        args: ["rebase", "--onto", parent, hash, "HEAD"],
+        cwd: graph.path,
+        silent: true,
+      });
+    }
+
+    const [newBranch, newCurrentHash] = await Promise.all([
+      getCurrentGraphBranch(graph, runCommand),
+      getCurrentGraphHeadHash(graph, runCommand),
+    ]);
+    graph.branch = newBranch.trim() || "(detached)";
+
+    return {
+      action: "prune",
+      label: graph.label,
+      path: graph.path,
+      hash,
+      branches: [],
+      parent,
+      currentHash: newCurrentHash,
+      branch: graph.branch,
+      detached: !newBranch.trim(),
+      message: `${graph.label} pruned ${hash.slice(0, 12)} from current checkout.`,
+    };
+  }
+
+  if (!branches.length) {
+    const error = new Error(`Commit ${hash.slice(0, 12)} is contained by multiple local branches (${containingBranches.join(", ")}). Check out the branch to prune and try again.`);
+    error.statusCode = 409;
+    throw error;
+  }
 
   for (const branch of branches) {
     await runCommand({
