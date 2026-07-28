@@ -2523,7 +2523,8 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /class="graph-submenu" role="menu" aria-label="Lint options"/);
   assert.match(html, /data-menu-action="lint-all">All<\/button>/);
   assert.match(html, /data-menu-action="lint-outgoing">Outgoing<\/button>/);
-  assert.match(html, /data-menu-action="lint-new">New<\/button>/);
+  assert.doesNotMatch(html, /data-menu-action="lint-new"/);
+  assert.match(html, /data-menu-action="new-patch">New Patch<\/button>/);
   assert.match(html, /data-menu-action="pull-patch">Pull patch<\/button>/);
   assert.match(html, /data-menu-action="test">Test<\/button>/);
   assert.match(html, /data-menu-action="try">Try<\/button>/);
@@ -2551,8 +2552,11 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /\/api\/update-graphs/);
   assert.match(client, /\/api\/unshelf-graphs/);
   assert.match(client, /\/api\/mach-action/);
+  assert.match(client, /\/api\/lint/);
   assert.match(client, /\/api\/origin-main-status/);
   assert.match(client, /\/api\/land/);
+  assert.match(client, /function startGraphLintAction/);
+  assert.match(client, /startGraphLintAction\(menuAction\.replace/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("the try run"\)/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("land patches"\)/);
   assert.match(client, /snapshotLimits: getSnapshotLimits\(\)/);
@@ -3110,6 +3114,99 @@ test("interactive graph server cancels an active build session", async (t) => {
 
   releaseBuild();
   await waitForMachSession(statusUrl, (item) => item.status === "canceled");
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph server starts lint sessions from menu modes", async (t) => {
+  const calls = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cmd.endsWith("mach")) {
+        return "lint complete\n";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("HEAD is not published on main.");
+      }
+
+      if (command.args[0] === "diff-tree") {
+        return "mail/current.js\n";
+      }
+
+      if (command.args[0] === "diff" && command.args.includes("--cached")) {
+        return "mail/staged.js\n";
+      }
+
+      if (command.args[0] === "diff") {
+        return "mail/unstaged.js\n";
+      }
+
+      if (command.args[0] === "ls-files") {
+        return "mail/new.js\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const allResponse = await fetch(new URL("api/lint", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret", mode: "all" }),
+  });
+  const allStart = await allResponse.json();
+  assert.equal(allStart.ok, true);
+  assert.equal(allStart.mode, "all");
+
+  const allSession = await waitForMachSession(
+    new URL(`api/lint/${allStart.id}?token=secret`, serverInfo.url),
+    (item) => item.status === "complete"
+  );
+  assert.equal(allSession.message, "Lint all complete.");
+  assert.match(allSession.output, /\$ \.\.\/mach commlint build calendar chat docs mail tools --fix/);
+
+  const outgoingResponse = await fetch(new URL("api/lint", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret", mode: "outgoing" }),
+  });
+  const outgoingStart = await outgoingResponse.json();
+  assert.equal(outgoingStart.ok, true);
+  assert.equal(outgoingStart.mode, "outgoing");
+
+  const outgoingSession = await waitForMachSession(
+    new URL(`api/lint/${outgoingStart.id}?token=secret`, serverInfo.url),
+    (item) => item.status === "complete"
+  );
+  assert.equal(outgoingSession.message, "Lint changed files complete.");
+  assert.match(outgoingSession.output, /\$ \.\.\/mach commlint mail\/current\.js mail\/unstaged\.js mail\/staged\.js mail\/new\.js --fix/);
+  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint build calendar chat docs mail tools --fix"), true);
+  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint mail/current.js mail/unstaged.js mail/staged.js mail/new.js --fix"), true);
 
   const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
   await fetch(new URL("api/close", serverInfo.url), {

@@ -38,6 +38,7 @@ import {
   setGraphOptionsMenuOpen,
   setMachOutputPanel,
   dismissCommandStatus,
+  startGraphLintAction,
   startGraphMachAction,
   submitTryDialog,
   toggleGraphSubmenu,
@@ -94,6 +95,10 @@ document.addEventListener("click", (event) => {
 
     if (menuAction === "build") {
       startGraphMachAction("build");
+    }
+
+    if (menuAction === "lint-all" || menuAction === "lint-outgoing") {
+      startGraphLintAction(menuAction.replace(/^lint-/, ""));
     }
 
     if (menuAction === "try") {
@@ -381,6 +386,9 @@ if (INTERACTIVE.enabled) {
     clearInterval(originMainStatusPoll);
     if (uiState.machPollTimer) {
       window.clearTimeout(uiState.machPollTimer);
+    }
+    if (uiState.lintPollTimer) {
+      window.clearTimeout(uiState.lintPollTimer);
     }
     if (uiState.landPollTimer) {
       window.clearTimeout(uiState.landPollTimer);

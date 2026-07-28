@@ -28,6 +28,7 @@ import {
   amendCommitMessage,
   checkoutGraphCommit,
   chooseGraphMachCheckout,
+  createGraphLintSession,
   createGraphMachSession,
   createGraphSubmitSession,
   createGraphTrySession,
@@ -39,6 +40,7 @@ import {
   markGraphBugForCheckin,
   runGraphCommitAction,
   runGraphRepositoryUpdate,
+  serializeGraphLintSession,
   serializeGraphMachSession,
   serializeGraphTrySession,
   serializeSubmitSession,
@@ -130,6 +132,7 @@ export async function startInteractiveGraphServer({
   }));
   const submitSessions = new Map();
   const machSessions = new Map();
+  const lintSessions = new Map();
   const trySessions = new Map();
   const landSessions = new Map();
   const sockets = new Set();
@@ -645,6 +648,24 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/api/lint") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+
+        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const session = createGraphLintSession({
+          graph,
+          graphIndex: index,
+          mode: body.mode,
+          runCommand,
+        });
+
+        lintSessions.set(session.id, session);
+        sendJson(response, 200, { ok: true, ...serializeGraphLintSession(session) });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/api/land") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
@@ -739,6 +760,21 @@ export async function startInteractiveGraphServer({
         }
 
         sendJson(response, 200, { ok: true, ...serializeGraphTrySession(session) });
+        return;
+      }
+
+      const lintStatusMatch = url.pathname.match(/^\/api\/lint\/([^/]+)$/);
+      if (request.method === "GET" && lintStatusMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        lastHeartbeat = Date.now();
+        const session = lintSessions.get(decodeURIComponent(lintStatusMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown lint session." });
+          return;
+        }
+
+        sendJson(response, 200, { ok: true, ...serializeGraphLintSession(session) });
         return;
       }
 

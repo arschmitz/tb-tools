@@ -40,7 +40,7 @@ export function getUpdateActionLabel(mode) {
 }
 
 export function setUpdateBusy(busy) {
-  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='try'], .graph-menu-command[data-menu-action='land']").forEach((button) => {
+  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='lint-all'], .graph-menu-command[data-menu-action='lint-outgoing'], .graph-menu-command[data-menu-action='try'], .graph-menu-command[data-menu-action='land']").forEach((button) => {
     button.disabled = busy;
   });
 }
@@ -97,6 +97,10 @@ export function hasActiveTrySession() {
   return Boolean(uiState.activeTrySession && uiState.activeTrySession.status === "running");
 }
 
+export function hasActiveLintSession() {
+  return Boolean(uiState.activeLintSession && uiState.activeLintSession.status === "running");
+}
+
 export function hasActiveLandSession() {
   return Boolean(
     uiState.activeLandSession &&
@@ -105,7 +109,7 @@ export function hasActiveLandSession() {
 }
 
 export function hasActiveCommandSession() {
-  return hasActiveMachSession() || hasActiveTrySession() || hasActiveLandSession();
+  return hasActiveMachSession() || hasActiveLintSession() || hasActiveTrySession() || hasActiveLandSession();
 }
 
 export function isMachRunSession(session) {
@@ -582,6 +586,107 @@ export async function cancelGraphMachAction() {
     setUpdateStatus(error && error.message ? error.message : String(error), { error: true });
   } finally {
     if (!hasActiveMachSession()) {
+      setUpdateBusy(false);
+    }
+  }
+}
+
+export function getLintActionLabel(mode) {
+  return mode === "all" ? "Lint all" : "Lint changed files";
+}
+
+export function getLintSessionStatusText(session) {
+  if (session.message) {
+    return session.message;
+  }
+
+  return getLintActionLabel(session.mode) + (session.status === "running" ? " running..." : "");
+}
+
+export function renderGraphLintSession(session) {
+  uiState.activeLintSession = session.status === "running" ? session : null;
+  uiState.lastMachSession = session;
+  setMachCancelButton(null);
+  setMachOutputPanel(session);
+  setUpdateStatus(getLintSessionStatusText(session), {
+    error: session.status === "error",
+    busy: session.status === "running",
+  });
+}
+
+export async function pollGraphLintSession() {
+  if (!uiState.activeLintSession) {
+    return;
+  }
+
+  try {
+    const response = await fetch(
+      "/api/lint/" + encodeURIComponent(uiState.activeLintSession.id) +
+        "?token=" + encodeURIComponent(INTERACTIVE.token)
+    );
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || response.statusText);
+    }
+
+    renderGraphLintSession(result);
+
+    if (result.status === "running") {
+      uiState.lintPollTimer = window.setTimeout(pollGraphLintSession, 500);
+    }
+  } catch (error) {
+    uiState.activeLintSession = null;
+    setMachOutputPanel();
+    setUpdateStatus(error && error.message ? error.message : String(error), { error: true });
+  }
+}
+
+export async function startGraphLintAction(mode) {
+  if (hasActiveCommandSession()) {
+    alert("A command is already active.");
+    return;
+  }
+
+  const normalizedMode = mode === "all" ? "all" : "outgoing";
+
+  if (uiState.lintPollTimer) {
+    window.clearTimeout(uiState.lintPollTimer);
+    uiState.lintPollTimer = null;
+  }
+
+  uiState.lastMachSession = null;
+  uiState.machOutputVisible = false;
+  setMachOutputPanel(null);
+  setUpdateStatus(getLintActionLabel(normalizedMode) + " starting...", { busy: true });
+
+  try {
+    const response = await fetch("/api/lint", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: INTERACTIVE.token,
+        mode: normalizedMode,
+      }),
+    });
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || response.statusText);
+    }
+
+    renderGraphLintSession(result);
+
+    if (result.status === "running") {
+      uiState.lintPollTimer = window.setTimeout(pollGraphLintSession, 500);
+    }
+  } catch (error) {
+    uiState.activeLintSession = null;
+    setMachCancelButton(null);
+    setMachOutputPanel();
+    setUpdateStatus(error && error.message ? error.message : String(error), { error: true });
+  } finally {
+    if (!hasActiveLintSession()) {
       setUpdateBusy(false);
     }
   }

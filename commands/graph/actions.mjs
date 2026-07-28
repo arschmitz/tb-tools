@@ -1409,6 +1409,75 @@ export async function runGraphLint({
   });
 }
 
+function normalizeGraphLintMode(mode = "outgoing") {
+  const normalizedMode = String(mode || "outgoing").trim().toLowerCase();
+
+  if (normalizedMode === "all" || normalizedMode === "outgoing") {
+    return normalizedMode;
+  }
+
+  const error = new Error(`Unknown graph lint mode: ${mode}`);
+  error.statusCode = 400;
+  throw error;
+}
+
+function getGraphLintModeLabel(mode) {
+  return mode === "all" ? "Lint all" : "Lint changed files";
+}
+
+export function createGraphLintSession({
+  graph,
+  graphIndex,
+  mode = "outgoing",
+  runCommand = run,
+}) {
+  const normalizedMode = normalizeGraphLintMode(mode);
+  const session = {
+    id: randomUUID(),
+    graphIndex,
+    mode: normalizedMode,
+    label: graph.label,
+    path: graph.path,
+    status: "running",
+    message: `${getGraphLintModeLabel(normalizedMode)} starting...`,
+    output: "",
+    error: "",
+  };
+
+  queueMicrotask(async () => {
+    try {
+      await runGraphLint({
+        graph,
+        session,
+        all: normalizedMode === "all",
+        runCommand,
+      });
+      session.status = "complete";
+      session.message = `${getGraphLintModeLabel(normalizedMode)} complete.`;
+    } catch (error) {
+      session.status = "error";
+      session.error = String(error?.message || error);
+      session.message = session.error;
+    }
+  });
+
+  return session;
+}
+
+export function serializeGraphLintSession(session) {
+  return {
+    id: session.id,
+    graphIndex: session.graphIndex,
+    mode: session.mode,
+    label: session.label,
+    path: session.path,
+    status: session.status,
+    message: session.message,
+    output: session.output || "",
+    error: session.error,
+  };
+}
+
 function withGraphSubmitCwd(graph, session, runCommand) {
   return (command) => {
     const commandWithCwd = {

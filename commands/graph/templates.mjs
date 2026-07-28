@@ -63,9 +63,9 @@ export function buildGraphHtml({
             <div class="graph-submenu" role="menu" aria-label="Lint options">
               <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="lint-all">All</button>
               <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="lint-outgoing">Outgoing</button>
-              <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="lint-new">New</button>
             </div>
           </div>
+          <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="new-patch">New Patch</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="pull-patch">Pull patch</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="test">Test</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="try">Try</button>
