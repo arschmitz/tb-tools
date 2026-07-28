@@ -103,6 +103,23 @@ export const patchLinks = patchDialog.querySelector(".patch-links");
 export const patchOutput = patchDialog.querySelector(".patch-output");
 export const patchClose = patchDialog.querySelector(".patch-close");
 export const patchSubmit = patchDialog.querySelector(".patch-submit");
+export const testDialog = document.getElementById("test-dialog");
+export const testForm = testDialog.querySelector(".test-form");
+export const testFlavor = testDialog.querySelector(".test-flavor");
+export const testPattern = testDialog.querySelector(".test-pattern");
+export const testHeadless = testDialog.querySelector(".test-headless");
+export const testStatus = testDialog.querySelector(".test-status");
+export const testClose = testDialog.querySelector(".test-close");
+export const testSubmit = testDialog.querySelector(".test-submit");
+export const testOutputTab = document.querySelector(".test-output-tab");
+export const testOutputPanel = document.querySelector(".test-output-panel");
+export const testOutputStatus = testOutputPanel.querySelector(".test-output-status");
+export const testOutputCommand = testOutputPanel.querySelector(".test-output-command");
+export const testResultsState = testOutputPanel.querySelector(".test-results-state");
+export const testRerunAll = testOutputPanel.querySelector(".test-rerun-all");
+export const testOutputSummary = testOutputPanel.querySelector(".test-output-summary");
+export const testOutputFailures = testOutputPanel.querySelector(".test-output-failures");
+export const testOutputLog = testOutputPanel.querySelector(".test-output-log");
 export const uiState = {
   contextMenuState: null,
   amendDialogState: null,
@@ -116,6 +133,7 @@ export const uiState = {
   activeLintSession: null,
   activeNewPatchSession: null,
   activePatchSession: null,
+  activeTestSession: null,
   activeTrySession: null,
   activeLandSession: null,
   lastMachSession: null,
@@ -123,6 +141,7 @@ export const uiState = {
   machPollTimer: null,
   lintPollTimer: null,
   patchPollTimer: null,
+  testPollTimer: null,
   tryPollTimer: null,
   commandStatusStartedAt: 0,
   commandElapsedTimer: null,

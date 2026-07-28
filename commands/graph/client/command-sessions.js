@@ -40,7 +40,7 @@ export function getUpdateActionLabel(mode) {
 }
 
 export function setUpdateBusy(busy) {
-  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='lint-all'], .graph-menu-command[data-menu-action='lint-outgoing'], .graph-menu-command[data-menu-action='new-patch'], .graph-menu-command[data-menu-action='pull-patch'], .graph-menu-command[data-menu-action='try'], .graph-menu-command[data-menu-action='land']").forEach((button) => {
+  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='lint-all'], .graph-menu-command[data-menu-action='lint-outgoing'], .graph-menu-command[data-menu-action='new-patch'], .graph-menu-command[data-menu-action='pull-patch'], .graph-menu-command[data-menu-action='test'], .graph-menu-command[data-menu-action='try'], .graph-menu-command[data-menu-action='land']").forEach((button) => {
     button.disabled = busy;
   });
 }
@@ -101,6 +101,10 @@ export function hasActiveLintSession() {
   return Boolean(uiState.activeLintSession && uiState.activeLintSession.status === "running");
 }
 
+export function hasActiveTestSession() {
+  return Boolean(uiState.activeTestSession && uiState.activeTestSession.status === "running");
+}
+
 export function hasActivePatchSession() {
   return Boolean(
     uiState.activePatchSession &&
@@ -122,6 +126,7 @@ export function hasActiveLandSession() {
 export function hasActiveCommandSession() {
   return hasActiveMachSession() ||
     hasActiveLintSession() ||
+    hasActiveTestSession() ||
     hasActiveNewPatchSession() ||
     hasActivePatchSession() ||
     hasActiveTrySession() ||

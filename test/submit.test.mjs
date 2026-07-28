@@ -41,6 +41,7 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
   const result = await submit({
     comment: true,
     flavor: "browser",
+    headless: true,
     pattern: "mail/**/browser_*.js",
   }, [{ name: "selector" }]);
 
@@ -48,12 +49,14 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
     ["checkChanges", "Changes found please amend, commit, or stash your changes."],
     ["testChanged", {
       flavor: "browser",
+      headless: true,
       pattern: "mail/**/browser_*.js",
     }],
     ["run", { cmd: "moz-phab", args: ["submit"], capture: true }],
     ["try", {
       comment: false,
       flavor: "browser",
+      headless: true,
       pattern: "mail/**/browser_*.js",
     }, [{ name: "selector" }]],
   ]);

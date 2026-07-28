@@ -354,6 +354,7 @@ tb preflight
 |--try||Push a mach try run after lint and tests|false|`tb preflight --try`
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb preflight --flavor=all`
 |--pattern|-p|Test path or glob pattern to pass to `mach test`||`tb preflight --pattern=<value>`
+|--headless||Pass --headless to `mach test`|false|`tb preflight --headless`
 |--selector|-s|mach try selector `auto\|fuzzy\|empty\|chooser`|auto|`tb preflight --selector=auto`
 |--query|-q|fuzzy selector query||`tb preflight --query=<value>`
 |--tasks-regex|-t|auto selector task regex||`tb preflight --tasks-regex=<value>`
@@ -446,6 +447,7 @@ tb submit
 |----|-----------|--|--|---|
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb submit --flavor=all`
 |--pattern|-p|Test path or glob pattern to pass to `mach test`||`tb submit --pattern=<value>`
+|--headless||Pass --headless to `mach test`|false|`tb submit --headless`
 |--selector|-s|mach try selector `auto\|fuzzy\|empty\|chooser`|auto|`tb submit --selector=auto`
 |--query|-q|fuzzy selector query||`tb submit --query=<value>`
 |--tasks-regex|-t|auto selector task regex||`tb submit --tasks-regex=<value>`
@@ -477,6 +479,7 @@ tb test
 |----|-----------|--|--|---|
 |--flavor|-f|Flavor of tests to run `browser\|unit\|all`|all|`tb test --flavor=all`
 |--pattern|-p|Test path or glob pattern to pass to `mach test`||`tb test --pattern=<value>`
+|--headless||Pass --headless to `mach test`|false|`tb test --headless`
 
 <br/><br/>
 ### try

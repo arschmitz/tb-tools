@@ -1313,7 +1313,7 @@ function parseGraphStatusFile(line) {
   return file.includes(" -> ") ? file.split(" -> ").pop() : file;
 }
 
-async function getGraphChangedFilePaths({
+export async function getGraphChangedFilePaths({
   graph,
   base = `origin/${DEFAULT_BRANCH}`,
   runCommand = run,

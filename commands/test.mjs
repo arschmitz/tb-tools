@@ -8,10 +8,14 @@ export function getTestsForChangedFiles(files, { flavor = "all" } = {}) {
       return collection;
     }
 
+    const fileName = path.basename(item);
+
+    if (/^(test_|browser_)/.test(fileName)) {
+      collection.add(item);
+      return collection;
+    }
+
     if (!/components/.test(item)) {
-      if (/^test_|^browser_/.test(item)) {
-        collection.add(item);
-      }
       return collection;
     }
 
@@ -26,9 +30,9 @@ export function getTestsForChangedFiles(files, { flavor = "all" } = {}) {
       return collection;
     }
 
-    let _path = `${path.join("mail", "components", name)}`
+    let _path = `${path.join("mail", "components", name)}`;
     if (flavor !== "all") {
-      _path = path.join(_path, "test", flavor)
+      _path = path.join(_path, "test", flavor);
     }
 
     collection.add(_path);
@@ -46,26 +50,34 @@ export function getPatterns(pattern) {
   return patterns.filter(Boolean);
 }
 
+export async function getTestTargets({
+  flavor = "all",
+  pattern,
+  getChangedFiles = getChangedFilePaths,
+} = {}) {
+  const patterns = getPatterns(pattern);
+
+  if (patterns.length) {
+    return patterns;
+  }
+
+  const files = await getChangedFiles();
+
+  return Array.from(getTestsForChangedFiles(files, { flavor }));
+}
+
 export function createTestCommand({
   getChangedFiles = getChangedFilePaths,
   runMach = mach,
 } = {}) {
-  return async function testChanged({ flavor = "all", pattern } = {}) {
-    const patterns = getPatterns(pattern);
+  return async function testChanged({ flavor = "all", pattern, headless = false } = {}) {
+    const targets = await getTestTargets({ flavor, pattern, getChangedFiles });
 
-    if (patterns.length) {
-      await runMach(["test", ...patterns]);
+    if (!targets.length) {
       return;
     }
 
-    const files = await getChangedFiles();
-    const tests = getTestsForChangedFiles(files, { flavor });
-
-    if (!tests.size) {
-      return;
-    }
-
-    await runMach(["test", ...Array.from(tests)]);
+    await runMach(["test", ...(headless ? ["--headless"] : []), ...targets]);
   };
 }
 

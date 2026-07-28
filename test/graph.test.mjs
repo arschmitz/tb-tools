@@ -32,8 +32,13 @@ import {
   getGraphOutputPath,
   isWorkingTreeCommitHash,
   markGraphBugForCheckin,
+  cleanGraphTestTerminalOutput,
+  createGraphTestSession,
+  getPseudoTerminalCommand,
   normalizeGraphTryOptions,
+  normalizeGraphTestOptions,
   normalizeGraphTryStore,
+  parseGraphTestOutput,
   parseDecorations,
   parseGitLog,
   pruneCommitBranches,
@@ -45,6 +50,7 @@ import {
   runGraphMachActionSession,
   runGraphRepositoryUpdate,
   runInteractiveSubmitCommand,
+  serializeGraphTestSession,
   startInteractiveGraphServer,
   truncateDiff,
   unshelfGraphShelves,
@@ -70,6 +76,7 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "landing-dialog.js", output: "graph-client/landing-dialog.js" },
   { source: "new-patch-dialog.js", output: "graph-client/new-patch-dialog.js" },
   { source: "patch-dialog.js", output: "graph-client/patch-dialog.js" },
+  { source: "test-dialog.js", output: "graph-client/test-dialog.js" },
   { source: "init.js", output: "graph-client/init.js" },
 ];
 
@@ -195,6 +202,393 @@ test("normalizeGraphTryOptions mirrors the supported mach try option surface", (
     artifact: true,
     comment: false,
   });
+});
+
+test("normalizeGraphTestOptions supports flavor and comma or line separated patterns", () => {
+  assert.deepEqual(normalizeGraphTestOptions({
+    flavor: "browser",
+    headless: true,
+    pattern: "mail/**/browser_*.js,\ncalendar/test/unit/test_alarm.js",
+  }), {
+    flavor: "browser",
+    headless: true,
+    pattern: [
+      "mail/**/browser_*.js",
+      "calendar/test/unit/test_alarm.js",
+    ],
+  });
+  assert.deepEqual(normalizeGraphTestOptions({
+    flavor: "surprise",
+  }), {
+    flavor: "all",
+    pattern: [],
+    headless: false,
+  });
+  assert.equal(normalizeGraphTestOptions({ headless: "false" }).headless, false);
+});
+
+test("getPseudoTerminalCommand wraps real test runs in script for color output", () => {
+  assert.deepEqual(getPseudoTerminalCommand({
+    cmd: "../mach",
+    args: ["test", "mail/test/browser/browser_color.js"],
+    cwd: "/repo/comm",
+    capture: true,
+  }, "darwin"), {
+    cmd: "script",
+    args: [
+      "-q",
+      "-e",
+      "-F",
+      "/dev/null",
+      "../mach",
+      "test",
+      "mail/test/browser/browser_color.js",
+    ],
+    cwd: "/repo/comm",
+    capture: true,
+  });
+  assert.deepEqual(getPseudoTerminalCommand({
+    cmd: "../mach",
+    args: ["test", "mail/test/browser/browser_color.js"],
+    cwd: "/repo/comm",
+  }, "linux"), {
+    cmd: "script",
+    args: [
+      "-q",
+      "-e",
+      "-f",
+      "-c",
+      "'../mach' 'test' 'mail/test/browser/browser_color.js'",
+      "/dev/null",
+    ],
+    cwd: "/repo/comm",
+  });
+  assert.deepEqual(getPseudoTerminalCommand({
+    cmd: "../mach",
+    args: ["test"],
+  }, "win32"), {
+    cmd: "../mach",
+    args: ["test"],
+  });
+});
+
+test("cleanGraphTestTerminalOutput removes terminal noise without stripping ANSI color", () => {
+  assert.equal(
+    cleanGraphTestTerminalOutput("^D\b\b\x1b(B\x1b[31mred\x1b[0m\n"),
+    "\x1b[31mred\x1b[0m\n"
+  );
+});
+
+test("parseGraphTestOutput summarizes live failure lines and creates VS Code links", () => {
+  const summary = parseGraphTestOutput({
+    graph: { path: "/repo/comm" },
+    targets: [
+      "mail/components/accountcreation/test/browser",
+      "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+    ],
+    commandFailed: true,
+    output: [
+      "\x1b[31mTEST-UNEXPECTED-FAIL | mail/test/browser/folder-display/browser_messagePaneVisibility.js:42 | expected visible pane\x1b[0m",
+      "Passed: 7",
+      "Failed: 1",
+      "Todo: 0",
+    ].join("\n"),
+  });
+
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.passed, 7);
+  assert.equal(summary.failureCount, 1);
+  assert.equal(summary.failures[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(summary.failures[0].lineNumber, 42);
+  assert.equal(summary.failures[0].absolutePath, "/repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(summary.failures[0].vscodeUrl, "vscode://file//repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js:42");
+  assert.deepEqual(summary.failedFiles, [{
+    path: "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+    lineNumber: 42,
+    absolutePath: "/repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+    vscodeUrl: "vscode://file//repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js:42",
+    failureCount: 1,
+    firstLine: "TEST-UNEXPECTED-FAIL | mail/test/browser/folder-display/browser_messagePaneVisibility.js:42 | expected visible pane",
+  }]);
+});
+
+test("parseGraphTestOutput summarizes final unexpected result files", () => {
+  const summary = parseGraphTestOutput({
+    graph: { path: "/repo/comm" },
+    targets: [
+      "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+      "calendar/test/unit/test_alarm.js",
+    ],
+    commandFailed: true,
+    output: [
+      "Overall Summary",
+      "===============",
+      "Ran 12 checks (2 tests)",
+      "Expected results: 10",
+      "Unexpected results: 2",
+      "",
+      "Unexpected Results",
+      "==================",
+      "\x1b(B\x1b[31mFAIL mail/test/browser/folder-display/browser_messagePaneVisibility.js:42 | expected visible pane\x1b[0m",
+      "ERROR calendar/test/unit/test_alarm.js | alarm should fire",
+    ].join("\n"),
+  });
+
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.expected, 10);
+  assert.equal(summary.unexpected, 2);
+  assert.equal(summary.failureCount, 2);
+  assert.deepEqual(summary.failedPaths, [
+    "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+    "calendar/test/unit/test_alarm.js",
+  ]);
+  assert.equal(summary.failures[0].status, "FAIL");
+  assert.equal(summary.failures[0].message, "expected visible pane");
+  assert.equal(summary.failures[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(summary.failures[0].lineNumber, 42);
+  assert.equal(summary.failures[1].status, "ERROR");
+  assert.equal(summary.failures[1].message, "alarm should fire");
+  assert.equal(summary.failedFiles[0].failureCount, 1);
+});
+
+test("parseGraphTestOutput handles mochitest Error Summary context lines", () => {
+  const summary = parseGraphTestOutput({
+    graph: { path: "/repo/comm" },
+    targets: [
+      "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+      "mail/components/accountcreation/test/browser/browser_other.js",
+    ],
+    commandFailed: true,
+    output: [
+      "mochitest-browser",
+      "~~~~~~~~~~~~~~~~~",
+      "Ran 1318 checks (1288 subtests, 30 tests)",
+      "Expected results: 1316",
+      "Unexpected results: 2",
+      "  test: 1 (1 fail)",
+      "  subtest: 1 (1 fail)",
+      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      "",
+      "Error Summary",
+      "-------------",
+      "comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+      "  FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      "chrome://mochitests/content/browser/comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js:test_setStatePrefillsDiscoveredGraphConfig:495",
+      "chrome://mochikit/content/browser-test.js:handleTask:1402",
+      "  FAIL comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js - finished in 652ms",
+      "",
+      "xpcshell",
+      "~~~~~~~~",
+      "Ran 15 checks (15 tests)",
+      "Expected results: 15",
+      "Unexpected results: 0",
+      "OK",
+    ].join("\n"),
+  });
+
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.expected, 1316);
+  assert.equal(summary.unexpected, 2);
+  assert.equal(summary.failureCount, 1);
+  assert.equal(summary.failedFiles.length, 1);
+  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(summary.failedFiles[0].failureCount, 1);
+  assert.equal(summary.failedPaths[0], "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(summary.failures.length, 1);
+  assert.equal(summary.failures[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(summary.failures[0].lineNumber, 495);
+  assert.equal(summary.failures[0].message, "test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"");
+});
+
+test("parseGraphTestOutput keeps pre-summary live failures while a test is running", () => {
+  const summary = parseGraphTestOutput({
+    graph: { path: "/repo/comm" },
+    targets: [
+      "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+    ],
+    running: true,
+    output: [
+      "mochitest-browser",
+      "~~~~~~~~~~~~~~~~~",
+      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+    ].join("\n"),
+  });
+
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.failureCount, 1);
+  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(summary.failedFiles[0].failureCount, 1);
+  assert.equal(summary.failures.length, 1);
+  assert.equal(summary.failures[0].message, "test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"");
+});
+
+test("parseGraphTestOutput uses live TEST-START context for bare failure lines", () => {
+  const summary = parseGraphTestOutput({
+    graph: { path: "/repo/comm" },
+    targets: [
+      "mail/components/accountcreation/test/browser",
+      "calendar/test/unit/test_alarm.js",
+    ],
+    running: true,
+    output: [
+      "TEST-START | comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+    ].join("\n"),
+  });
+
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.failureCount, 1);
+  assert.equal(summary.failedFiles.length, 1);
+  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(summary.failures.length, 1);
+  assert.equal(summary.failures[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+});
+
+test("parseGraphTestOutput replaces live failures with Error Summary while running", () => {
+  const summary = parseGraphTestOutput({
+    graph: { path: "/repo/comm" },
+    targets: [
+      "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+    ],
+    running: true,
+    output: [
+      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      "",
+      "Error Summary",
+      "-------------",
+      "comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+      "  FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+    ].join("\n"),
+  });
+
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.failureCount, 1);
+  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(summary.failedFiles[0].failureCount, 1);
+  assert.equal(summary.failures.length, 1);
+  assert.equal(summary.failures[0].lineNumber, 0);
+});
+
+test("parseGraphTestOutput does not duplicate live failures when summary rows arrive", () => {
+  const summary = parseGraphTestOutput({
+    graph: { path: "/repo/comm" },
+    targets: [
+      "mail/components/accountcreation/test/browser",
+      "calendar/test/unit",
+    ],
+    running: true,
+    knownFailures: [
+      {
+        line: "FAIL test_first - first message",
+        status: "FAIL",
+        message: "test_first - first message",
+        path: "mail/components/accountcreation/test/browser/browser_first.js",
+        lineNumber: 42,
+        absolutePath: "/repo/comm/mail/components/accountcreation/test/browser/browser_first.js",
+        vscodeUrl: "vscode://file//repo/comm/mail/components/accountcreation/test/browser/browser_first.js:42",
+      },
+      {
+        line: "FAIL test_second - second message",
+        status: "FAIL",
+        message: "test_second - second message",
+        path: "mail/components/accountcreation/test/browser/browser_second.js",
+        lineNumber: 84,
+        absolutePath: "/repo/comm/mail/components/accountcreation/test/browser/browser_second.js",
+        vscodeUrl: "vscode://file//repo/comm/mail/components/accountcreation/test/browser/browser_second.js:84",
+      },
+    ],
+    output: [
+      "TEST-START | comm/mail/components/accountcreation/test/browser/browser_first.js",
+      "FAIL test_first - first message",
+      "TEST-START | comm/mail/components/accountcreation/test/browser/browser_second.js",
+      "FAIL test_second - second message",
+      "",
+      "Error Summary",
+      "-------------",
+      "comm/mail/components/accountcreation/test/browser/browser_first.js",
+      "  FAIL test_first - first message",
+      "chrome://mochitests/content/browser/comm/mail/components/accountcreation/test/browser/browser_first.js:test_first:42",
+      "comm/mail/components/accountcreation/test/browser/browser_second.js",
+      "  FAIL test_second - second message",
+      "chrome://mochitests/content/browser/comm/mail/components/accountcreation/test/browser/browser_second.js:test_second:84",
+      "",
+      "Error Summary",
+      "-------------",
+    ].join("\n"),
+  });
+
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.failureCount, 2);
+  assert.deepEqual(summary.failedPaths, [
+    "mail/components/accountcreation/test/browser/browser_first.js",
+    "mail/components/accountcreation/test/browser/browser_second.js",
+  ]);
+  assert.equal(summary.failures.length, 2);
+  assert.equal(summary.failedFiles.length, 2);
+  assert.equal(summary.failures[0].lineNumber, 42);
+  assert.equal(summary.failures[1].lineNumber, 84);
+});
+
+test("parseGraphTestOutput keeps live failures until Error Summary has rows", () => {
+  const summary = parseGraphTestOutput({
+    graph: { path: "/repo/comm" },
+    targets: [
+      "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+    ],
+    running: true,
+    output: [
+      "mochitest-browser",
+      "~~~~~~~~~~~~~~~~~",
+      "Unexpected results: 2",
+      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      "",
+      "Error Summary",
+      "-------------",
+    ].join("\n"),
+  });
+
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.unexpected, 2);
+  assert.equal(summary.failureCount, 1);
+  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(summary.failures.length, 1);
+  assert.equal(summary.failures[0].message, "test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"");
+});
+
+test("createGraphTestSession keeps parsed failures after raw output is capped", async () => {
+  const failureLine = "\x1b(B\x1b[31mFAIL mail/test/browser/folder-display/browser_messagePaneVisibility.js:42 | expected visible pane\x1b[0m\n";
+  const longTail = "noise\n".repeat(40000);
+  const session = createGraphTestSession({
+    graph: { label: "comm", path: "/repo/comm" },
+    graphIndex: 0,
+    options: {
+      pattern: ["mail/test/browser/folder-display/browser_messagePaneVisibility.js"],
+    },
+    runCommand: async (command) => {
+      if (command.cmd.endsWith("mach")) {
+        const error = new Error("mach test failed");
+
+        error.stdout = `${failureLine}${longTail}Failed: 1\n`;
+        error.stderr = "";
+        throw error;
+      }
+
+      return "";
+    },
+  });
+
+  await waitForSubmitSessionLike(session, (item) => item.status === "error");
+
+  const serialized = serializeGraphTestSession(session);
+
+  assert.equal(serialized.output.includes("expected visible pane"), false);
+  assert.equal(serialized.output.includes("(B"), false);
+  assert.equal(serialized.summary.status, "failed");
+  assert.equal(serialized.summary.failureCount, 1);
+  assert.equal(serialized.failures[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(serialized.failures[0].lineNumber, 42);
+  assert.equal(serialized.failedFiles[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(serialized.canRerunFailures, false);
 });
 
 test("graph try runs are stored by stable patch id and attach after a rebase", async (t) => {
@@ -2284,6 +2678,17 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /id="try-dialog"/);
   assert.match(html, /class="try-selector"/);
   assert.match(html, /class="try-tasks-regex"/);
+  assert.match(html, /class="tab test-output-tab" type="button" hidden>Test Output<\/button>/);
+  assert.match(html, /class="test-output-panel" hidden/);
+  assert.match(html, /class="test-results-panel" aria-label="Parsed test results"/);
+  assert.match(html, /class="test-results-state">Waiting for a test run\./);
+  assert.match(html, /class="test-rerun-all" type="button" hidden>Rerun All<\/button>/);
+  assert.match(html, /class="test-output-summary empty"/);
+  assert.match(html, /class="test-output-failures empty"/);
+  assert.match(html, /id="test-dialog"/);
+  assert.match(html, /class="test-flavor"/);
+  assert.match(html, /class="test-pattern"/);
+  assert.match(html, /class="test-headless"/);
   assert.match(html, /class="workspace" data-index="0"/);
   assert.match(html, /class="pane-resizer"/);
   assert.match(html, /role="separator"/);
@@ -2335,6 +2740,16 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /\.submit-output \{/);
   assert.match(html, /\.try-dialog \{/);
   assert.match(html, /\.try-grid \{/);
+  assert.match(html, /\.test-output-panel \{/);
+  assert.match(html, /\.test-results-panel \{/);
+  assert.match(html, /\.test-summary-card\.passed/);
+  assert.match(html, /\.test-failed-file-list \{/);
+  assert.match(html, /\.test-failed-file \{/);
+  assert.match(html, /\.test-failure \{/);
+  assert.match(html, /\.test-rerun-all/);
+  assert.match(html, /\.test-output-log \{/);
+  assert.match(html, /\.ansi-red \{/);
+  assert.match(html, /\.test-dialog \{/);
   assert.match(html, /\.diff-placeholder/);
   assert.match(html, /\.diff-message \{/);
   assert.match(html, /\.diff-message a \{ color: #0969da; text-decoration: none; \}/);
@@ -2398,6 +2813,20 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function openTryDialog/);
   assert.match(client, /function submitTryDialog/);
   assert.match(client, /function pollGraphTrySession/);
+  assert.match(client, /function openTestDialog/);
+  assert.match(client, /function startGraphTestSession/);
+  assert.match(client, /function pollGraphTestSession/);
+  assert.match(client, /function renderAnsiOutput/);
+  assert.match(client, /function renderTestSummary/);
+  assert.match(client, /function renderTestFailures/);
+  assert.match(client, /function renderFailedFiles/);
+  assert.match(client, /function setTestRerunAllButton/);
+  assert.match(client, /\/api\/test/);
+  assert.match(client, /testHeadless\.checked/);
+  assert.match(client, /failure\.vscodeUrl/);
+  assert.match(client, /session\.summary\.failedFiles/);
+  assert.match(client, /test-rerun-file/);
+  assert.match(client, /test-rerun-all/);
   assert.match(client, /function cancelGraphMachAction/);
   assert.match(client, /function setMachOutputPanel/);
   assert.match(client, /function dismissCommandStatus/);
@@ -2531,6 +2960,10 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /data-menu-action="test">Test<\/button>/);
   assert.match(html, /data-menu-action="try">Try<\/button>/);
   assert.match(html, /data-menu-action="land">Land Patches<\/button>/);
+  assert.match(html, /class="tab test-output-tab" type="button" hidden>Test Output<\/button>/);
+  assert.match(html, /class="test-output-panel" hidden/);
+  assert.match(html, /class="test-results-panel" aria-label="Parsed test results"/);
+  assert.match(html, /class="test-rerun-all" type="button" hidden>Rerun All<\/button>/);
   assert.match(html, /\.graph-submenu \{ display: none; position: absolute; right: calc\(100% - 1px\); top: 0; \}/);
   assert.match(html, /class="origin-main-status" role="status" aria-label="origin\/main freshness"/);
   assert.match(html, /class="command-status-bar" role="region" aria-label="Command status" hidden/);
@@ -2545,6 +2978,10 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /<dialog class="try-dialog" id="try-dialog">/);
   assert.match(html, /<option value="fuzzy">fuzzy<\/option>/);
   assert.match(html, /Post try link to Phabricator/);
+  assert.match(html, /<dialog class="test-dialog" id="test-dialog">/);
+  assert.match(html, /<option value="browser">browser<\/option>/);
+  assert.match(html, /class="test-pattern" name="pattern"/);
+  assert.match(html, /class="test-headless" name="headless" type="checkbox"/);
   assert.match(html, /<dialog class="new-patch-dialog" id="new-patch-dialog">/);
   assert.match(html, /class="new-patch-bug"[^>]+pattern="\[0-9\]\{4,8\}"/);
   assert.match(html, /class="new-patch-update"[^>]+checked/);
@@ -2558,6 +2995,10 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /class="land-start" type="button">Start Landing<\/button>/);
   assert.doesNotMatch(html, /\.land-close:disabled/);
   assert.match(client, /\/api\/graph\/" \+ index \+ "\/commits/);
+  assert.match(client, /openTestDialog\(\)/);
+  assert.match(client, /cancelGraphTestSession\(\)/);
+  assert.match(client, /testOutputTab\.addEventListener\("click", showTestOutputTab\)/);
+  assert.match(client, /document\.querySelectorAll\("\.tab\[data-index\]"\)/);
   assert.match(client, /\/api\/commit-action/);
   assert.match(client, /\/api\/update-graphs/);
   assert.match(client, /\/api\/unshelf-graphs/);
@@ -3225,6 +3666,136 @@ test("interactive graph server starts lint sessions from menu modes", async (t) 
   assert.match(outgoingSession.output, /\$ \.\.\/mach commlint mail\/current\.js mail\/unstaged\.js mail\/staged\.js mail\/new\.js --fix/);
   assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint build calendar chat docs mail tools --fix"), true);
   assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint mail/current.js mail/unstaged.js mail/staged.js mail/new.js --fix"), true);
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph server runs test sessions and reports failed files", async (t) => {
+  const calls = [];
+  const failureOutput = [
+    "Unexpected Results",
+    "==================",
+    "\x1b(B\x1b[31mFAIL mail/test/browser/folder-display/browser_messagePaneVisibility.js:42 | expected visible pane\x1b[0m",
+    "Passed: 7",
+    "Failed: 1",
+    "Todo: 0",
+  ].join("\n");
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cmd.endsWith("mach")) {
+        if (command.args.includes("mail/components/accountcreation/test/browser")) {
+          const error = new Error("mach test failed");
+
+          error.stdout = failureOutput;
+          error.stderr = "";
+          throw error;
+        }
+
+        return "Passed: 1\nFailed: 0\n";
+      }
+
+      if (command.args[0] === "merge-base") {
+        return "base\n";
+      }
+
+      if (command.args[0] === "diff" && command.args[1] === "--name-only") {
+        return [
+          "mail/components/accountcreation/content/emailWizard.js",
+          "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+        ].join("\n");
+      }
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/test", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      options: { flavor: "browser", headless: true },
+    }),
+  });
+  const start = await startResponse.json();
+  assert.equal(start.ok, true);
+
+  const statusUrl = new URL(`api/test/${start.id}?token=secret`, serverInfo.url);
+  const failedSession = await waitForMachSession(statusUrl, (item) => item.status === "error");
+
+  assert.deepEqual(failedSession.targets, [
+    "mail/components/accountcreation/test/browser",
+    "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+  ]);
+  assert.equal(failedSession.summary.status, "failed");
+  assert.equal(failedSession.options.headless, true);
+  assert.equal(failedSession.summary.passed, 7);
+  assert.equal(failedSession.summary.failureCount, 1);
+  assert.equal(failedSession.canRerunFailures, true);
+  assert.equal(failedSession.failures[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(failedSession.failures[0].lineNumber, 42);
+  assert.equal(failedSession.failures[0].vscodeUrl, "vscode://file//repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js:42");
+  assert.equal(failedSession.failedFiles[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(failedSession.failedFiles[0].failureCount, 1);
+  assert.equal(failedSession.output.includes("\x1b[31mFAIL mail/test/browser/folder-display/browser_messagePaneVisibility.js"), true);
+  assert.equal(failedSession.output.includes("(B"), false);
+  assert.equal(calls.some((call) => (
+    call.cmd.endsWith("mach") &&
+    call.args.join(" ") === "test --headless mail/components/accountcreation/test/browser mail/test/browser/folder-display/browser_messagePaneVisibility.js"
+  )), true);
+
+  const rerunResponse = await fetch(new URL("api/test", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      options: {
+        pattern: [failedSession.failures[0].path],
+      },
+    }),
+  });
+  const rerunStart = await rerunResponse.json();
+  const rerunSession = await waitForMachSession(
+    new URL(`api/test/${rerunStart.id}?token=secret`, serverInfo.url),
+    (item) => item.status === "complete"
+  );
+
+  assert.deepEqual(rerunSession.targets, [
+    "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+  ]);
+  assert.equal(rerunSession.summary.status, "passed");
+  assert.equal(calls.some((call) => (
+    call.cmd.endsWith("mach") &&
+    call.args.join(" ") === "test mail/test/browser/folder-display/browser_messagePaneVisibility.js"
+  )), true);
 
   const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
   await fetch(new URL("api/close", serverInfo.url), {

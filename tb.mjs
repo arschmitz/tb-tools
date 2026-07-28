@@ -300,6 +300,7 @@ const commands = {
       { name: "try", description: "Push a mach try run after lint and tests", defaultValue: "false" },
       { name: 'flavor', alias: 'f', description: 'Flavor of tests to run `browser|unit|all`', defaultValue: 'all' },
       { name: 'pattern', alias: 'p', description: 'Test path or glob pattern to pass to `mach test`', defaultOption: true, multiple: true },
+      { name: 'headless', description: 'Pass --headless to `mach test`', defaultValue: 'false' },
       { name: 'selector', alias: 's', description: 'mach try selector `auto|fuzzy|empty|chooser`', defaultValue: "auto" },
       { name: 'query', alias: 'q', description: 'fuzzy selector query' },
       { name: 'tasks-regex', alias: 't', description: 'auto selector task regex' },
@@ -398,6 +399,7 @@ Optionally:
     options: [
       { name: 'flavor', alias: 'f', description: 'Flavor of tests to run `browser|unit|all`', defaultValue: 'all' },
       { name: 'pattern', alias: 'p', description: 'Test path or glob pattern to pass to `mach test`', defaultOption: true, multiple: true },
+      { name: 'headless', description: 'Pass --headless to `mach test`', defaultValue: 'false' },
     ]
   },
   try: {

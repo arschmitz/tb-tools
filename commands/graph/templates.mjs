@@ -43,6 +43,7 @@ export function buildGraphHtml({
   const tabButtons = graphs.map((graph, index) => (
     `<button class="tab${index === 0 ? " active" : ""}" data-index="${index}">${escapeHtml(graph.label)}</button>`
   )).join("\n");
+  const testOutputTab = `<button class="tab test-output-tab" type="button" hidden>Test Output</button>`;
   const originMainStatus = interactive.enabled
     ? `<div class="origin-main-status" role="status" aria-label="origin/main freshness">
         ${graphs.length
@@ -138,6 +139,30 @@ export function buildGraphHtml({
       </div>
     </section>`
   )).join("\n");
+  const testOutputPanel = `<section class="test-output-panel" hidden>
+      <div class="test-output-header">
+        <div>
+          <strong>Test Output</strong>
+          <p class="test-output-status" role="status">No test run yet.</p>
+        </div>
+        <div class="test-output-command-row">
+          <span>Command</span>
+          <code class="test-output-command">mach test</code>
+        </div>
+      </div>
+      <section class="test-results-panel" aria-label="Parsed test results">
+        <div class="test-results-header">
+          <strong>Parsed Results</strong>
+          <div class="test-results-header-actions">
+            <span class="test-results-state">Waiting for a test run.</span>
+            <button class="test-rerun-all" type="button" hidden>Rerun All</button>
+          </div>
+        </div>
+        <div class="test-output-summary empty">Final summary totals will appear here when the run finishes.</div>
+        <div class="test-output-failures empty">Failure lines with copy, open, and rerun actions will appear here.</div>
+      </section>
+      <pre class="test-output-log" aria-label="Test output"></pre>
+    </section>`;
 
   return `<!doctype html>
 <html>
@@ -341,6 +366,78 @@ export function buildGraphHtml({
     .try-cancel { background: #fff; color: #20242a; }
     .try-submit { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
     .try-submit:disabled { cursor: wait; opacity: 0.65; }
+    .test-output-panel { background: #fff; border: 1px solid #d6dae1; border-radius: 8px; display: grid; gap: 10px; padding: 12px; }
+    .test-output-panel[hidden] { display: none; }
+    .test-output-header { align-items: start; display: flex; gap: 12px; justify-content: space-between; }
+    .test-output-header strong { font-size: 15px; }
+    .test-output-status { color: #59616d; font-size: 13px; margin: 3px 0 0; }
+    .test-output-status.error { color: #9b1c1c; }
+    .test-output-command-row { align-items: end; color: #59616d; display: grid; font-size: 11px; gap: 3px; justify-items: end; min-width: min(58vw, 760px); }
+    .test-output-command { color: #24292f; display: block; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; max-width: min(58vw, 760px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .test-results-panel { background: #f6f8fa; border: 1px solid #d6dae1; border-radius: 6px; display: grid; gap: 10px; padding: 10px; }
+    .test-results-header { align-items: center; display: flex; gap: 12px; justify-content: space-between; }
+    .test-results-header strong { font-size: 13px; }
+    .test-results-header-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; justify-content: end; }
+    .test-results-state { color: #59616d; font-size: 12px; }
+    .test-output-summary { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+    .test-output-summary.empty, .test-output-failures.empty { color: #59616d; font-size: 12px; }
+    .test-summary-card { background: #fff; border: 1px solid #d6dae1; border-radius: 6px; display: grid; gap: 3px; min-height: 50px; padding: 8px; }
+    .test-summary-label { color: #59616d; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+    .test-summary-value { color: #20242a; font-size: 18px; font-weight: 650; line-height: 1.1; }
+    .test-summary-card.passed .test-summary-value { color: #116329; }
+    .test-summary-card.failed .test-summary-value { color: #9b1c1c; }
+    .test-summary-card.neutral .test-summary-value { color: #57606a; }
+    .test-failed-files { display: grid; gap: 6px; }
+    .test-section-title { color: #59616d; font-size: 11px; font-weight: 650; margin: 0; text-transform: uppercase; }
+    .test-failed-file-list { border: 1px solid #d6dae1; border-radius: 6px; overflow: hidden; }
+    .test-failed-file { align-items: center; background: #fff; border-top: 1px solid #d6dae1; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; padding: 8px 10px; }
+    .test-failed-file:first-child { border-top: 0; }
+    .test-failed-file-path { color: #9b1c1c; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .test-failed-file-count { color: #59616d; font-size: 12px; white-space: nowrap; }
+    .test-failure-list { border: 1px solid #d6dae1; border-radius: 6px; overflow: hidden; }
+    .test-failure { background: #fff; border-top: 1px solid #d6dae1; display: grid; gap: 6px; padding: 8px 10px; }
+    .test-failure:first-child { border-top: 0; }
+    .test-failure-meta { align-items: center; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; }
+    .test-failure-path { color: #9b1c1c; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .test-failure-line { color: #24292f; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: auto; white-space: pre-wrap; }
+    .test-failure-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 6px; justify-content: end; }
+    .test-copy-path, .test-rerun-file, .test-rerun-all, .test-open-vscode { background: #fff; border: 1px solid #d0d7de; border-radius: 999px; color: #0969da; cursor: pointer; font-size: 12px; line-height: 1.2; padding: 4px 8px; text-decoration: none; white-space: nowrap; }
+    .test-copy-path:hover, .test-copy-path:focus, .test-rerun-file:hover, .test-rerun-file:focus, .test-rerun-all:hover, .test-rerun-all:focus, .test-open-vscode:hover, .test-open-vscode:focus { background: #f6f8fa; outline: none; text-decoration: underline; }
+    .test-rerun-all[hidden] { display: none; }
+    .test-output-log { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; min-height: 420px; overflow: auto; padding: 10px; white-space: pre-wrap; }
+    .ansi-black { color: #484f58; }
+    .ansi-red { color: #ff7b72; }
+    .ansi-green { color: #7ee787; }
+    .ansi-yellow { color: #f2cc60; }
+    .ansi-blue { color: #79c0ff; }
+    .ansi-magenta { color: #d2a8ff; }
+    .ansi-cyan { color: #76e3ea; }
+    .ansi-white { color: #e6edf3; }
+    .ansi-bright-black { color: #8b949e; }
+    .ansi-bright-red { color: #ffa198; }
+    .ansi-bright-green { color: #56d364; }
+    .ansi-bright-yellow { color: #e3b341; }
+    .ansi-bright-blue { color: #58a6ff; }
+    .ansi-bright-magenta { color: #bc8cff; }
+    .ansi-bright-cyan { color: #39c5cf; }
+    .ansi-bright-white { color: #ffffff; }
+    .ansi-bold { font-weight: 700; }
+    .ansi-underline { text-decoration: underline; }
+    .test-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(620px, calc(100vw - 32px)); padding: 0; width: 580px; }
+    .test-dialog::backdrop { background: rgba(15, 23, 42, 0.36); }
+    .test-form { display: grid; gap: 12px; margin: 0; padding: 16px; }
+    .test-title { font-size: 16px; margin: 0; }
+    .test-field { color: #59616d; display: grid; font-size: 12px; font-weight: 600; gap: 5px; }
+    .test-field select, .test-field textarea { border: 1px solid #b9c0cc; border-radius: 6px; box-sizing: border-box; color: #20242a; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 6px 8px; width: 100%; }
+    .test-pattern { min-height: 94px; resize: vertical; }
+    .test-checkbox { align-items: center; color: #20242a; display: flex; font-size: 13px; gap: 8px; }
+    .test-status { color: #59616d; font-size: 13px; margin: 0; }
+    .test-status.error { color: #9b1c1c; }
+    .test-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .test-actions button { border: 1px solid #b9c0cc; border-radius: 4px; cursor: pointer; font-size: 13px; padding: 6px 10px; }
+    .test-close { background: #fff; color: #20242a; }
+    .test-submit { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
+    .test-submit:disabled { cursor: wait; opacity: 0.65; }
     .new-patch-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(560px, calc(100vw - 32px)); padding: 0; width: 540px; }
     .new-patch-dialog::backdrop { background: rgba(15, 23, 42, 0.36); }
     .new-patch-form { display: grid; gap: 12px; margin: 0; padding: 16px; }
@@ -596,6 +693,39 @@ export function buildGraphHtml({
       .try-status.error { color: #ff9f9f; }
       .try-cancel { background: #191d23; border-color: #424b59; color: #f1f3f6; }
       .try-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .test-output-panel { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .test-output-status { color: #acb4c0; }
+      .test-output-status.error { color: #ff9f9f; }
+      .test-output-command-row { color: #acb4c0; }
+      .test-output-command { color: #e6edf3; }
+      .test-results-panel { background: #161b22; border-color: #424b59; }
+      .test-results-state, .test-output-summary.empty, .test-output-failures.empty { color: #acb4c0; }
+      .test-summary-card { background: #191d23; border-color: #424b59; }
+      .test-summary-label { color: #acb4c0; }
+      .test-summary-value { color: #f1f3f6; }
+      .test-summary-card.passed .test-summary-value { color: #7ee787; }
+      .test-summary-card.failed .test-summary-value { color: #ff9f9f; }
+      .test-summary-card.neutral .test-summary-value { color: #acb4c0; }
+      .test-section-title, .test-failed-file-count { color: #acb4c0; }
+      .test-failed-file-list { border-color: #424b59; }
+      .test-failed-file { background: #191d23; border-color: #424b59; }
+      .test-failed-file-path { color: #ff9f9f; }
+      .test-failure-list { border-color: #424b59; }
+      .test-failure { background: #191d23; border-color: #424b59; }
+      .test-failure-path { color: #ff9f9f; }
+      .test-failure-line { color: #e6edf3; }
+      .test-copy-path, .test-rerun-file, .test-rerun-all, .test-open-vscode { background: #191d23; border-color: #424b59; color: #79c0ff; }
+      .test-copy-path:hover, .test-copy-path:focus, .test-rerun-file:hover, .test-rerun-file:focus, .test-rerun-all:hover, .test-rerun-all:focus, .test-open-vscode:hover, .test-open-vscode:focus { background: #161b22; }
+      .test-dialog { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .test-dialog::backdrop { background: rgba(0, 0, 0, 0.58); }
+      .test-field { color: #acb4c0; }
+      .test-field select, .test-field textarea { background: #0d1117; border-color: #424b59; color: #e6edf3; }
+      .test-checkbox { color: #f1f3f6; }
+      .test-status { color: #acb4c0; }
+      .test-status.error { color: #ff9f9f; }
+      .test-actions button { border-color: #424b59; }
+      .test-close { background: #191d23; color: #f1f3f6; }
+      .test-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
       .new-patch-dialog { background: #191d23; border-color: #424b59; color: #f1f3f6; }
       .new-patch-dialog::backdrop { background: rgba(0, 0, 0, 0.58); }
       .new-patch-field { color: #acb4c0; }
@@ -652,11 +782,13 @@ export function buildGraphHtml({
       ${graphOptions}
     </div>
     <div class="toolbar-row">
-      <nav class="tabs">${tabButtons}</nav>
+      <nav class="tabs">${tabButtons}
+${testOutputTab}</nav>
       ${updateActions}
     </div>
   </header>
-  <main>${tabPanels}</main>
+  <main>${tabPanels}
+    ${testOutputPanel}</main>
   <div class="context-menu" id="commit-context-menu" hidden role="menu" aria-label="Commit actions">
     <div class="context-menu-title"></div>
     <button type="button" role="menuitem" data-action="checkout">Checkout</button>
@@ -723,6 +855,27 @@ export function buildGraphHtml({
       <div class="try-actions">
         <button class="try-cancel" type="button">Cancel</button>
         <button class="try-submit" type="submit">Start Try</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="test-dialog" id="test-dialog">
+    <form class="test-form">
+      <h2 class="test-title">Run Tests</h2>
+      <label class="test-field">Flavor
+        <select class="test-flavor" name="flavor">
+          <option value="all">all</option>
+          <option value="browser">browser</option>
+          <option value="unit">unit</option>
+        </select>
+      </label>
+      <label class="test-field">Path or glob pattern
+        <textarea class="test-pattern" name="pattern" rows="4" placeholder="Leave blank to use modified tests"></textarea>
+      </label>
+      <label class="test-checkbox"><input class="test-headless" name="headless" type="checkbox"> Headless</label>
+      <p class="test-status" role="status">Run modified tests or enter a path/glob pattern.</p>
+      <div class="test-actions">
+        <button class="test-close" type="button">Close</button>
+        <button class="test-submit" type="submit">Run Tests</button>
       </div>
     </form>
   </dialog>

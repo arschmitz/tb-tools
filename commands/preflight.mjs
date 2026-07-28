@@ -35,6 +35,7 @@ export function getTestOptions(options) {
   return {
     flavor: options.flavor,
     pattern: options.pattern,
+    headless: options.headless,
   };
 }
 

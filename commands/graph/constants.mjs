@@ -28,6 +28,7 @@ export const GRAPH_CLIENT_SCRIPTS = [
   { output: "graph-client/landing-dialog.js", source: "landing-dialog.js" },
   { output: "graph-client/new-patch-dialog.js", source: "new-patch-dialog.js" },
   { output: "graph-client/patch-dialog.js", source: "patch-dialog.js" },
+  { output: "graph-client/test-dialog.js", source: "test-dialog.js" },
   { output: "graph-client/init.js", source: "init.js" },
 ];
 export const GRAPH_MACH_ACTIONS = new Set([

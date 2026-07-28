@@ -16,6 +16,7 @@ export * from "./graph/landing.mjs";
 export * from "./graph/new-patch.mjs";
 export * from "./graph/patching.mjs";
 export * from "./graph/server.mjs";
+export * from "./graph/testing.mjs";
 
 export function createGraphCommand({
   getCheckoutData = getCheckoutGraphData,

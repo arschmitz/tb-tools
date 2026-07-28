@@ -59,6 +59,10 @@ import {
   createGraphPatchSession,
   serializeGraphPatchSession,
 } from "./patching.mjs";
+import {
+  createGraphTestSession,
+  serializeGraphTestSession,
+} from "./testing.mjs";
 
 async function readRequestJson(request) {
   const chunks = [];
@@ -147,6 +151,7 @@ export async function startInteractiveGraphServer({
   const patchSessions = new Map();
   const trySessions = new Map();
   const landSessions = new Map();
+  const testSessions = new Map();
   const sockets = new Set();
   let closeTimer;
   let lastHeartbeat;
@@ -169,6 +174,7 @@ export async function startInteractiveGraphServer({
     machSessions.forEach((session) => session.cancel?.());
     newPatchSessions.forEach((session) => session.cancel?.());
     patchSessions.forEach((session) => session.cancel?.());
+    testSessions.forEach((session) => session.cancel?.());
     server.closeReason = reason;
     closeTimer = setTimeout(() => {
       clearInterval(heartbeatTimer);
@@ -680,6 +686,24 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/api/test") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+
+        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const session = createGraphTestSession({
+          graph,
+          graphIndex: index,
+          options: body.options || {},
+          runCommand,
+        });
+
+        testSessions.set(session.id, session);
+        sendJson(response, 200, { ok: true, ...serializeGraphTestSession(session) });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/api/new-patch") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
@@ -833,6 +857,38 @@ export async function startInteractiveGraphServer({
         }
 
         sendJson(response, 200, { ok: true, ...serializeGraphLintSession(session) });
+        return;
+      }
+
+      const testStatusMatch = url.pathname.match(/^\/api\/test\/([^/]+)$/);
+      if (request.method === "GET" && testStatusMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        lastHeartbeat = Date.now();
+        const session = testSessions.get(decodeURIComponent(testStatusMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown test session." });
+          return;
+        }
+
+        sendJson(response, 200, { ok: true, ...serializeGraphTestSession(session) });
+        return;
+      }
+
+      const testCancelMatch = url.pathname.match(/^\/api\/test\/([^/]+)\/cancel$/);
+      if (request.method === "POST" && testCancelMatch) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+        const session = testSessions.get(decodeURIComponent(testCancelMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown test session." });
+          return;
+        }
+
+        session.cancel();
+        sendJson(response, 200, { ok: true, ...serializeGraphTestSession(session) });
         return;
       }
 

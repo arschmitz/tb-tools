@@ -16,6 +16,11 @@ import {
   patchRaw,
   submitClose,
   submitDialog,
+  testClose,
+  testDialog,
+  testForm,
+  testOutputPanel,
+  testOutputTab,
   tryDialog,
   tryForm,
   trySelector,
@@ -47,6 +52,7 @@ import {
   startGraphMachAction,
   submitTryDialog,
   toggleGraphSubmenu,
+  hasActiveTestSession,
   hasActiveTrySession,
   openTryDialog,
   updateTryDialogFields,
@@ -70,6 +76,13 @@ import {
   startGraphPatchSession,
   updatePatchDialogFields,
 } from "./patch-dialog.js";
+import {
+  cancelGraphTestSession,
+  handleTestOutputClick,
+  openTestDialog,
+  showTestOutputTab,
+  startGraphTestSession,
+} from "./test-dialog.js";
 import {
   answerSubmitPrompt,
   checkoutSelectedCommit,
@@ -130,6 +143,10 @@ document.addEventListener("click", (event) => {
       openPatchDialog();
     }
 
+    if (menuAction === "test") {
+      openTestDialog();
+    }
+
     if (menuAction === "land") {
       openLandDialog();
     }
@@ -176,7 +193,11 @@ document.addEventListener("click", (event) => {
 
   const machCancelButton = event.target.closest(".mach-cancel");
   if (machCancelButton) {
-    cancelGraphMachAction();
+    if (hasActiveTestSession()) {
+      cancelGraphTestSession();
+    } else {
+      cancelGraphMachAction();
+    }
     return;
   }
 
@@ -190,6 +211,10 @@ document.addEventListener("click", (event) => {
   const commandStatusClose = event.target.closest(".command-status-close");
   if (commandStatusClose) {
     dismissCommandStatus();
+    return;
+  }
+
+  if (handleTestOutputClick(event)) {
     return;
   }
 
@@ -244,6 +269,11 @@ patchDialog.querySelector(".patch-close").addEventListener("click", cancelOrClos
 patchDialog.querySelectorAll("button[data-answer]").forEach((button) => {
   button.addEventListener("click", () => answerPatchPrompt(button.dataset.answer === "true"));
 });
+testForm.addEventListener("submit", startGraphTestSession);
+testClose.addEventListener("click", () => {
+  testDialog.close();
+});
+testOutputTab.addEventListener("click", showTestOutputTab);
 landDialog.addEventListener("click", (event) => {
   const button = event.target.closest(".land-choice");
 
@@ -303,7 +333,15 @@ export function trackScrollDirection() {
   }
 
   const activePanel = document.querySelector(".panel.active");
+  if (!activePanel) {
+    return;
+  }
+
   const index = Number(activePanel.dataset.index);
+  if (!Number.isInteger(index)) {
+    return;
+  }
+
   const state = graphStates[index];
 
   if (window.scrollY > state.lastScrollY) {
@@ -355,6 +393,8 @@ export function renderGraph(index) {
 
 export function showTab(index) {
   document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
+  testOutputPanel.hidden = true;
+  testOutputTab.classList.remove("active");
   document.querySelector('.tab[data-index="' + index + '"]').classList.add("active");
   document.querySelector('.panel[data-index="' + index + '"]').classList.add("active");
   restoreGraphPaneWidth(index);
@@ -362,7 +402,7 @@ export function showTab(index) {
   scheduleGraphEnhancements(index);
 }
 
-document.querySelectorAll(".tab").forEach((tab) => {
+document.querySelectorAll(".tab[data-index]").forEach((tab) => {
   tab.addEventListener("click", () => showTab(Number(tab.dataset.index)));
 });
 
@@ -428,6 +468,9 @@ if (INTERACTIVE.enabled) {
     }
     if (uiState.patchPollTimer) {
       window.clearTimeout(uiState.patchPollTimer);
+    }
+    if (uiState.testPollTimer) {
+      window.clearTimeout(uiState.testPollTimer);
     }
     if (uiState.landPollTimer) {
       window.clearTimeout(uiState.landPollTimer);

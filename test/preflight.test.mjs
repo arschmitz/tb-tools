@@ -23,10 +23,12 @@ test("getTestOptions extracts test options", () => {
   assert.deepEqual(getTestOptions({
     flavor: "browser",
     pattern: ["mail/**/browser_*.js"],
+    headless: true,
     unrelated: true,
   }), {
     flavor: "browser",
     pattern: ["mail/**/browser_*.js"],
+    headless: true,
   });
 });
 
@@ -63,6 +65,7 @@ test("preflight command runs the selected workflow in order", async () => {
     base: "origin/main",
     flavor: "browser",
     pattern: "mail/**/browser_*.js",
+    headless: true,
     diff: true,
     diffArgs: ["--cached"],
     try: true,
@@ -76,7 +79,7 @@ test("preflight command runs the selected workflow in order", async () => {
     ["write", "Running lint"],
     ["lint"],
     ["write", "Running test"],
-    ["test", { flavor: "browser", pattern: "mail/**/browser_*.js" }],
+    ["test", { flavor: "browser", pattern: "mail/**/browser_*.js", headless: true }],
     ["write", "Running diff"],
     ["diff", ["--cached"]],
     ["write", "Running try"],
