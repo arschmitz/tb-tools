@@ -341,6 +341,25 @@ export function buildGraphHtml({
     .try-cancel { background: #fff; color: #20242a; }
     .try-submit { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
     .try-submit:disabled { cursor: wait; opacity: 0.65; }
+    .new-patch-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(560px, calc(100vw - 32px)); padding: 0; width: 540px; }
+    .new-patch-dialog::backdrop { background: rgba(15, 23, 42, 0.36); }
+    .new-patch-form { display: grid; gap: 12px; margin: 0; padding: 16px; }
+    .new-patch-title { font-size: 16px; margin: 0; }
+    .new-patch-field { color: #59616d; display: grid; font-size: 12px; font-weight: 600; gap: 5px; }
+    .new-patch-field input { border: 1px solid #b9c0cc; border-radius: 6px; box-sizing: border-box; color: #20242a; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 6px 8px; width: 100%; }
+    .new-patch-checkbox { align-items: center; color: #20242a; display: flex; font-size: 13px; gap: 8px; }
+    .new-patch-status { color: #59616d; font-size: 13px; margin: 0; }
+    .new-patch-status.error { color: #9b1c1c; }
+    .new-patch-links { display: flex; flex-wrap: wrap; gap: 8px; }
+    .new-patch-links[hidden] { display: none; }
+    .new-patch-links a { border: 1px solid #d0d7de; border-radius: 999px; color: #0969da; font-size: 13px; padding: 5px 9px; text-decoration: none; }
+    .new-patch-links a:hover, .new-patch-links a:focus { background: #f6f8fa; text-decoration: underline; }
+    .new-patch-output { background: #f6f8fa; border: 1px solid #d6dae1; border-radius: 6px; color: #24292f; font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; max-height: min(32vh, 260px); overflow: auto; padding: 10px; white-space: pre-wrap; }
+    .new-patch-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .new-patch-actions button { border: 1px solid #b9c0cc; border-radius: 4px; cursor: pointer; font-size: 13px; padding: 6px 10px; }
+    .new-patch-close { background: #fff; color: #20242a; }
+    .new-patch-submit { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
+    .new-patch-submit:disabled { cursor: wait; opacity: 0.65; }
     .patch-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(760px, calc(100vw - 32px)); padding: 0; width: 720px; }
     .patch-dialog::backdrop { background: rgba(15, 23, 42, 0.36); }
     .patch-form { display: grid; gap: 12px; margin: 0; padding: 16px; }
@@ -577,6 +596,19 @@ export function buildGraphHtml({
       .try-status.error { color: #ff9f9f; }
       .try-cancel { background: #191d23; border-color: #424b59; color: #f1f3f6; }
       .try-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .new-patch-dialog { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .new-patch-dialog::backdrop { background: rgba(0, 0, 0, 0.58); }
+      .new-patch-field { color: #acb4c0; }
+      .new-patch-field input { background: #0d1117; border-color: #424b59; color: #e6edf3; }
+      .new-patch-checkbox { color: #f1f3f6; }
+      .new-patch-status { color: #acb4c0; }
+      .new-patch-status.error { color: #ff9f9f; }
+      .new-patch-links a { border-color: #424b59; color: #79c0ff; }
+      .new-patch-links a:hover, .new-patch-links a:focus { background: #161b22; }
+      .new-patch-output { background: #0d1117; border-color: #424b59; color: #e6edf3; }
+      .new-patch-actions button { border-color: #424b59; }
+      .new-patch-close { background: #191d23; color: #f1f3f6; }
+      .new-patch-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
       .patch-dialog { background: #191d23; border-color: #424b59; color: #f1f3f6; }
       .patch-dialog::backdrop { background: rgba(0, 0, 0, 0.58); }
       .patch-field, .patch-options summary { color: #acb4c0; }
@@ -691,6 +723,22 @@ export function buildGraphHtml({
       <div class="try-actions">
         <button class="try-cancel" type="button">Cancel</button>
         <button class="try-submit" type="submit">Start Try</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="new-patch-dialog" id="new-patch-dialog">
+    <form class="new-patch-form">
+      <h2 class="new-patch-title">New Patch</h2>
+      <label class="new-patch-field">Bugzilla bug ID
+        <input class="new-patch-bug" name="bug-id" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]{4,8}" required>
+      </label>
+      <label class="new-patch-checkbox"><input class="new-patch-update" name="update" type="checkbox" checked> Update both checkouts first</label>
+      <p class="new-patch-status" role="status">Ready to create a new patch branch.</p>
+      <div class="new-patch-links" hidden></div>
+      <pre class="new-patch-output" aria-label="New patch output"></pre>
+      <div class="new-patch-actions">
+        <button class="new-patch-close" type="button">Close</button>
+        <button class="new-patch-submit" type="submit">Create Patch</button>
       </div>
     </form>
   </dialog>

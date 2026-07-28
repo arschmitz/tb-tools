@@ -83,6 +83,14 @@ export const landInput = landDialog.querySelector(".land-input");
 export const landOutput = landDialog.querySelector(".land-output");
 export const landStart = landDialog.querySelector(".land-start");
 export const landClose = landDialog.querySelector(".land-close");
+export const newPatchDialog = document.getElementById("new-patch-dialog");
+export const newPatchForm = newPatchDialog.querySelector(".new-patch-form");
+export const newPatchBug = newPatchDialog.querySelector(".new-patch-bug");
+export const newPatchStatus = newPatchDialog.querySelector(".new-patch-status");
+export const newPatchLinks = newPatchDialog.querySelector(".new-patch-links");
+export const newPatchOutput = newPatchDialog.querySelector(".new-patch-output");
+export const newPatchClose = newPatchDialog.querySelector(".new-patch-close");
+export const newPatchSubmit = newPatchDialog.querySelector(".new-patch-submit");
 export const patchDialog = document.getElementById("patch-dialog");
 export const patchForm = patchDialog.querySelector(".patch-form");
 export const patchRevision = patchDialog.querySelector(".patch-revision");
@@ -102,8 +110,11 @@ export const uiState = {
   submitPollTimer: null,
   landDialogState: null,
   landPollTimer: null,
+  newPatchDialogState: null,
+  newPatchPollTimer: null,
   activeMachSession: null,
   activeLintSession: null,
+  activeNewPatchSession: null,
   activePatchSession: null,
   activeTrySession: null,
   activeLandSession: null,

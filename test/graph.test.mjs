@@ -68,6 +68,7 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
   { source: "commit-actions.js", output: "graph-client/commit-actions.js" },
   { source: "landing-dialog.js", output: "graph-client/landing-dialog.js" },
+  { source: "new-patch-dialog.js", output: "graph-client/new-patch-dialog.js" },
   { source: "patch-dialog.js", output: "graph-client/patch-dialog.js" },
   { source: "init.js", output: "graph-client/init.js" },
 ];
@@ -2544,6 +2545,9 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /<dialog class="try-dialog" id="try-dialog">/);
   assert.match(html, /<option value="fuzzy">fuzzy<\/option>/);
   assert.match(html, /Post try link to Phabricator/);
+  assert.match(html, /<dialog class="new-patch-dialog" id="new-patch-dialog">/);
+  assert.match(html, /class="new-patch-bug"[^>]+pattern="\[0-9\]\{4,8\}"/);
+  assert.match(html, /class="new-patch-update"[^>]+checked/);
   assert.match(html, /<dialog class="patch-dialog" id="patch-dialog">/);
   assert.match(html, /class="patch-revision"[^>]+placeholder="D123456"/);
   assert.match(html, /class="patch-apply-to"/);
@@ -2559,11 +2563,14 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /\/api\/unshelf-graphs/);
   assert.match(client, /\/api\/mach-action/);
   assert.match(client, /\/api\/lint/);
+  assert.match(client, /\/api\/new-patch/);
   assert.match(client, /\/api\/patch/);
   assert.match(client, /\/api\/origin-main-status/);
   assert.match(client, /\/api\/land/);
   assert.match(client, /function startGraphLintAction/);
   assert.match(client, /startGraphLintAction\(menuAction\.replace/);
+  assert.match(client, /function openNewPatchDialog/);
+  assert.match(client, /openNewPatchDialog\(\)/);
   assert.match(client, /function openPatchDialog/);
   assert.match(client, /openPatchDialog\(\)/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("the try run"\)/);
@@ -2573,6 +2580,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /await startGraphMachAction\("run"\)/);
   assert.match(client, /clearInterval\(originMainStatusPoll\)/);
   assert.match(client, /window\.clearTimeout\(uiState\.landPollTimer\)/);
+  assert.match(client, /window\.clearTimeout\(uiState\.newPatchPollTimer\)/);
   assert.match(client, /window\.clearTimeout\(uiState\.patchPollTimer\)/);
   assert.match(client, /function cancelOrCloseLandDialog/);
   assert.match(client, /landClose\.disabled = false/);
@@ -3217,6 +3225,146 @@ test("interactive graph server starts lint sessions from menu modes", async (t) 
   assert.match(outgoingSession.output, /\$ \.\.\/mach commlint mail\/current\.js mail\/unstaged\.js mail\/staged\.js mail\/new\.js --fix/);
   assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint build calendar chat docs mail tools --fix"), true);
   assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint mail/current.js mail/unstaged.js mail/staged.js mail/new.js --fix"), true);
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph server creates new patch branches and assigns bugs", async (t) => {
+  const calls = [];
+  const bugUpdates = [];
+  const branches = new Map([
+    ["/repo/comm", "topic"],
+    ["/repo/firefox", "central-work"],
+  ]);
+  const hashes = new Map([
+    ["/repo/comm", "abc123abc123abc123abc123abc123abc123abcd"],
+    ["/repo/firefox", "def456def456def456def456def456def456def456"],
+  ]);
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "topic",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }, {
+      label: "firefox",
+      path: "/repo/firefox",
+      branch: "central-work",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    appConfig: {
+      bugzilla: {
+        user: "dev@example.com",
+        apiKey: "secret-key",
+      },
+    },
+    updateBug: async (bugId, update) => {
+      bugUpdates.push([bugId, update]);
+      return { id: bugId };
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "fetch" || command.args[0] === "pull") {
+        return "";
+      }
+
+      if (command.args[0] === "switch" && command.args[1] === "-c") {
+        branches.set(command.cwd, command.args[2]);
+        return "";
+      }
+
+      if (command.args[0] === "switch") {
+        branches.set(command.cwd, command.args[1]);
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return `${branches.get(command.cwd) || "main"}\n`;
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${hashes.get(command.cwd)}\n`;
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        return "main\nBug-1234567\nBug-1234567_2\n";
+      }
+
+      if (command.args[0] === "log") {
+        const hash = hashes.get(command.cwd);
+        const branch = branches.get(command.cwd);
+
+        return `\x1e${hash}\x1f\x1fHEAD -> ${branch}\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 1234567 - New patch\n`;
+      }
+
+      if (command.args[0] === "diff" || command.args[0] === "ls-files") {
+        return "";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/new-patch", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      options: {
+        bugId: "1234567",
+        update: true,
+      },
+      snapshotLimits: [1, 1],
+    }),
+  });
+  const start = await startResponse.json();
+
+  assert.equal(start.ok, true);
+  assert.equal(start.bugId, "1234567");
+
+  const session = await waitForMachSession(
+    new URL(`api/new-patch/${start.id}?token=secret`, serverInfo.url),
+    (item) => item.status === "complete"
+  );
+  assert.equal(session.branch, "Bug-1234567_3");
+  assert.equal(session.message, "Created Bug-1234567_3.");
+  assert.equal(session.snapshots[0].branch, "Bug-1234567_3");
+  assert.equal(session.snapshots[1].branch, "main");
+  assert.deepEqual(bugUpdates, [[
+    "1234567",
+    {
+      assigned_to: "dev@example.com",
+      status: "ASSIGNED",
+    },
+  ]]);
+  assert.match(session.output, /Updating checkouts from origin\/main/);
+  assert.match(session.output, /Created branch Bug-1234567_3\./);
+  assert.match(session.output, /Assigning bug 1234567 to dev@example\.com\./);
+  assert.equal(calls.some((call) => call.cwd === "/repo/comm" && call.args.join(" ") === "switch -c Bug-1234567_3"), true);
+  assert.equal(calls.some((call) => call.cwd === "/repo/firefox" && call.args.join(" ") === "pull --ff-only origin main"), true);
 
   const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
   await fetch(new URL("api/close", serverInfo.url), {

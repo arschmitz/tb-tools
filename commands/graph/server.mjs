@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import defaultConfig from "../../lib/config.mjs";
 import { pushCommits as defaultPushCommits } from "../../lib/lando.mjs";
 import { run } from "../../lib/utils.mjs";
 import {
@@ -50,6 +51,10 @@ import {
   createGraphLandSession,
   serializeGraphLandSession,
 } from "./landing.mjs";
+import {
+  createGraphNewPatchSession,
+  serializeGraphNewPatchSession,
+} from "./new-patch.mjs";
 import {
   createGraphPatchSession,
   serializeGraphPatchSession,
@@ -125,6 +130,7 @@ export async function startInteractiveGraphServer({
   postComment = defaultComment,
   pushCommits = defaultPushCommits,
   getRustUpstreamStatus = getGraphRustUpstreamStatus,
+  appConfig = defaultConfig,
   serverFactory = createServer,
 }) {
   const serverGraphs = graphs.map((graph) => ({
@@ -137,6 +143,7 @@ export async function startInteractiveGraphServer({
   const submitSessions = new Map();
   const machSessions = new Map();
   const lintSessions = new Map();
+  const newPatchSessions = new Map();
   const patchSessions = new Map();
   const trySessions = new Map();
   const landSessions = new Map();
@@ -160,6 +167,7 @@ export async function startInteractiveGraphServer({
 
     shuttingDown = true;
     machSessions.forEach((session) => session.cancel?.());
+    newPatchSessions.forEach((session) => session.cancel?.());
     patchSessions.forEach((session) => session.cancel?.());
     server.closeReason = reason;
     closeTimer = setTimeout(() => {
@@ -672,6 +680,30 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/api/new-patch") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+
+        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const snapshotLimits = Array.isArray(body.snapshotLimits) ? body.snapshotLimits.map(getRequestLimit) : [];
+        const session = createGraphNewPatchSession({
+          graphs: serverGraphs,
+          graph,
+          graphIndex: index,
+          snapshotLimits,
+          getSnapshots: (limits) => getServerGraphSnapshots({ snapshotLimits: limits }),
+          options: body.options || {},
+          runCommand,
+          updateBug,
+          config: appConfig,
+        });
+
+        newPatchSessions.set(session.id, session);
+        sendJson(response, 200, { ok: true, ...serializeGraphNewPatchSession(session) });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/api/patch") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
@@ -801,6 +833,38 @@ export async function startInteractiveGraphServer({
         }
 
         sendJson(response, 200, { ok: true, ...serializeGraphLintSession(session) });
+        return;
+      }
+
+      const newPatchStatusMatch = url.pathname.match(/^\/api\/new-patch\/([^/]+)$/);
+      if (request.method === "GET" && newPatchStatusMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        lastHeartbeat = Date.now();
+        const session = newPatchSessions.get(decodeURIComponent(newPatchStatusMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown new patch session." });
+          return;
+        }
+
+        sendJson(response, 200, { ok: true, ...serializeGraphNewPatchSession(session) });
+        return;
+      }
+
+      const newPatchCancelMatch = url.pathname.match(/^\/api\/new-patch\/([^/]+)\/cancel$/);
+      if (request.method === "POST" && newPatchCancelMatch) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+        const session = newPatchSessions.get(decodeURIComponent(newPatchCancelMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown new patch session." });
+          return;
+        }
+
+        session.cancel();
+        sendJson(response, 200, { ok: true, ...serializeGraphNewPatchSession(session) });
         return;
       }
 

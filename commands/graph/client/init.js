@@ -9,6 +9,8 @@ import {
   landDialog,
   landInputForm,
   landStart,
+  newPatchClose,
+  newPatchForm,
   patchDialog,
   patchForm,
   patchRaw,
@@ -56,6 +58,11 @@ import {
   startGraphLandSession,
   submitLandInputPrompt,
 } from "./landing-dialog.js";
+import {
+  cancelOrCloseNewPatchDialog,
+  openNewPatchDialog,
+  startGraphNewPatchSession,
+} from "./new-patch-dialog.js";
 import {
   answerPatchPrompt,
   cancelOrClosePatchDialog,
@@ -113,6 +120,10 @@ document.addEventListener("click", (event) => {
 
     if (menuAction === "try") {
       openTryDialog();
+    }
+
+    if (menuAction === "new-patch") {
+      openNewPatchDialog();
     }
 
     if (menuAction === "pull-patch") {
@@ -225,6 +236,8 @@ tryDialog.querySelector(".try-cancel").addEventListener("click", () => {
 landStart.addEventListener("click", startGraphLandSession);
 landClose.addEventListener("click", cancelOrCloseLandDialog);
 landInputForm.addEventListener("submit", submitLandInputPrompt);
+newPatchForm.addEventListener("submit", startGraphNewPatchSession);
+newPatchClose.addEventListener("click", cancelOrCloseNewPatchDialog);
 patchForm.addEventListener("submit", startGraphPatchSession);
 patchRaw.addEventListener("change", updatePatchDialogFields);
 patchDialog.querySelector(".patch-close").addEventListener("click", cancelOrClosePatchDialog);
@@ -409,6 +422,9 @@ if (INTERACTIVE.enabled) {
     }
     if (uiState.lintPollTimer) {
       window.clearTimeout(uiState.lintPollTimer);
+    }
+    if (uiState.newPatchPollTimer) {
+      window.clearTimeout(uiState.newPatchPollTimer);
     }
     if (uiState.patchPollTimer) {
       window.clearTimeout(uiState.patchPollTimer);
