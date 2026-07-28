@@ -288,8 +288,10 @@ export function createTryRunStatus(tryRuns = []) {
   }
 
   const group = document.createElement("span");
+  const current = document.createElement("span");
+
   group.className = "try-run-group";
-  group.append(createTryRunBadge(runs[0], "Try"));
+  current.className = "try-run-current";
 
   if (runs.length > 1) {
     const toggle = document.createElement("button");
@@ -314,7 +316,12 @@ export function createTryRunStatus(tryRuns = []) {
       toggle.setAttribute("aria-label", history.hidden ? "Show older try runs" : "Hide older try runs");
     });
 
-    group.append(toggle, history);
+    current.append(createTryRunBadge(runs[0], "Try"));
+    current.append(toggle);
+    group.append(current, history);
+  } else {
+    current.append(createTryRunBadge(runs[0], "Try"));
+    group.append(current);
   }
 
   return group;

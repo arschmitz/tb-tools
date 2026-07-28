@@ -2833,6 +2833,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /\.integration-status \{/);
   assert.match(html, /\.status-badge \{/);
   assert.match(html, /\.status-badge\.try/);
+  assert.match(html, /\.try-run-current \{/);
   assert.match(html, /\.try-run-toggle/);
   assert.match(html, /\.try-run-history\[hidden\]/);
   assert.match(html, /\.status-badge\.open/);
@@ -2933,6 +2934,9 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function formatCommitTitle/);
   assert.match(client, /Current staged, unstaged, and untracked changes/);
   assert.match(client, /if \(!INTERACTIVE\.enabled\)/);
+  assert.match(client, /current\.append\(createTryRunBadge\(runs\[0\], "Try"\)\)/);
+  assert.match(client, /current\.append\(toggle\)/);
+  assert.match(client, /group\.append\(current, history\)/);
   assert.match(client, /renderCommitIntegrationStatus\(container, \{ tryRuns: commit\.tryRuns \|\| \[\] \}/);
   assert.match(client, /amendButton\.hidden = !INTERACTIVE\.enabled/);
   assert.match(client, /function startPaneResize/);

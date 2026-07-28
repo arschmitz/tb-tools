@@ -276,7 +276,8 @@ export function buildGraphHtml({
     .status-badge.warning .status-value, .status-badge.warning .status-detail { color: #7d4e00; }
     .status-badge.error .status-value, .status-badge.error .status-detail { color: #9b1c1c; }
     .status-badge.try .status-value, .status-badge.try .status-detail { color: #0969da; }
-    .try-run-group { align-items: center; display: inline-flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+    .try-run-group { align-items: start; display: inline-grid; gap: 5px; min-width: 0; }
+    .try-run-current { align-items: center; display: inline-flex; gap: 5px; min-width: 0; }
     .try-run-toggle { align-items: center; background: #fff; border: 1px solid #d0d7de; border-radius: 999px; color: #57606a; cursor: pointer; display: inline-flex; font-size: 12px; height: 22px; justify-content: center; line-height: 1; width: 22px; }
     .try-run-toggle:hover, .try-run-toggle:focus { background: #f6f8fa; outline: none; }
     .try-run-history { align-items: center; display: inline-flex; flex-wrap: wrap; gap: 5px; }
