@@ -334,7 +334,6 @@ tb patch
 |--noBranch||Pass --no-branch to moz-phab patch|false|`tb patch --noBranch`
 |--skipDependencies||Pass --skip-dependencies to moz-phab patch|false|`tb patch --skipDependencies`
 |--includeAbandoned||Pass --include-abandoned to moz-phab patch|false|`tb patch --includeAbandoned`
-|--yes|-y|Pass --yes to moz-phab patch|false|`tb patch --yes`
 |--safeMode||Pass --safe-mode to moz-phab patch|false|`tb patch --safeMode`
 |--forceVcs||Pass --force-vcs to moz-phab patch|false|`tb patch --forceVcs`
 

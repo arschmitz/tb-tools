@@ -341,6 +341,32 @@ export function buildGraphHtml({
     .try-cancel { background: #fff; color: #20242a; }
     .try-submit { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
     .try-submit:disabled { cursor: wait; opacity: 0.65; }
+    .patch-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(760px, calc(100vw - 32px)); padding: 0; width: 720px; }
+    .patch-dialog::backdrop { background: rgba(15, 23, 42, 0.36); }
+    .patch-form { display: grid; gap: 12px; margin: 0; padding: 16px; }
+    .patch-title { font-size: 16px; margin: 0; }
+    .patch-grid { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+    .patch-field { color: #59616d; display: grid; font-size: 12px; font-weight: 600; gap: 5px; }
+    .patch-field.full { grid-column: 1 / -1; }
+    .patch-field input, .patch-field select { border: 1px solid #b9c0cc; border-radius: 6px; box-sizing: border-box; color: #20242a; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 6px 8px; width: 100%; }
+    .patch-options { border: 1px solid #d6dae1; border-radius: 6px; padding: 8px 10px; }
+    .patch-options summary { color: #59616d; cursor: pointer; font-size: 13px; font-weight: 600; }
+    .patch-checkboxes { display: grid; gap: 7px 14px; grid-template-columns: 1fr 1fr; margin-top: 10px; }
+    .patch-checkbox { align-items: center; color: #20242a; display: flex; font-size: 13px; gap: 8px; }
+    .patch-status, .patch-question { margin: 0; }
+    .patch-status { color: #59616d; font-size: 13px; }
+    .patch-status.error { color: #9b1c1c; }
+    .patch-prompt { border: 1px solid #d6dae1; border-radius: 6px; display: grid; gap: 10px; padding: 10px; }
+    .patch-prompt[hidden], .patch-links[hidden] { display: none; }
+    .patch-prompt-actions, .patch-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .patch-prompt-actions button, .patch-actions button { border: 1px solid #b9c0cc; border-radius: 4px; cursor: pointer; font-size: 13px; padding: 6px 10px; }
+    .patch-answer-yes, .patch-submit { background: #1f5f9f; border-color: #1f5f9f; color: #fff; }
+    .patch-answer-no, .patch-close { background: #fff; color: #20242a; }
+    .patch-submit:disabled { cursor: wait; opacity: 0.65; }
+    .patch-links { display: flex; flex-wrap: wrap; gap: 8px; }
+    .patch-links a { border: 1px solid #d0d7de; border-radius: 999px; color: #0969da; font-size: 13px; padding: 5px 9px; text-decoration: none; }
+    .patch-links a:hover, .patch-links a:focus { background: #f6f8fa; text-decoration: underline; }
+    .patch-output { background: #f6f8fa; border: 1px solid #d6dae1; border-radius: 6px; color: #24292f; font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; max-height: min(36vh, 300px); overflow: auto; padding: 10px; white-space: pre-wrap; }
     .land-dialog { border: 1px solid #b9c0cc; border-radius: 8px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28); color: #20242a; max-width: min(760px, calc(100vw - 32px)); padding: 0; width: 720px; }
     .land-dialog::backdrop { background: rgba(15, 23, 42, 0.36); }
     .land-panel { display: grid; gap: 12px; padding: 16px; }
@@ -551,6 +577,20 @@ export function buildGraphHtml({
       .try-status.error { color: #ff9f9f; }
       .try-cancel { background: #191d23; border-color: #424b59; color: #f1f3f6; }
       .try-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .patch-dialog { background: #191d23; border-color: #424b59; color: #f1f3f6; }
+      .patch-dialog::backdrop { background: rgba(0, 0, 0, 0.58); }
+      .patch-field, .patch-options summary { color: #acb4c0; }
+      .patch-field input, .patch-field select { background: #0d1117; border-color: #424b59; color: #e6edf3; }
+      .patch-options, .patch-prompt { border-color: #424b59; }
+      .patch-checkbox { color: #f1f3f6; }
+      .patch-status { color: #acb4c0; }
+      .patch-status.error { color: #ff9f9f; }
+      .patch-prompt-actions button, .patch-actions button { border-color: #424b59; }
+      .patch-answer-yes, .patch-submit { background: #4b9eff; border-color: #4b9eff; color: #07111f; }
+      .patch-answer-no, .patch-close { background: #191d23; color: #f1f3f6; }
+      .patch-links a { border-color: #424b59; color: #79c0ff; }
+      .patch-links a:hover, .patch-links a:focus { background: #161b22; }
+      .patch-output { background: #0d1117; border-color: #424b59; color: #e6edf3; }
       .land-dialog { background: #191d23; border-color: #424b59; color: #f1f3f6; }
       .land-dialog::backdrop { background: rgba(0, 0, 0, 0.58); }
       .land-field { color: #acb4c0; }
@@ -651,6 +691,63 @@ export function buildGraphHtml({
       <div class="try-actions">
         <button class="try-cancel" type="button">Cancel</button>
         <button class="try-submit" type="submit">Start Try</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="patch-dialog" id="patch-dialog">
+    <form class="patch-form">
+      <h2 class="patch-title">Pull Patch</h2>
+      <div class="patch-grid">
+        <label class="patch-field">Revision
+          <input class="patch-revision" name="revision" type="text" placeholder="D123456" autocomplete="off" required>
+        </label>
+        <label class="patch-field">Bug branch
+          <input class="patch-bug" name="bug" type="text" inputmode="numeric" autocomplete="off">
+        </label>
+        <label class="patch-field">Apply to
+          <select class="patch-apply-to" name="apply-to">
+            <option value="">moz-phab default</option>
+            <option value="here">here</option>
+            <option value="base">base</option>
+            <option value="node">node</option>
+          </select>
+        </label>
+        <label class="patch-field">Diff ID
+          <input class="patch-diff-id" name="diff-id" type="text" inputmode="numeric" autocomplete="off">
+        </label>
+        <label class="patch-field full">Name
+          <input class="patch-name" name="name" type="text" autocomplete="off">
+        </label>
+      </div>
+      <details class="patch-options">
+        <summary>Options</summary>
+        <div class="patch-checkboxes">
+          <label class="patch-checkbox"><input class="patch-checkpoint" name="checkpoint" type="checkbox" checked> Checkpoint before patching</label>
+          <label class="patch-checkbox"><input class="patch-rollback" name="rollback" type="checkbox" checked> Prompt to roll back on failure</label>
+          <label class="patch-checkbox"><input class="patch-raw" name="raw" type="checkbox"> Raw patch</label>
+          <label class="patch-checkbox"><input class="patch-no-commit" name="no-commit" type="checkbox"> Do not commit</label>
+          <label class="patch-checkbox"><input class="patch-no-bookmark" name="no-bookmark" type="checkbox"> No bookmark</label>
+          <label class="patch-checkbox"><input class="patch-no-topic" name="no-topic" type="checkbox"> No topic</label>
+          <label class="patch-checkbox"><input class="patch-no-branch" name="no-branch" type="checkbox"> No branch</label>
+          <label class="patch-checkbox"><input class="patch-skip-dependencies" name="skip-dependencies" type="checkbox"> Skip dependencies</label>
+          <label class="patch-checkbox"><input class="patch-include-abandoned" name="include-abandoned" type="checkbox"> Include abandoned</label>
+          <label class="patch-checkbox"><input class="patch-safe-mode" name="safe-mode" type="checkbox"> Safe mode</label>
+          <label class="patch-checkbox"><input class="patch-force-vcs" name="force-vcs" type="checkbox"> Force VCS</label>
+        </div>
+      </details>
+      <p class="patch-status" role="status">Ready to pull a Phabricator patch.</p>
+      <div class="patch-prompt" hidden>
+        <p class="patch-question"></p>
+        <div class="patch-prompt-actions">
+          <button class="patch-answer-yes" type="button" data-answer="true">Yes</button>
+          <button class="patch-answer-no" type="button" data-answer="false">No</button>
+        </div>
+      </div>
+      <div class="patch-links" hidden></div>
+      <pre class="patch-output" aria-label="Patch output"></pre>
+      <div class="patch-actions">
+        <button class="patch-close" type="button">Close</button>
+        <button class="patch-submit" type="submit">Pull Patch</button>
       </div>
     </form>
   </dialog>

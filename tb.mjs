@@ -281,7 +281,6 @@ const commands = {
       { name: "noBranch", description: "Pass --no-branch to moz-phab patch", defaultValue: "false" },
       { name: "skipDependencies", description: "Pass --skip-dependencies to moz-phab patch", defaultValue: "false" },
       { name: "includeAbandoned", description: "Pass --include-abandoned to moz-phab patch", defaultValue: "false" },
-      { name: "yes", alias: "y", description: "Pass --yes to moz-phab patch", defaultValue: "false" },
       { name: "safeMode", description: "Pass --safe-mode to moz-phab patch", defaultValue: "false" },
       { name: "forceVcs", description: "Pass --force-vcs to moz-phab patch", defaultValue: "false" },
     ],

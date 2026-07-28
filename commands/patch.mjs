@@ -22,7 +22,6 @@ export function getPatchArgs({
   noBranch = false,
   skipDependencies = false,
   includeAbandoned = false,
-  yes = false,
   safeMode = false,
   forceVcs = false,
 } = {}) {
@@ -70,10 +69,6 @@ export function getPatchArgs({
 
   if (includeAbandoned) {
     args.push("--include-abandoned");
-  }
-
-  if (yes) {
-    args.push("--yes");
   }
 
   if (safeMode) {
@@ -125,7 +120,6 @@ export function createPatchCommand({
     noBranch = false,
     skipDependencies = false,
     includeAbandoned = false,
-    yes = false,
     safeMode = false,
     forceVcs = false,
   } = {}) {
@@ -141,7 +135,6 @@ export function createPatchCommand({
       noBranch,
       skipDependencies,
       includeAbandoned,
-      yes,
       safeMode,
       forceVcs,
     });

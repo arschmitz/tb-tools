@@ -50,6 +50,10 @@ import {
   createGraphLandSession,
   serializeGraphLandSession,
 } from "./landing.mjs";
+import {
+  createGraphPatchSession,
+  serializeGraphPatchSession,
+} from "./patching.mjs";
 
 async function readRequestJson(request) {
   const chunks = [];
@@ -133,6 +137,7 @@ export async function startInteractiveGraphServer({
   const submitSessions = new Map();
   const machSessions = new Map();
   const lintSessions = new Map();
+  const patchSessions = new Map();
   const trySessions = new Map();
   const landSessions = new Map();
   const sockets = new Set();
@@ -155,6 +160,7 @@ export async function startInteractiveGraphServer({
 
     shuttingDown = true;
     machSessions.forEach((session) => session.cancel?.());
+    patchSessions.forEach((session) => session.cancel?.());
     server.closeReason = reason;
     closeTimer = setTimeout(() => {
       clearInterval(heartbeatTimer);
@@ -666,6 +672,26 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/api/patch") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+
+        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const session = createGraphPatchSession({
+          graph,
+          graphIndex: index,
+          snapshotLimit: getRequestSnapshotLimit(body, index),
+          getSnapshot: getServerGraphSnapshot,
+          options: body.options || {},
+          runCommand,
+        });
+
+        patchSessions.set(session.id, session);
+        sendJson(response, 200, { ok: true, ...serializeGraphPatchSession(session) });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/api/land") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
@@ -775,6 +801,55 @@ export async function startInteractiveGraphServer({
         }
 
         sendJson(response, 200, { ok: true, ...serializeGraphLintSession(session) });
+        return;
+      }
+
+      const patchStatusMatch = url.pathname.match(/^\/api\/patch\/([^/]+)$/);
+      if (request.method === "GET" && patchStatusMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        lastHeartbeat = Date.now();
+        const session = patchSessions.get(decodeURIComponent(patchStatusMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown patch pull session." });
+          return;
+        }
+
+        sendJson(response, 200, { ok: true, ...serializeGraphPatchSession(session) });
+        return;
+      }
+
+      const patchAnswerMatch = url.pathname.match(/^\/api\/patch\/([^/]+)\/answer$/);
+      if (request.method === "POST" && patchAnswerMatch) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+        const session = patchSessions.get(decodeURIComponent(patchAnswerMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown patch pull session." });
+          return;
+        }
+
+        session.answer(body.promptId, body.answer);
+        sendJson(response, 200, { ok: true, ...serializeGraphPatchSession(session) });
+        return;
+      }
+
+      const patchCancelMatch = url.pathname.match(/^\/api\/patch\/([^/]+)\/cancel$/);
+      if (request.method === "POST" && patchCancelMatch) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        lastHeartbeat = Date.now();
+        const session = patchSessions.get(decodeURIComponent(patchCancelMatch[1]));
+
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown patch pull session." });
+          return;
+        }
+
+        session.cancel();
+        sendJson(response, 200, { ok: true, ...serializeGraphPatchSession(session) });
         return;
       }
 

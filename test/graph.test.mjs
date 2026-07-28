@@ -68,6 +68,7 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
   { source: "commit-actions.js", output: "graph-client/commit-actions.js" },
   { source: "landing-dialog.js", output: "graph-client/landing-dialog.js" },
+  { source: "patch-dialog.js", output: "graph-client/patch-dialog.js" },
   { source: "init.js", output: "graph-client/init.js" },
 ];
 
@@ -2543,6 +2544,11 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /<dialog class="try-dialog" id="try-dialog">/);
   assert.match(html, /<option value="fuzzy">fuzzy<\/option>/);
   assert.match(html, /Post try link to Phabricator/);
+  assert.match(html, /<dialog class="patch-dialog" id="patch-dialog">/);
+  assert.match(html, /class="patch-revision"[^>]+placeholder="D123456"/);
+  assert.match(html, /class="patch-apply-to"/);
+  assert.match(html, /class="patch-skip-dependencies"/);
+  assert.doesNotMatch(html, /class="patch-yes"/);
   assert.match(html, /<dialog class="land-dialog" id="land-dialog">/);
   assert.match(html, /class="land-lando-repo"[^>]+value="thunderbird-desktop-main"/);
   assert.match(html, /class="land-start" type="button">Start Landing<\/button>/);
@@ -2553,10 +2559,13 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /\/api\/unshelf-graphs/);
   assert.match(client, /\/api\/mach-action/);
   assert.match(client, /\/api\/lint/);
+  assert.match(client, /\/api\/patch/);
   assert.match(client, /\/api\/origin-main-status/);
   assert.match(client, /\/api\/land/);
   assert.match(client, /function startGraphLintAction/);
   assert.match(client, /startGraphLintAction\(menuAction\.replace/);
+  assert.match(client, /function openPatchDialog/);
+  assert.match(client, /openPatchDialog\(\)/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("the try run"\)/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("land patches"\)/);
   assert.match(client, /snapshotLimits: getSnapshotLimits\(\)/);
@@ -2564,6 +2573,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /await startGraphMachAction\("run"\)/);
   assert.match(client, /clearInterval\(originMainStatusPoll\)/);
   assert.match(client, /window\.clearTimeout\(uiState\.landPollTimer\)/);
+  assert.match(client, /window\.clearTimeout\(uiState\.patchPollTimer\)/);
   assert.match(client, /function cancelOrCloseLandDialog/);
   assert.match(client, /landClose\.disabled = false/);
   assert.match(client, /landClose\.textContent = busy \? "Cancel" : "Close"/);
@@ -3207,6 +3217,134 @@ test("interactive graph server starts lint sessions from menu modes", async (t) 
   assert.match(outgoingSession.output, /\$ \.\.\/mach commlint mail\/current\.js mail\/unstaged\.js mail\/staged\.js mail\/new\.js --fix/);
   assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint build calendar chat docs mail tools --fix"), true);
   assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint mail/current.js mail/unstaged.js mail/staged.js mail/new.js --fix"), true);
+
+  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph server pulls patches through browser prompts", async (t) => {
+  const calls = [];
+  let branch = "main";
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cmd === "moz-phab") {
+        const error = new Error("patch failed");
+
+        error.stdout = "partial patch output\n";
+        error.stderr = "patch failed\n";
+        throw error;
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return `${branch}\n`;
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "HEAD") {
+        return "abc123abc123abc123abc123abc123abc123abcd\n";
+      }
+
+      if (command.args[0] === "update-ref") {
+        return "";
+      }
+
+      if (command.args[0] === "switch" && command.args[1] === "-c") {
+        branch = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "switch") {
+        branch = command.args[1] === "--detach" ? "" : command.args[1];
+        return "";
+      }
+
+      if (command.args[0] === "reset" || command.args[0] === "clean") {
+        return "";
+      }
+
+      if (command.args[0] === "log") {
+        return "\x1eabc123abc123abc123abc123abc123abc123abcd\x1f\x1fHEAD -> main\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 1234567 - Pulled patch\n";
+      }
+
+      if (command.args[0] === "diff" || command.args[0] === "ls-files") {
+        return "";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/patch", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      options: {
+        revision: "123456",
+        bug: "1234567",
+        applyTo: "here",
+        diffId: "42",
+        name: "Bug-1234567",
+        noCommit: true,
+        includeAbandoned: true,
+        safeMode: true,
+        forceVcs: true,
+      },
+      snapshotLimits: [1],
+    }),
+  });
+  const start = await startResponse.json();
+
+  assert.equal(start.ok, true);
+  assert.equal(start.revision, "D123456");
+
+  const statusUrl = new URL(`api/patch/${start.id}?token=secret`, serverInfo.url);
+  let session = await waitForMachSession(statusUrl, (item) => item.status === "prompt");
+  assert.equal(session.prompt.message, "Patch failed. Roll back to checkpoint? [y/n]:");
+  assert.match(session.output, /\$ moz-phab patch D123456 --apply-to here --diff-id 42 --name Bug-1234567 --no-commit --include-abandoned --safe-mode --force-vcs/);
+  assert.doesNotMatch(session.output, /--yes/);
+  assert.equal(calls.some((call) => call.cmd === "git" && call.args.join(" ") === "switch -c Bug-1234567"), true);
+
+  const answerResponse = await fetch(new URL(`api/patch/${start.id}/answer`, serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      promptId: session.prompt.id,
+      answer: true,
+    }),
+  });
+  session = await answerResponse.json();
+  assert.equal(session.status, "running");
+
+  session = await waitForMachSession(statusUrl, (item) => item.status === "error");
+  assert.equal(session.message, "patch failed");
+  assert.match(session.output, /Rolled back to abc123abc123\./);
+  assert.equal(session.snapshot.commits[0].hash, "abc123abc123abc123abc123abc123abc123abcd");
+  assert.equal(calls.some((call) => call.cmd === "git" && call.args.join(" ") === "reset --hard abc123abc123abc123abc123abc123abc123abcd"), true);
+  assert.equal(calls.some((call) => call.cmd === "git" && call.args.join(" ") === "clean -fd"), true);
 
   const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
   await fetch(new URL("api/close", serverInfo.url), {

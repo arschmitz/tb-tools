@@ -9,6 +9,9 @@ import {
   landDialog,
   landInputForm,
   landStart,
+  patchDialog,
+  patchForm,
+  patchRaw,
   submitClose,
   submitDialog,
   tryDialog,
@@ -53,6 +56,13 @@ import {
   startGraphLandSession,
   submitLandInputPrompt,
 } from "./landing-dialog.js";
+import {
+  answerPatchPrompt,
+  cancelOrClosePatchDialog,
+  openPatchDialog,
+  startGraphPatchSession,
+  updatePatchDialogFields,
+} from "./patch-dialog.js";
 import {
   answerSubmitPrompt,
   checkoutSelectedCommit,
@@ -103,6 +113,10 @@ document.addEventListener("click", (event) => {
 
     if (menuAction === "try") {
       openTryDialog();
+    }
+
+    if (menuAction === "pull-patch") {
+      openPatchDialog();
     }
 
     if (menuAction === "land") {
@@ -211,6 +225,12 @@ tryDialog.querySelector(".try-cancel").addEventListener("click", () => {
 landStart.addEventListener("click", startGraphLandSession);
 landClose.addEventListener("click", cancelOrCloseLandDialog);
 landInputForm.addEventListener("submit", submitLandInputPrompt);
+patchForm.addEventListener("submit", startGraphPatchSession);
+patchRaw.addEventListener("change", updatePatchDialogFields);
+patchDialog.querySelector(".patch-close").addEventListener("click", cancelOrClosePatchDialog);
+patchDialog.querySelectorAll("button[data-answer]").forEach((button) => {
+  button.addEventListener("click", () => answerPatchPrompt(button.dataset.answer === "true"));
+});
 landDialog.addEventListener("click", (event) => {
   const button = event.target.closest(".land-choice");
 
@@ -389,6 +409,9 @@ if (INTERACTIVE.enabled) {
     }
     if (uiState.lintPollTimer) {
       window.clearTimeout(uiState.lintPollTimer);
+    }
+    if (uiState.patchPollTimer) {
+      window.clearTimeout(uiState.patchPollTimer);
     }
     if (uiState.landPollTimer) {
       window.clearTimeout(uiState.landPollTimer);

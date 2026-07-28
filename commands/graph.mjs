@@ -13,6 +13,7 @@ export * from "./graph/data.mjs";
 export * from "./graph/actions.mjs";
 export * from "./graph/assets.mjs";
 export * from "./graph/landing.mjs";
+export * from "./graph/patching.mjs";
 export * from "./graph/server.mjs";
 
 export function createGraphCommand({

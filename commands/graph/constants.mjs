@@ -26,6 +26,7 @@ export const GRAPH_CLIENT_SCRIPTS = [
   { output: "graph-client/command-sessions.js", source: "command-sessions.js" },
   { output: "graph-client/commit-actions.js", source: "commit-actions.js" },
   { output: "graph-client/landing-dialog.js", source: "landing-dialog.js" },
+  { output: "graph-client/patch-dialog.js", source: "patch-dialog.js" },
   { output: "graph-client/init.js", source: "init.js" },
 ];
 export const GRAPH_MACH_ACTIONS = new Set([

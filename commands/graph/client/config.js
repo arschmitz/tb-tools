@@ -83,6 +83,18 @@ export const landInput = landDialog.querySelector(".land-input");
 export const landOutput = landDialog.querySelector(".land-output");
 export const landStart = landDialog.querySelector(".land-start");
 export const landClose = landDialog.querySelector(".land-close");
+export const patchDialog = document.getElementById("patch-dialog");
+export const patchForm = patchDialog.querySelector(".patch-form");
+export const patchRevision = patchDialog.querySelector(".patch-revision");
+export const patchApplyTo = patchDialog.querySelector(".patch-apply-to");
+export const patchRaw = patchDialog.querySelector(".patch-raw");
+export const patchStatus = patchDialog.querySelector(".patch-status");
+export const patchPrompt = patchDialog.querySelector(".patch-prompt");
+export const patchQuestion = patchDialog.querySelector(".patch-question");
+export const patchLinks = patchDialog.querySelector(".patch-links");
+export const patchOutput = patchDialog.querySelector(".patch-output");
+export const patchClose = patchDialog.querySelector(".patch-close");
+export const patchSubmit = patchDialog.querySelector(".patch-submit");
 export const uiState = {
   contextMenuState: null,
   amendDialogState: null,
@@ -92,12 +104,14 @@ export const uiState = {
   landPollTimer: null,
   activeMachSession: null,
   activeLintSession: null,
+  activePatchSession: null,
   activeTrySession: null,
   activeLandSession: null,
   lastMachSession: null,
   machOutputVisible: false,
   machPollTimer: null,
   lintPollTimer: null,
+  patchPollTimer: null,
   tryPollTimer: null,
   commandStatusStartedAt: 0,
   commandElapsedTimer: null,

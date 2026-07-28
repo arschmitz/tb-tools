@@ -40,7 +40,7 @@ export function getUpdateActionLabel(mode) {
 }
 
 export function setUpdateBusy(busy) {
-  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='lint-all'], .graph-menu-command[data-menu-action='lint-outgoing'], .graph-menu-command[data-menu-action='try'], .graph-menu-command[data-menu-action='land']").forEach((button) => {
+  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='lint-all'], .graph-menu-command[data-menu-action='lint-outgoing'], .graph-menu-command[data-menu-action='pull-patch'], .graph-menu-command[data-menu-action='try'], .graph-menu-command[data-menu-action='land']").forEach((button) => {
     button.disabled = busy;
   });
 }
@@ -101,6 +101,13 @@ export function hasActiveLintSession() {
   return Boolean(uiState.activeLintSession && uiState.activeLintSession.status === "running");
 }
 
+export function hasActivePatchSession() {
+  return Boolean(
+    uiState.activePatchSession &&
+    (uiState.activePatchSession.status === "running" || uiState.activePatchSession.status === "prompt")
+  );
+}
+
 export function hasActiveLandSession() {
   return Boolean(
     uiState.activeLandSession &&
@@ -109,7 +116,11 @@ export function hasActiveLandSession() {
 }
 
 export function hasActiveCommandSession() {
-  return hasActiveMachSession() || hasActiveLintSession() || hasActiveTrySession() || hasActiveLandSession();
+  return hasActiveMachSession() ||
+    hasActiveLintSession() ||
+    hasActivePatchSession() ||
+    hasActiveTrySession() ||
+    hasActiveLandSession();
 }
 
 export function isMachRunSession(session) {

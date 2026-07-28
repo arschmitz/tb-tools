@@ -24,7 +24,6 @@ test("getPatchArgs builds moz-phab patch arguments", () => {
     noBranch: true,
     skipDependencies: true,
     includeAbandoned: true,
-    yes: true,
     safeMode: true,
     forceVcs: true,
   }), [
@@ -42,7 +41,6 @@ test("getPatchArgs builds moz-phab patch arguments", () => {
     "--no-branch",
     "--skip-dependencies",
     "--include-abandoned",
-    "--yes",
     "--safe-mode",
     "--force-vcs",
   ]);
@@ -135,7 +133,6 @@ test("patch command passes through moz-phab patch options", async () => {
     noBranch: true,
     skipDependencies: true,
     includeAbandoned: true,
-    yes: true,
     safeMode: true,
     forceVcs: true,
   });
@@ -157,7 +154,6 @@ test("patch command passes through moz-phab patch options", async () => {
       "--no-branch",
       "--skip-dependencies",
       "--include-abandoned",
-      "--yes",
       "--safe-mode",
       "--force-vcs",
     ],
