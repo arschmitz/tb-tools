@@ -92,6 +92,7 @@ import {
   answerSubmitPrompt,
   checkoutSelectedCommit,
   closeAmendDialog,
+  continueRebaseDialog,
   closeSubmitDialog,
   openAmendDialog,
   openSubmitDialog,
@@ -107,6 +108,10 @@ import {
   scheduleCommitReviewerSearch,
   submitCommitDialog,
 } from "./commit-dialog.js";
+import {
+  closeRebaseDialog,
+  handleRebaseDialogClick,
+} from "./rebase-dialog.js";
 import { markBugForCheckin } from "./diff-viewer.js";
 import { hideCommitContextMenu } from "./lane-renderer.js";
 
@@ -233,6 +238,22 @@ document.addEventListener("click", (event) => {
   }
 
   if (handleTestOutputClick(event)) {
+    return;
+  }
+
+  if (handleRebaseDialogClick(event)) {
+    return;
+  }
+
+  const rebaseContinue = event.target.closest(".rebase-continue");
+  if (rebaseContinue) {
+    continueRebaseDialog();
+    return;
+  }
+
+  const rebaseClose = event.target.closest(".rebase-close");
+  if (rebaseClose) {
+    closeRebaseDialog();
     return;
   }
 

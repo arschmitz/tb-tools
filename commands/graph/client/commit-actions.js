@@ -38,6 +38,12 @@ import {
   getLoadedGitCommitLimit,
   refreshGraphFromServer,
 } from "./command-sessions.js";
+import {
+  closeRebaseDialog,
+  openRebaseFailureDialog,
+  setRebaseDialogBusy,
+  setRebaseDialogError,
+} from "./rebase-dialog.js";
 
 export async function showDiff(graph, index, commit) {
   const viewer = document.getElementById("diff-" + index);
@@ -239,6 +245,15 @@ export async function runCommitAction(
     const result = await response.json();
 
     if (!response.ok) {
+      if (action === "rebase" && result.rebaseConflict) {
+        openRebaseFailureDialog(result.rebaseConflict, {
+          fallbackMessage: result.error || response.statusText,
+        });
+        status.classList.add("error");
+        status.textContent = "Rebase paused for conflicts.";
+        return;
+      }
+
       throw new Error(result.error || response.statusText);
     }
 
@@ -262,6 +277,62 @@ export async function runCommitAction(
   } catch (error) {
     status.classList.add("error");
     status.textContent = error && error.message ? error.message : String(error);
+  }
+}
+
+export async function continueRebaseDialog() {
+  const dialogState = uiState.rebaseDialogState;
+
+  if (!dialogState?.sessionId) {
+    return;
+  }
+
+  const graphIndex = Number(dialogState.graphIndex);
+
+  setRebaseDialogBusy("Continuing rebase...");
+
+  try {
+    const response = await fetch(
+      "/api/rebase/" + encodeURIComponent(dialogState.sessionId) + "/continue",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          token: INTERACTIVE.token,
+          snapshotLimit: getLoadedGitCommitLimit(graphStates[graphIndex]),
+        }),
+      }
+    );
+    const result = await response.json();
+
+    if (!response.ok) {
+      if (result.rebaseConflict) {
+        openRebaseFailureDialog(result.rebaseConflict, {
+          fallbackMessage: result.error || response.statusText,
+        });
+        return;
+      }
+
+      throw new Error(result.error || response.statusText);
+    }
+
+    if (result.branch) {
+      graphStates[graphIndex].graph.branch = result.branch;
+    }
+    if (result.currentHash) {
+      graphStates[graphIndex].currentHash = result.currentHash;
+    }
+
+    if (result.snapshot) {
+      applyGraphSnapshot(graphIndex, result.snapshot, { force: true });
+    } else {
+      await refreshGraphFromServer(graphIndex, { force: true });
+    }
+
+    closeRebaseDialog();
+    selectCommitActionResult(graphIndex, result.currentHash, result.message);
+  } catch (error) {
+    setRebaseDialogError(error && error.message ? error.message : String(error));
   }
 }
 

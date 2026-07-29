@@ -52,6 +52,14 @@ export const graphStates = GRAPHS.map((graph) => {
   };
 });
 export const contextMenu = document.getElementById("commit-context-menu");
+export const rebaseDialog = document.getElementById("rebase-dialog");
+export const rebaseStatus = rebaseDialog.querySelector(".rebase-status");
+export const rebaseSummary = rebaseDialog.querySelector(".rebase-summary");
+export const rebaseConflictFiles = rebaseDialog.querySelector(".rebase-conflict-files");
+export const rebaseOutput = rebaseDialog.querySelector(".rebase-output");
+export const rebaseError = rebaseDialog.querySelector(".rebase-error");
+export const rebaseClose = rebaseDialog.querySelector(".rebase-close");
+export const rebaseContinue = rebaseDialog.querySelector(".rebase-continue");
 export const amendDialog = document.getElementById("amend-dialog");
 export const amendForm = amendDialog.querySelector(".amend-form");
 export const amendMessage = amendDialog.querySelector(".amend-message");
@@ -146,6 +154,7 @@ export const uiState = {
   activeLintSession: null,
   activeNewPatchSession: null,
   activePatchSession: null,
+  rebaseDialogState: null,
   activeTestSession: null,
   activeTrySession: null,
   activeLandSession: null,

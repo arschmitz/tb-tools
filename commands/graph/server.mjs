@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import defaultConfig from "../../lib/config.mjs";
 import { pushCommits as defaultPushCommits } from "../../lib/lando.mjs";
@@ -41,6 +42,7 @@ import {
   amendCommitMessage,
   checkoutGraphCommit,
   chooseGraphMachCheckout,
+  continueRebaseCommit,
   createGraphLintSession,
   createGraphMachSession,
   createGraphSubmitSession,
@@ -175,6 +177,7 @@ export async function startInteractiveGraphServer({
   const trySessions = new Map();
   const landSessions = new Map();
   const testSessions = new Map();
+  const rebaseSessions = new Map();
   const reviewerSearchCache = new Map();
   const reviewerSearchInflight = new Map();
   const reviewerSearchRouteCooldowns = new Map();
@@ -324,6 +327,21 @@ export async function startInteractiveGraphServer({
         getServerGraphSnapshot(graph, getRequestSnapshotLimit(body, index)),
       ),
     );
+  }
+
+  function attachRebaseConflict(body, error) {
+    if (!error?.rebaseConflict || !error?.rebaseState) {
+      return;
+    }
+
+    const id = error.rebaseState.id || randomUUID();
+
+    error.rebaseState.id = id;
+    rebaseSessions.set(id, error.rebaseState);
+    body.rebaseConflict = {
+      ...error.rebaseConflict,
+      id,
+    };
   }
 
   async function getServerOriginMainStatus(graph, { force = false } = {}) {
@@ -869,6 +887,39 @@ export async function startInteractiveGraphServer({
           serverGraphs[Number(body.graphIndex)],
           getRequestLimit(body.snapshotLimit),
         );
+        sendJson(response, 200, { ok: true, ...result, snapshot });
+        return;
+      }
+
+      const rebaseContinueMatch = url.pathname.match(/^\/api\/rebase\/([^/]+)\/continue$/);
+
+      if (request.method === "POST" && rebaseContinueMatch) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        noteBrowserActivity();
+
+        const sessionId = decodeURIComponent(rebaseContinueMatch[1]);
+        const session = rebaseSessions.get(sessionId);
+
+        if (!session) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown rebase session.",
+          });
+          return;
+        }
+
+        const result = await continueRebaseCommit({
+          session,
+          runCommand,
+        });
+        rebaseSessions.delete(sessionId);
+
+        const snapshot = await getServerGraphSnapshot(
+          serverGraphs[Number(session.graphIndex)],
+          getRequestLimit(body.snapshotLimit),
+        );
+
         sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
       }
@@ -1710,6 +1761,8 @@ export async function startInteractiveGraphServer({
       if (error?.dirty) {
         body.dirty = error.dirty;
       }
+
+      attachRebaseConflict(body, error);
 
       sendJson(response, error.statusCode || 500, body);
     }

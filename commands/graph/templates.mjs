@@ -199,6 +199,26 @@ ${testOutputTab}</nav>
     <button type="button" role="menuitem" data-action="branch">Branch</button>
     <button type="button" role="menuitem" data-action="prune">Prune</button>
   </div>
+  <dialog class="rebase-dialog" id="rebase-dialog">
+    <div class="rebase-dialog-body">
+      <h2 class="rebase-title">Rebase Needs Attention</h2>
+      <p class="rebase-status" role="status"></p>
+      <p class="rebase-summary"></p>
+      <section class="rebase-conflict-section">
+        <h3>Conflicted Files</h3>
+        <div class="rebase-conflict-files"></div>
+      </section>
+      <section class="rebase-output-section">
+        <h3>Git Output</h3>
+        <pre class="rebase-output"></pre>
+      </section>
+      <p class="rebase-error" role="alert"></p>
+      <div class="rebase-actions">
+        <button class="rebase-close" type="button">Close</button>
+        <button class="rebase-continue" type="button">Continue Rebase</button>
+      </div>
+    </div>
+  </dialog>
   <dialog class="amend-dialog" id="amend-dialog">
     <form class="amend-form">
       <h2 class="amend-title">Amend Commit</h2>

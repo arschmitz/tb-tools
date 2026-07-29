@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { run } from "../../lib/utils.mjs";
@@ -689,6 +689,19 @@ function isEmptyCherryPickError(error) {
   );
 }
 
+function isCherryPickConflictError(error) {
+  return /CONFLICT|fix conflicts|after resolving/i.test(
+    [error?.message, error?.stderr, error?.stdout].filter(Boolean).join("\n"),
+  );
+}
+
+function getErrorOutput(error) {
+  return [error?.stderr, error?.stdout, error?.message]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 async function abortGraphCherryPick(graph, runCommand) {
   await runCommand({
     cmd: "git",
@@ -706,6 +719,87 @@ async function resetGraphReplayState(graph, runCommand) {
     cwd: graph.path,
     silent: true,
   }).catch(() => {});
+}
+
+async function getGraphConflictFiles(graph, runCommand) {
+  const output = await runCommand({
+    cmd: "git",
+    args: ["diff", "--name-only", "--diff-filter=U"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  }).catch(() => "");
+
+  return output.trim().split(/\r?\n/).filter(Boolean);
+}
+
+async function getGraphConflictMarkerFiles(graph, files = []) {
+  const markerFiles = [];
+  const markerPattern = /^(?:<{7}|={7}|>{7}|\|{7})(?:\s|$)/m;
+
+  for (const file of files) {
+    try {
+      const content = await readFile(path.resolve(graph.path, file), "utf8");
+
+      if (markerPattern.test(content)) {
+        markerFiles.push(file);
+      }
+    } catch {
+      // Deleted or binary conflict resolutions are handled by git's index state.
+    }
+  }
+
+  return markerFiles;
+}
+
+function getConflictFileDetails(graph, files = []) {
+  return files.map((file) => ({
+    path: file,
+    absolutePath: path.resolve(graph.path, file),
+  }));
+}
+
+function createRebaseConflictError({
+  session,
+  conflictCommit,
+  conflictIndex,
+  conflictFiles,
+  displayFiles = conflictFiles,
+  markerFiles = [],
+  cause,
+  reason = "git-conflict",
+}) {
+  const error = new Error(
+    `Rebase conflict while applying ${conflictCommit.slice(0, 12)}.`,
+  );
+
+  session.conflictCommit = conflictCommit;
+  session.conflictIndex = conflictIndex;
+  session.conflictFiles = conflictFiles;
+  session.conflictReason = reason;
+  error.statusCode = 409;
+  error.rebaseState = session;
+  error.rebaseConflict = {
+    type: "conflict",
+    reason,
+    graphIndex: session.graphIndex,
+    label: session.graph.label,
+    path: session.graph.path,
+    hash: session.hash,
+    base: session.base.hash,
+    branch: session.branch,
+    mode: session.mode,
+    conflictCommit,
+    conflictIndex,
+    totalCommits: session.stackCommits.length,
+    files: getConflictFileDetails(session.graph, displayFiles),
+    markerFiles: getConflictFileDetails(session.graph, markerFiles),
+    message: error.message,
+    output: getErrorOutput(cause),
+    canContinue: true,
+  };
+
+  return error;
 }
 
 async function getRebaseStackBranches({
@@ -2865,9 +2959,269 @@ export async function checkoutCommit({
   };
 }
 
+function recordSkippedRebaseCommit(session, commit, hash) {
+  if (!session.skippedMainCommits.includes(commit)) {
+    session.skippedMainCommits.push(commit);
+  }
+  session.skippedReplayedCommits.push({
+    originalHash: commit,
+    hash,
+  });
+}
+
+async function finishRebaseReplay(session, runCommand) {
+  const {
+    graph,
+    base,
+    hash,
+    branch,
+    mode,
+    stackCommits,
+    stackBranchRefs,
+    skippedMainCommits,
+    rewrittenCommits,
+    skippedReplayedCommits,
+  } = session;
+  const rewrittenHashByOriginalHash = new Map(
+    rewrittenCommits.map((commit) => [commit.originalHash, commit.hash]),
+  );
+  const skippedHashByOriginalHash = new Map(
+    skippedReplayedCommits.map((commit) => [commit.originalHash, commit.hash]),
+  );
+  const branchUpdates = [];
+
+  for (const { hash: originalHash, branches } of stackBranchRefs) {
+    const rewrittenHash =
+      rewrittenHashByOriginalHash.get(originalHash) ||
+      skippedHashByOriginalHash.get(originalHash);
+
+    if (!rewrittenHash) {
+      continue;
+    }
+
+    for (const branchName of branches) {
+      await runCommand({
+        cmd: "git",
+        args: ["branch", "-f", branchName, rewrittenHash],
+        cwd: graph.path,
+        silent: true,
+      });
+      branchUpdates.push({
+        branch: branchName,
+        originalHash,
+        hash: rewrittenHash,
+      });
+    }
+  }
+
+  let currentHash = rewrittenCommits.at(-1)?.hash ||
+    skippedReplayedCommits.at(-1)?.hash ||
+    base.hash;
+
+  if (branch && !branchUpdates.some((update) => update.branch === branch)) {
+    await runCommand({
+      cmd: "git",
+      args: ["branch", "-f", branch, currentHash],
+      cwd: graph.path,
+      silent: true,
+    });
+    branchUpdates.push({
+      branch,
+      originalHash: stackCommits.at(-1),
+      hash: currentHash,
+    });
+  }
+
+  if (branch) {
+    await runCommand({
+      cmd: "git",
+      args: ["switch", branch],
+      cwd: graph.path,
+      silent: true,
+    });
+    currentHash = (await runCommand({
+      cmd: "git",
+      args: ["rev-parse", "HEAD"],
+      cwd: graph.path,
+      capture: true,
+      silent: true,
+    })).trim();
+    graph.branch = branch;
+  } else {
+    graph.branch = "(detached)";
+  }
+
+  return {
+    action: "rebase",
+    label: graph.label,
+    path: graph.path,
+    hash,
+    branch,
+    base: base.hash,
+    mode,
+    commits: stackCommits,
+    skippedMainCommits,
+    rewrittenCommits,
+    branchUpdates,
+    rebasedCount: rewrittenCommits.length,
+    currentHash,
+    detached: !branch,
+    message: `${graph.label} rebased ${branch ? `branch ${branch}` : hash.slice(0, 12)}${rewrittenCommits.length > 1 ? ` (${rewrittenCommits.length} commits)` : ""} onto ${base.branch || base.hash.slice(0, 12)}${skippedMainCommits.length ? `; skipped ${skippedMainCommits.length} already on origin/${DEFAULT_BRANCH}` : ""}.`,
+  };
+}
+
+async function replayRebaseCommits(session, startIndex, runCommand) {
+  const { graph, stackCommits, rewrittenCommits } = session;
+
+  for (let index = startIndex; index < stackCommits.length; index++) {
+    const commit = stackCommits[index];
+
+    try {
+      await runCommand({
+        cmd: "git",
+        args: ["cherry-pick", "--no-commit", commit],
+        cwd: graph.path,
+        silent: true,
+      });
+    } catch (error) {
+      const conflictFiles = await getGraphConflictFiles(graph, runCommand);
+
+      if (conflictFiles.length || isCherryPickConflictError(error)) {
+        throw createRebaseConflictError({
+          session,
+          conflictCommit: commit,
+          conflictIndex: index,
+          conflictFiles,
+          cause: error,
+        });
+      }
+
+      if (!isEmptyCherryPickError(error)) {
+        throw error;
+      }
+
+      await resetGraphReplayState(graph, runCommand);
+      recordSkippedRebaseCommit(
+        session,
+        commit,
+        await getCurrentGraphHeadHash(graph, runCommand),
+      );
+      continue;
+    }
+
+    try {
+      await runCommand({
+        cmd: "git",
+        args: ["commit", "-C", commit],
+        cwd: graph.path,
+        silent: true,
+      });
+    } catch (error) {
+      if (!isEmptyCherryPickError(error)) {
+        throw error;
+      }
+
+      await resetGraphReplayState(graph, runCommand);
+      recordSkippedRebaseCommit(
+        session,
+        commit,
+        await getCurrentGraphHeadHash(graph, runCommand),
+      );
+      continue;
+    }
+
+    rewrittenCommits.push({
+      originalHash: commit,
+      hash: await getCurrentGraphHeadHash(graph, runCommand),
+    });
+  }
+
+  return finishRebaseReplay(session, runCommand);
+}
+
+export async function continueRebaseCommit({
+  session,
+  runCommand = run,
+}) {
+  if (!session?.conflictCommit) {
+    const error = new Error("No rebase conflict is waiting to continue.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const { graph, conflictCommit, conflictIndex } = session;
+  const conflictFiles = session.conflictFiles || [];
+  const markerFiles = await getGraphConflictMarkerFiles(graph, conflictFiles);
+
+  if (markerFiles.length) {
+    throw createRebaseConflictError({
+      session,
+      conflictCommit,
+      conflictIndex,
+      conflictFiles,
+      displayFiles: markerFiles,
+      markerFiles,
+      cause: new Error("Conflict markers are still present."),
+      reason: "conflict-markers",
+    });
+  }
+
+  if (conflictFiles.length) {
+    await runCommand({
+      cmd: "git",
+      args: ["add", "-A", "--", ...conflictFiles],
+      cwd: graph.path,
+      silent: true,
+    });
+  }
+
+  const remainingConflicts = await getGraphConflictFiles(graph, runCommand);
+
+  if (remainingConflicts.length) {
+    throw createRebaseConflictError({
+      session,
+      conflictCommit,
+      conflictIndex,
+      conflictFiles: remainingConflicts,
+      cause: new Error("Conflicted files are still unresolved."),
+    });
+  }
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["commit", "-C", conflictCommit],
+      cwd: graph.path,
+      silent: true,
+    });
+    session.rewrittenCommits.push({
+      originalHash: conflictCommit,
+      hash: await getCurrentGraphHeadHash(graph, runCommand),
+    });
+  } catch (error) {
+    if (!isEmptyCherryPickError(error)) {
+      throw error;
+    }
+
+    await resetGraphReplayState(graph, runCommand);
+    recordSkippedRebaseCommit(
+      session,
+      conflictCommit,
+      await getCurrentGraphHeadHash(graph, runCommand),
+    );
+  }
+
+  delete session.conflictCommit;
+  delete session.conflictIndex;
+  delete session.conflictFiles;
+
+  return replayRebaseCommits(session, conflictIndex + 1, runCommand);
+}
+
 export async function rebaseCommit({
   graph,
   hash,
+  graphIndex = null,
   preferredBranch = "",
   rebaseMode = DEFAULT_GRAPH_REBASE_MODE,
   runCommand = run,
@@ -2964,8 +3318,19 @@ export async function rebaseCommit({
     };
   }
 
-  const rewrittenCommits = [];
-  const skippedReplayedCommits = [];
+  const session = {
+    graph,
+    graphIndex,
+    base,
+    hash,
+    branch,
+    mode,
+    stackCommits,
+    stackBranchRefs,
+    skippedMainCommits,
+    rewrittenCommits: [],
+    skippedReplayedCommits: [],
+  };
   let replayStarted = false;
 
   try {
@@ -2977,142 +3342,12 @@ export async function rebaseCommit({
     });
     replayStarted = true;
 
-    for (const commit of stackCommits) {
-      try {
-        await runCommand({
-          cmd: "git",
-          args: ["cherry-pick", "--no-commit", commit],
-          cwd: graph.path,
-          silent: true,
-        });
-      } catch (error) {
-        if (!isEmptyCherryPickError(error)) {
-          throw error;
-        }
-
-        await resetGraphReplayState(graph, runCommand);
-        skippedMainCommits.push(commit);
-        skippedReplayedCommits.push({
-          originalHash: commit,
-          hash: await getCurrentGraphHeadHash(graph, runCommand),
-        });
-        continue;
-      }
-
-      try {
-        await runCommand({
-          cmd: "git",
-          args: ["commit", "-C", commit],
-          cwd: graph.path,
-          silent: true,
-        });
-      } catch (error) {
-        if (!isEmptyCherryPickError(error)) {
-          throw error;
-        }
-
-        await resetGraphReplayState(graph, runCommand);
-        skippedMainCommits.push(commit);
-        skippedReplayedCommits.push({
-          originalHash: commit,
-          hash: await getCurrentGraphHeadHash(graph, runCommand),
-        });
-        continue;
-      }
-
-      rewrittenCommits.push({
-        originalHash: commit,
-        hash: await getCurrentGraphHeadHash(graph, runCommand),
-      });
-    }
-
-    const rewrittenHashByOriginalHash = new Map(
-      rewrittenCommits.map((commit) => [commit.originalHash, commit.hash]),
-    );
-    const skippedHashByOriginalHash = new Map(
-      skippedReplayedCommits.map((commit) => [commit.originalHash, commit.hash]),
-    );
-    const branchUpdates = [];
-
-    for (const { hash: originalHash, branches } of stackBranchRefs) {
-      const rewrittenHash =
-        rewrittenHashByOriginalHash.get(originalHash) ||
-        skippedHashByOriginalHash.get(originalHash);
-
-      if (!rewrittenHash) {
-        continue;
-      }
-
-      for (const branchName of branches) {
-        await runCommand({
-          cmd: "git",
-          args: ["branch", "-f", branchName, rewrittenHash],
-          cwd: graph.path,
-          silent: true,
-        });
-        branchUpdates.push({
-          branch: branchName,
-          originalHash,
-          hash: rewrittenHash,
-        });
-      }
-    }
-
-    let currentHash = rewrittenCommits.at(-1)?.hash ||
-      skippedReplayedCommits.at(-1)?.hash ||
-      base.hash;
-
-    if (branch && !branchUpdates.some((update) => update.branch === branch)) {
-      await runCommand({
-        cmd: "git",
-        args: ["branch", "-f", branch, currentHash],
-        cwd: graph.path,
-        silent: true,
-      });
-      branchUpdates.push({
-        branch,
-        originalHash: stackCommits.at(-1),
-        hash: currentHash,
-      });
-    }
-
-    if (branch) {
-      await runCommand({
-        cmd: "git",
-        args: ["switch", branch],
-        cwd: graph.path,
-        silent: true,
-      });
-      currentHash = (await runCommand({
-        cmd: "git",
-        args: ["rev-parse", "HEAD"],
-        cwd: graph.path,
-        capture: true,
-        silent: true,
-      })).trim();
-      graph.branch = branch;
-    } else {
-      graph.branch = "(detached)";
-    }
-
-    return {
-      action: "rebase",
-      label: graph.label,
-      path: graph.path,
-      hash,
-      branch,
-      base: base.hash,
-      mode,
-      commits: stackCommits,
-      skippedMainCommits,
-      rewrittenCommits,
-      branchUpdates,
-      rebasedCount: rewrittenCommits.length,
-      currentHash,
-      detached: !branch,
-      message: `${graph.label} rebased ${branch ? `branch ${branch}` : hash.slice(0, 12)}${rewrittenCommits.length > 1 ? ` (${rewrittenCommits.length} commits)` : ""} onto ${base.branch || base.hash.slice(0, 12)}${skippedMainCommits.length ? `; skipped ${skippedMainCommits.length} already on origin/${DEFAULT_BRANCH}` : ""}.`,
-    };
+    return await replayRebaseCommits(session, 0, runCommand);
   } catch (error) {
+    if (error?.rebaseConflict) {
+      throw error;
+    }
+
     if (replayStarted) {
       await resetGraphReplayState(graph, runCommand);
       await restoreGraphCheckout(graph, base, runCommand);
@@ -3475,6 +3710,7 @@ export async function runGraphCommitAction({
     case "rebase":
       return rebaseCommit({
         graph,
+        graphIndex: Number(graphIndex),
         hash,
         preferredBranch,
         rebaseMode,

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -17,6 +17,7 @@ import {
   chooseRebaseBranch,
   chooseRewordBranch,
   checkoutCommit,
+  continueRebaseCommit,
   createBranchForCommit,
   createGraphCommit,
   createGraphCommand,
@@ -85,6 +86,7 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "lane-renderer.js", output: "graph-client/lane-renderer.js" },
   { source: "diff-viewer.js", output: "graph-client/diff-viewer.js" },
   { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
+  { source: "rebase-dialog.js", output: "graph-client/rebase-dialog.js" },
   { source: "commit-actions.js", output: "graph-client/commit-actions.js" },
   { source: "commit-dialog.js", output: "graph-client/commit-dialog.js" },
   { source: "landing-dialog.js", output: "graph-client/landing-dialog.js" },
@@ -3537,7 +3539,254 @@ test("rebaseCommit skips an empty cherry-pick and keeps rebasing descendants", a
   );
 });
 
-test("rebaseCommit restores the original checkout after a replay failure", async () => {
+test("rebaseCommit reports conflicts without restoring the checkout", async () => {
+  const calls = [];
+  let rejectedError;
+
+  await assert.rejects(
+    rebaseCommit({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        knownHashes: new Set(["a111"]),
+      },
+      hash: "a111",
+      graphIndex: 0,
+      rebaseMode: "children",
+      runCommand: async (command) => {
+        calls.push(command);
+
+        if (command.args[0] === "status") {
+          return "";
+        }
+
+        if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+          return "main\n";
+        }
+
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--points-at")
+        ) {
+          return "Bug-100\n";
+        }
+
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--contains")
+        ) {
+          return "Bug-100\n";
+        }
+
+        if (command.args[0] === "rev-list") {
+          return command.args.at(-1) === "origin/main..a111" ? "a111\n" : "";
+        }
+
+        if (command.args[0] === "merge-base") {
+          throw new Error("not on main");
+        }
+
+        if (command.args[0] === "rev-parse") {
+          return "base000\n";
+        }
+
+        if (command.args[0] === "diff" && command.args.includes("--diff-filter=U")) {
+          return "mail/conflicted.js\n";
+        }
+
+        if (command.args[0] === "cherry-pick" && command.args[1] === "--no-commit") {
+          const error = new Error("CONFLICT");
+          error.stderr = "CONFLICT (content): Merge conflict";
+          throw error;
+        }
+
+        return "";
+      },
+    }),
+    (error) => {
+      rejectedError = error;
+      return /Rebase conflict/.test(error.message);
+    },
+  );
+
+  assert.equal(rejectedError.rebaseConflict.type, "conflict");
+  assert.equal(rejectedError.rebaseConflict.graphIndex, 0);
+  assert.equal(rejectedError.rebaseConflict.conflictCommit, "a111");
+  assert.deepEqual(rejectedError.rebaseConflict.files, [
+    {
+      path: "mail/conflicted.js",
+      absolutePath: "/repo/comm/mail/conflicted.js",
+    },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) =>
+        call.args[0] === "switch" ||
+        call.args[0] === "cherry-pick" ||
+        call.args[0] === "reset"
+      )
+      .map((call) => call.args),
+    [
+      ["switch", "--detach", "base000"],
+      ["cherry-pick", "--no-commit", "a111"],
+    ],
+  );
+});
+
+test("continueRebaseCommit blocks conflict markers before staging", async () => {
+  const calls = [];
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-conflict-"));
+  const conflictPath = path.join(tempDir, "mail", "conflicted.js");
+  const resolvedPath = path.join(tempDir, "mail", "resolved.js");
+  let session;
+
+  await mkdir(path.dirname(conflictPath), { recursive: true });
+  await writeFile(
+    conflictPath,
+    "<<<<<<< ours\nold\n=======\nnew\n>>>>>>> theirs\n",
+  );
+  await writeFile(resolvedPath, "resolved\n");
+
+  try {
+    session = {
+      id: "session-1",
+      graph: {
+        label: "comm",
+        path: tempDir,
+      },
+      graphIndex: 0,
+      base: { branch: "main", hash: "base000" },
+      hash: "a111",
+      branch: "Bug-100",
+      mode: "children",
+      stackCommits: ["a111"],
+      stackBranchRefs: [{ hash: "a111", branches: ["Bug-100"] }],
+      skippedMainCommits: [],
+      rewrittenCommits: [],
+      skippedReplayedCommits: [],
+      conflictCommit: "a111",
+      conflictIndex: 0,
+      conflictFiles: ["mail/conflicted.js", "mail/resolved.js"],
+    };
+
+    await assert.rejects(
+      continueRebaseCommit({
+        session,
+        runCommand: async (command) => {
+          calls.push(command);
+          return "";
+        },
+      }),
+      (error) => {
+        assert.equal(error.rebaseConflict.reason, "conflict-markers");
+        assert.deepEqual(
+          error.rebaseConflict.files.map((file) => file.path),
+          ["mail/conflicted.js"],
+        );
+        assert.deepEqual(
+          error.rebaseConflict.markerFiles.map((file) => file.path),
+          ["mail/conflicted.js"],
+        );
+        return true;
+      },
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+
+  assert.deepEqual(
+    session.conflictFiles,
+    ["mail/conflicted.js", "mail/resolved.js"],
+    "Marker failures should not narrow the stored conflict set.",
+  );
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [],
+    "Continue must not stage files while conflict markers remain.",
+  );
+});
+
+test("continueRebaseCommit commits the resolved conflict and resumes the stack", async () => {
+  const calls = [];
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-conflict-"));
+  const conflictPath = path.join(tempDir, "mail", "conflicted.js");
+  const rewrittenHashes = ["new111", "new222", "new222"];
+  const result = await (async () => {
+    await mkdir(path.dirname(conflictPath), { recursive: true });
+    await writeFile(conflictPath, "resolved\n");
+
+    try {
+      return await continueRebaseCommit({
+        session: {
+          id: "session-1",
+          graph: {
+            label: "comm",
+            path: tempDir,
+          },
+          graphIndex: 0,
+          base: { branch: "main", hash: "base000" },
+          hash: "a111",
+          branch: "Bug-101",
+          mode: "children",
+          stackCommits: ["a111", "b222"],
+          stackBranchRefs: [
+            { hash: "a111", branches: ["Bug-100"] },
+            { hash: "b222", branches: ["Bug-101"] },
+          ],
+          skippedMainCommits: [],
+          rewrittenCommits: [],
+          skippedReplayedCommits: [],
+          conflictCommit: "a111",
+          conflictIndex: 0,
+          conflictFiles: ["mail/conflicted.js"],
+        },
+        runCommand: async (command) => {
+          calls.push(command);
+
+          if (command.args[0] === "diff" && command.args.includes("--diff-filter=U")) {
+            return "";
+          }
+
+          if (command.args[0] === "rev-parse") {
+            return `${rewrittenHashes.shift()}\n`;
+          }
+
+          return "";
+        },
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  })();
+
+  assert.deepEqual(result.rewrittenCommits, [
+    { originalHash: "a111", hash: "new111" },
+    { originalHash: "b222", hash: "new222" },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) =>
+        call.args[0] === "add" ||
+        call.args[0] === "commit" ||
+        call.args[0] === "cherry-pick" ||
+        (call.args[0] === "branch" && call.args[1] === "-f") ||
+        call.args[0] === "switch"
+      )
+      .map((call) => call.args),
+    [
+      ["add", "-A", "--", "mail/conflicted.js"],
+      ["commit", "-C", "a111"],
+      ["cherry-pick", "--no-commit", "b222"],
+      ["commit", "-C", "b222"],
+      ["branch", "-f", "Bug-100", "new111"],
+      ["branch", "-f", "Bug-101", "new222"],
+      ["switch", "Bug-101"],
+    ],
+  );
+});
+
+test("rebaseCommit restores the original checkout after a non-conflict replay failure", async () => {
   const calls = [];
 
   await assert.rejects(
@@ -3588,15 +3837,15 @@ test("rebaseCommit restores the original checkout after a replay failure", async
         }
 
         if (command.args[0] === "cherry-pick" && command.args[1] === "--no-commit") {
-          const error = new Error("CONFLICT");
-          error.stderr = "CONFLICT (content): Merge conflict";
+          const error = new Error("fatal: bad object");
+          error.stderr = "fatal: bad object";
           throw error;
         }
 
         return "";
       },
     }),
-    /CONFLICT/,
+    /fatal: bad object/,
   );
 
   assert.deepEqual(
@@ -6484,6 +6733,140 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     ),
     true,
   );
+});
+
+test("interactive graph server exposes rebase conflict sessions and continue", async (t) => {
+  let conflictsStaged = false;
+  let continuing = false;
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [{ hash: "a111", subject: "Bug 100 - Fix", parents: [] }],
+        commitCount: 1,
+        diffs: {},
+      },
+    ],
+    runCommand: async (command) => {
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return continuing ? "Bug-100\n" : "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        return "Bug-100\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-100\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return command.args.at(-1) === "origin/main..a111" ? "a111\n" : "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (
+        command.args[0] === "cherry-pick" &&
+        command.args[1] === "--no-commit" &&
+        !continuing
+      ) {
+        const error = new Error("CONFLICT");
+
+        error.stderr = "CONFLICT (content): Merge conflict";
+        throw error;
+      }
+
+      if (command.args[0] === "diff" && command.args.includes("--diff-filter=U")) {
+        return conflictsStaged ? "" : "mail/conflicted.js\n";
+      }
+
+      if (command.args[0] === "add") {
+        conflictsStaged = true;
+        return "";
+      }
+
+      if (command.args[0] === "commit") {
+        continuing = true;
+        return "";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return continuing ? "new111\n" : "base000\n";
+      }
+
+      if (command.args[0] === "log") {
+        return "\x1enew111\x1f\x1fHEAD -> Bug-100\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 100 - Fix\n";
+      }
+
+      return "";
+    },
+  });
+
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const rebaseResponse = await fetch(
+    new URL("api/commit-action", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        graphIndex: 0,
+        hash: "a111",
+        action: "rebase",
+        snapshotLimit: 1,
+      }),
+    },
+  );
+  const conflict = await rebaseResponse.json();
+
+  assert.equal(rebaseResponse.status, 409);
+  assert.equal(conflict.rebaseConflict.type, "conflict");
+  assert.equal(conflict.rebaseConflict.canContinue, true);
+  assert.equal(conflict.rebaseConflict.files[0].path, "mail/conflicted.js");
+  assert.ok(conflict.rebaseConflict.id);
+
+  const continueResponse = await fetch(
+    new URL(
+      `api/rebase/${conflict.rebaseConflict.id}/continue`,
+      serverInfo.url,
+    ),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        snapshotLimit: 1,
+      }),
+    },
+  );
+  const continued = await continueResponse.json();
+
+  assert.equal(continueResponse.ok, true);
+  assert.equal(continued.currentHash, "new111");
+  assert.equal(continued.snapshot.branch, "Bug-100");
 });
 
 test("interactive graph server amends current commit with edited message and refreshes", async (t) => {
