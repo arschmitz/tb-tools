@@ -193,6 +193,7 @@ ${testOutputTab}</nav>
     <div class="context-menu-title"></div>
     <button type="button" role="menuitem" data-action="checkout">Checkout</button>
     <button type="button" role="menuitem" data-action="rebase">Rebase</button>
+    <button type="button" role="menuitem" data-action="branch">Branch</button>
     <button type="button" role="menuitem" data-action="prune">Prune</button>
   </div>
   <dialog class="amend-dialog" id="amend-dialog">

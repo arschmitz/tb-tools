@@ -17,6 +17,7 @@ import { getDefaultLintFiles, LINT_DIRS } from "../lint.mjs";
 import { createSubmitCommand } from "../submit.mjs";
 import { createTestCommand } from "../test.mjs";
 import { createTryCommand } from "../try.mjs";
+import { getNextBugBranchName } from "./branches.mjs";
 import {
   CHECKIN_NEEDED_KEYWORD,
   DEFAULT_SUBMIT_OUTPUT_LIMIT,
@@ -2947,6 +2948,60 @@ export async function pruneCommitBranches({
   };
 }
 
+export async function createBranchForCommit({
+  graph,
+  hash,
+  runCommand = run,
+}) {
+  ensureKnownGraphCommit(graph, hash);
+
+  if (isWorkingTreeCommitHash(hash)) {
+    const error = new Error("Uncommitted changes cannot be used as a branch point.");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const message = await getGraphCommitMessage({
+    graph,
+    hash,
+    runCommand,
+  });
+  const bugId = getBugIdFromText(message);
+
+  if (!bugId) {
+    const error = new Error(
+      `No Bugzilla bug number found in ${hash.slice(0, 12)}.`,
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const branchData = await runCommand({
+    cmd: "git",
+    args: ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+  const branch = getNextBugBranchName(branchData.split(/\r?\n/).filter(Boolean), bugId);
+
+  await runCommand({
+    cmd: "git",
+    args: ["branch", branch, hash],
+    cwd: graph.path,
+    silent: true,
+  });
+
+  return {
+    action: "branch",
+    label: graph.label,
+    path: graph.path,
+    hash,
+    createdBranch: branch,
+    message: `${graph.label} created branch ${branch} at ${hash.slice(0, 12)}.`,
+  };
+}
+
 export async function discardWorkingTreeChanges({
   graph,
   hash,
@@ -3023,6 +3078,8 @@ export async function runGraphCommitAction({
       return checkoutCommit({ graph, hash, runCommand });
     case "rebase":
       return rebaseCommit({ graph, hash, runCommand });
+    case "branch":
+      return createBranchForCommit({ graph, hash, runCommand });
     case "prune":
       if (isWorkingTreeCommitHash(hash)) {
         return discardWorkingTreeChanges({ graph, hash, runCommand });

@@ -17,6 +17,7 @@ import {
   chooseRebaseBranch,
   chooseRewordBranch,
   checkoutCommit,
+  createBranchForCommit,
   createGraphCommit,
   createGraphCommand,
   getGraphCommitMessage,
@@ -72,6 +73,7 @@ import {
   formatPrettyDiffHtml,
   splitPrettyDiffFiles,
 } from "../commands/graph/diff-renderer.mjs";
+import { DEFAULT_HEARTBEAT_TIMEOUT_MS } from "../commands/graph/constants.mjs";
 import { buildGraphHtml } from "../commands/graph/templates.mjs";
 
 const GRAPH_CLIENT_TEST_ASSETS = [
@@ -91,6 +93,10 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "test-dialog.js", output: "graph-client/test-dialog.js" },
   { source: "init.js", output: "graph-client/init.js" },
 ];
+
+test("interactive graph server defaults to a 24 hour heartbeat timeout", () => {
+  assert.equal(DEFAULT_HEARTBEAT_TIMEOUT_MS, 24 * 60 * 60 * 1000);
+});
 
 function readGraphClientScripts() {
   return GRAPH_CLIENT_TEST_ASSETS.filter(({ source }) => source.endsWith(".js"))
@@ -2473,6 +2479,60 @@ test("checkoutCommit switches to a local branch when the commit is a branch tip"
   );
 });
 
+test("createBranchForCommit creates a Bug branch at the selected commit", async () => {
+  const calls = [];
+  const result = await createBranchForCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["abc123"]),
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "log") {
+        return "Bug 1234567 - Fix selected history\n\nBody text.\n";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        return "main\nBug-1234567\nBug-1234567_2\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm created branch Bug-1234567_3 at abc123.");
+  assert.equal(result.createdBranch, "Bug-1234567_3");
+  assert.equal(result.hash, "abc123");
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["log", "-1", "--format=%B", "abc123"],
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+      ["branch", "Bug-1234567_3", "abc123"],
+    ],
+  );
+});
+
+test("createBranchForCommit requires a Bug number in the selected commit", async () => {
+  await assert.rejects(
+    createBranchForCommit({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        knownHashes: new Set(["abc123"]),
+      },
+      hash: "abc123",
+      runCommand: async () => "No bug - Fix selected history\n",
+    }),
+    /No Bugzilla bug number found in abc123/,
+  );
+});
+
 test("rebaseCommit rebases a selected local branch tip onto the current checkout", async () => {
   const calls = [];
   const result = await rebaseCommit({
@@ -4156,6 +4216,42 @@ test("runGraphCommitAction prunes uncommitted changes by discarding the working 
   );
 });
 
+test("runGraphCommitAction creates a Bug branch from a selected commit", async () => {
+  const calls = [];
+  const result = await runGraphCommitAction({
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        knownHashes: new Set(["abc123"]),
+      },
+    ],
+    graphIndex: 0,
+    hash: "abc123",
+    action: "branch",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "log") {
+        return "Bug 7654321 - Branch me\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.createdBranch, "Bug-7654321");
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["log", "-1", "--format=%B", "abc123"],
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+      ["branch", "Bug-7654321", "abc123"],
+    ],
+  );
+});
+
 test("checkoutCommit refuses dirty working trees", async () => {
   await assert.rejects(
     checkoutCommit({
@@ -4233,6 +4329,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /id="commit-context-menu"/);
   assert.match(html, /data-action="checkout"/);
   assert.match(html, /data-action="rebase"/);
+  assert.match(html, /data-action="branch"/);
   assert.match(html, /data-action="prune"/);
   assert.match(
     html,
@@ -4533,7 +4630,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   );
   assert.match(
     client,
-    /\/api\/graph\/" \+ graphIndex \+ "\/message\/" \+ encodeURIComponent\(hash\)/,
+    /\/api\/graph\/" \+[^]*graphIndex[^]*"\/message\/" \+[^]*encodeURIComponent\(hash\)/,
   );
   assert.match(
     client,
@@ -4563,11 +4660,11 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /\/api\/commit/);
   assert.match(
     client,
-    /amendButton\.textContent = isWorkingTreeCommit\(commit\) \? "Amend" : "Amend Message"/,
+    /amendButton\.textContent = isWorkingTreeCommit\(commit\)[^]*\? "Amend"[^]*: "Amend Message"/,
   );
   assert.match(
     client,
-    /submitButton\.hidden = !INTERACTIVE\.enabled \|\| isWorkingTreeCommit\(commit\) \|\| !isCurrentCommit\(commit\)/,
+    /submitButton\.hidden =[^]*!INTERACTIVE\.enabled[^]*\|\|[^]*isWorkingTreeCommit\(commit\)[^]*\|\|[^]*!isCurrentCommit\(commit\)/,
   );
   assert.match(client, /hash: uiState\.amendDialogState\.hash/);
   assert.match(client, /expectedChangeId: uiState\.amendDialogState\.changeId/);
@@ -4577,7 +4674,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   );
   assert.match(
     client,
-    /selectCommitActionResult\(graphIndex, result\.rewrittenHash \|\| result\.currentHash, result\.message\)/,
+    /selectCommitActionResult\([^]*graphIndex,[^]*result\.rewrittenHash \|\| result\.currentHash,[^]*result\.message/,
   );
   assert.match(client, /\/api\/submit/);
   assert.match(client, /\/api\/try/);
@@ -4587,11 +4684,12 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /\/api\/origin-main-status/);
   assert.match(
     client,
-    /\/api\/submit\/" \+ encodeURIComponent\(uiState\.submitDialogState\.sessionId\)/,
+    /\/api\/submit\/" \+[^]*encodeURIComponent\(uiState\.submitDialogState\.sessionId\)/,
   );
   assert.match(client, /button\.dataset\.answer === "true"/);
   assert.match(client, /scheduleGraphEnhancements\(index\)/);
   assert.match(client, /Branch tips will check out the branch/);
+  assert.match(client, /Create a Bug branch at/);
   assert.match(client, /Discard all uncommitted changes/);
   assert.match(client, /button\.dataset\.action !== "prune"/);
   assert.match(client, /button\.style\.display = hidden \? "none" : ""/);

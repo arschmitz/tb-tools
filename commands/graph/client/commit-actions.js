@@ -162,6 +162,13 @@ export function getCommitActionDetails(action, label, hash, { workingTree = fals
     };
   }
 
+  if (action === "branch") {
+    return {
+      confirm: "Create a Bug branch at " + shortHash + " in " + label + "?",
+      progress: "Creating branch...",
+    };
+  }
+
   return {
     confirm: "Run " + action + " on " + shortHash + " in " + label + "?",
     progress: "Running...",

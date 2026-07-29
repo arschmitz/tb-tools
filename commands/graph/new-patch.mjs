@@ -6,6 +6,7 @@ import { updateBug as defaultUpdateBug } from "../../lib/bugzilla.mjs";
 import { getBugUrl } from "../../lib/workflow.mjs";
 import { GRAPH_MACH_TERMINAL_STATUSES, GRAPH_UPDATE_MODE_UPDATE } from "./constants.mjs";
 import { runGraphRepositoryUpdate } from "./actions.mjs";
+import { getNextBugBranchName } from "./branches.mjs";
 
 const NEW_PATCH_OUTPUT_LIMIT = 160000;
 
@@ -115,28 +116,6 @@ async function runNewPatchGit({
     session,
     runCommand,
   });
-}
-
-function getNextBugBranchName(branches = [], bugId) {
-  const name = `Bug-${bugId}`;
-
-  if (!branches.includes(name)) {
-    return name;
-  }
-
-  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const dupTest = new RegExp(`^${escapedName}_([0-9]{1,3})$`);
-  const patchCount = branches.reduce((highest, branch) => {
-    const match = branch.match(dupTest);
-
-    if (!match) {
-      return highest;
-    }
-
-    return Math.max(highest, Number(match[1]) || 0);
-  }, 1);
-
-  return `${name}_${patchCount + 1}`;
 }
 
 async function createNewPatchBranch({
@@ -301,5 +280,3 @@ export function serializeGraphNewPatchSession(session) {
       : [],
   };
 }
-
-export { getNextBugBranchName };

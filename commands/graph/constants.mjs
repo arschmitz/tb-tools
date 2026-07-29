@@ -1,14 +1,17 @@
 export const FIELD_SEPARATOR = "\x1f";
 export const RECORD_SEPARATOR = "\x1e";
 export const DEFAULT_MAX_DIFF_BYTES = 200000;
-export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;
+export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_CLIENT_DISCONNECT_GRACE_MS = 4000;
 export const DEFAULT_SUBMIT_OUTPUT_LIMIT = 160000;
 export const DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS = 15 * 1000;
 export const CHECKIN_NEEDED_KEYWORD = "checkin-needed-tb";
 export const GRAPH_UPDATE_MODE_UPDATE = "update";
 export const GRAPH_UPDATE_MODE_REBASE = "rebase";
-export const GRAPH_UPDATE_MODES = new Set([GRAPH_UPDATE_MODE_UPDATE, GRAPH_UPDATE_MODE_REBASE]);
+export const GRAPH_UPDATE_MODES = new Set([
+  GRAPH_UPDATE_MODE_UPDATE,
+  GRAPH_UPDATE_MODE_REBASE,
+]);
 export const GRAPH_UPDATE_DIRTY_ACTIONS = new Set(["amend", "shelf"]);
 export const GRAPH_SHELF_MESSAGE_PREFIX = "tb-tools graph update";
 export const GRAPH_MACH_ACTION_BUILD = "build";
@@ -41,7 +44,11 @@ export const GRAPH_MACH_ACTIONS = new Set([
   GRAPH_MACH_ACTION_RUN,
   GRAPH_MACH_ACTION_BUILD_RUN,
 ]);
-export const GRAPH_MACH_TERMINAL_STATUSES = new Set(["complete", "error", "canceled"]);
+export const GRAPH_MACH_TERMINAL_STATUSES = new Set([
+  "complete",
+  "error",
+  "canceled",
+]);
 export const WORKING_TREE_CHANGES_HASH = "uncommitted-changes";
 export const GRAPH_SUBMIT_OPTIONS = {
   artifact: true,
