@@ -860,6 +860,8 @@ export async function startInteractiveGraphServer({
           graphIndex: body.graphIndex,
           hash: body.hash,
           action: body.action,
+          preferredBranch: body.preferredBranch,
+          rebaseMode: body.rebaseMode,
           runCommand,
         });
         const snapshot = await getServerGraphSnapshot(

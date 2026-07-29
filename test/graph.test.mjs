@@ -2554,6 +2554,10 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
         return "topic\n";
       }
 
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
       if (command.args[0] === "rev-parse") {
         return calls.filter((call) => call.args[0] === "rev-parse").length === 1
           ? "base123\n"
@@ -2600,6 +2604,7 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
         "--ancestry-path",
         "abc123..topic",
       ],
+      ["merge-base", "--is-ancestor", "abc123", "origin/main"],
       ["switch", "--detach", "base123"],
       ["cherry-pick", "--no-commit", "abc123"],
       ["commit", "-C", "abc123"],
@@ -2626,6 +2631,10 @@ test("rebaseCommit rebases a selected commit onto the current checkout without a
 
       if (command.args[0] === "branch" || command.args[0] === "for-each-ref") {
         return "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
       }
 
       if (command.args[0] === "rev-parse") {
@@ -2667,6 +2676,7 @@ test("rebaseCommit rebases a selected commit onto the current checkout without a
         "abc123",
         "refs/heads",
       ],
+      ["merge-base", "--is-ancestor", "abc123", "origin/main"],
       ["switch", "--detach", "base123"],
       ["cherry-pick", "--no-commit", "abc123"],
       ["commit", "-C", "abc123"],
@@ -2677,6 +2687,7 @@ test("rebaseCommit rebases a selected commit onto the current checkout without a
 
 test("rebaseCommit rebases a selected commit and descendants in order", async () => {
   const calls = [];
+  const rewrittenHashes = ["base123", "rebased111", "rebased222", "rebased999", "rebased999"];
   const result = await rebaseCommit({
     graph: {
       label: "comm",
@@ -2696,7 +2707,8 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
         command.args[0] === "for-each-ref" &&
         command.args.includes("--points-at")
       ) {
-        return "";
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+        return hash === "ghi789" ? "topic\n" : "";
       }
 
       if (
@@ -2710,10 +2722,12 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
         return "def456\nghi789\n";
       }
 
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
       if (command.args[0] === "rev-parse") {
-        return calls.filter((call) => call.args[0] === "rev-parse").length === 1
-          ? "base123\n"
-          : "rebased999\n";
+        return `${rewrittenHashes.shift()}\n`;
       }
 
       return "";
@@ -2759,11 +2773,32 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
         "--ancestry-path",
         "abc123..topic",
       ],
+      ["merge-base", "--is-ancestor", "abc123", "origin/main"],
+      ["merge-base", "--is-ancestor", "def456", "origin/main"],
+      ["merge-base", "--is-ancestor", "ghi789", "origin/main"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "def456",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "ghi789",
+        "refs/heads",
+      ],
       ["switch", "--detach", "base123"],
       ["cherry-pick", "--no-commit", "abc123"],
       ["commit", "-C", "abc123"],
+      ["rev-parse", "HEAD"],
       ["cherry-pick", "--no-commit", "def456"],
       ["commit", "-C", "def456"],
+      ["rev-parse", "HEAD"],
       ["cherry-pick", "--no-commit", "ghi789"],
       ["commit", "-C", "ghi789"],
       ["rev-parse", "HEAD"],
@@ -2771,6 +2806,562 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
       ["switch", "topic"],
       ["rev-parse", "HEAD"],
     ],
+  );
+});
+
+test("rebaseCommit moves child branch tips when rebasing the bottom commit", async () => {
+  const calls = [];
+  const rewrittenHashes = ["base000", "new111", "new222", "new333", "new333"];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["a111"]),
+    },
+    hash: "a111",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+        return {
+          a111: "Bug-100\n",
+          b222: "Bug-101\n",
+          c333: "Bug-102\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-100\nBug-101\nBug-102\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return {
+          "a111..Bug-100": "",
+          "a111..Bug-101": "b222\n",
+          "a111..Bug-102": "b222\nc333\n",
+        }[command.args.at(-1)] || "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm rebased branch Bug-102 (3 commits) onto main.");
+  assert.equal(result.branch, "Bug-102");
+  assert.deepEqual(result.commits, ["a111", "b222", "c333"]);
+  assert.deepEqual(result.rewrittenCommits, [
+    { originalHash: "a111", hash: "new111" },
+    { originalHash: "b222", hash: "new222" },
+    { originalHash: "c333", hash: "new333" },
+  ]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-100", originalHash: "a111", hash: "new111" },
+    { branch: "Bug-101", originalHash: "b222", hash: "new222" },
+    { branch: "Bug-102", originalHash: "c333", hash: "new333" },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "branch" && call.args[1] === "-f")
+      .map((call) => call.args),
+    [
+      ["branch", "-f", "Bug-100", "new111"],
+      ["branch", "-f", "Bug-101", "new222"],
+      ["branch", "-f", "Bug-102", "new333"],
+    ],
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    [
+      ["cherry-pick", "--no-commit", "a111"],
+      ["cherry-pick", "--no-commit", "b222"],
+      ["cherry-pick", "--no-commit", "c333"],
+    ],
+  );
+});
+
+test("rebaseCommit uses the selected branch hint for equal length stacks", async () => {
+  const calls = [];
+  const rewrittenHashes = ["base000", "new111", "new444", "new555", "new555"];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["a111"]),
+    },
+    hash: "a111",
+    preferredBranch: "Bug-202",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+        return {
+          a111: "Bug-100\n",
+          b222: "Bug-101\n",
+          c333: "Bug-102\n",
+          d444: "Bug-201\n",
+          e555: "Bug-202\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-100\nBug-102\nBug-202\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return {
+          "a111..Bug-100": "",
+          "a111..Bug-102": "b222\nc333\n",
+          "a111..Bug-202": "d444\ne555\n",
+        }[command.args.at(-1)] || "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm rebased branch Bug-202 (3 commits) onto main.");
+  assert.equal(result.branch, "Bug-202");
+  assert.deepEqual(result.commits, ["a111", "d444", "e555"]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-100", originalHash: "a111", hash: "new111" },
+    { branch: "Bug-201", originalHash: "d444", hash: "new444" },
+    { branch: "Bug-202", originalHash: "e555", hash: "new555" },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    [
+      ["cherry-pick", "--no-commit", "a111"],
+      ["cherry-pick", "--no-commit", "d444"],
+      ["cherry-pick", "--no-commit", "e555"],
+    ],
+  );
+});
+
+test("rebaseCommit follows the selected shorter branch stack", async () => {
+  const calls = [];
+  const rewrittenHashes = ["base000", "new111", "new222", "new222"];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["a111"]),
+    },
+    hash: "a111",
+    preferredBranch: "Bug-101",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+        return {
+          a111: "Bug-100\n",
+          b222: "Bug-101\n",
+          c333: "Bug-102\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-100\nBug-101\nBug-102\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return {
+          "a111..Bug-100": "",
+          "a111..Bug-101": "b222\n",
+          "a111..Bug-102": "b222\nc333\n",
+        }[command.args.at(-1)] || "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.branch, "Bug-101");
+  assert.deepEqual(result.commits, ["a111", "b222"]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    [
+      ["cherry-pick", "--no-commit", "a111"],
+      ["cherry-pick", "--no-commit", "b222"],
+    ],
+  );
+});
+
+test("rebaseCommit selected mode ignores ambiguous descendant stacks", async () => {
+  const calls = [];
+  const rewrittenHashes = ["base000", "new111", "new111"];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["a111"]),
+    },
+    hash: "a111",
+    preferredBranch: "Bug-100",
+    rebaseMode: "selected",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        return "Bug-100\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-100\nBug-102\nBug-202\n";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.mode, "selected");
+  assert.equal(result.branch, "Bug-100");
+  assert.deepEqual(result.commits, ["a111"]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-100", originalHash: "a111", hash: "new111" },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "rev-list")
+      .map((call) => call.args),
+    [],
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    [["cherry-pick", "--no-commit", "a111"]],
+  );
+});
+
+test("rebaseCommit children mode replays only the selected stack child", async () => {
+  const calls = [];
+  const rewrittenHashes = ["base000", "new111", "new222", "new222"];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["a111"]),
+    },
+    hash: "a111",
+    preferredBranch: "Bug-102",
+    rebaseMode: "children",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+        return {
+          a111: "Bug-100\n",
+          b222: "Bug-101\n",
+          c333: "Bug-102\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-100\nBug-101\nBug-102\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return {
+          "a111..Bug-100": "",
+          "a111..Bug-101": "b222\n",
+          "a111..Bug-102": "b222\nc333\n",
+        }[command.args.at(-1)] || "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.mode, "children");
+  assert.equal(result.branch, "Bug-101");
+  assert.deepEqual(result.commits, ["a111", "b222"]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-100", originalHash: "a111", hash: "new111" },
+    { branch: "Bug-101", originalHash: "b222", hash: "new222" },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    [
+      ["cherry-pick", "--no-commit", "a111"],
+      ["cherry-pick", "--no-commit", "b222"],
+    ],
+  );
+});
+
+test("rebaseCommit stack mode prepends unpublished ancestors and skips main commits", async () => {
+  const calls = [];
+  const rewrittenHashes = ["base000", "new000", "new111", "new222", "new222"];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["b222"]),
+    },
+    hash: "b222",
+    preferredBranch: "Bug-102",
+    rebaseMode: "stack",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+        return {
+          a111: "Bug-100\n",
+          b222: "Bug-101\n",
+          c333: "Bug-102\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-101\nBug-102\n";
+      }
+
+      if (
+        command.args[0] === "rev-list" &&
+        command.args.at(-1) === "origin/main..b222"
+      ) {
+        return "root000\na111\nb222\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return {
+          "b222..Bug-101": "",
+          "b222..Bug-102": "c333\n",
+        }[command.args.at(-1)] || "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        if (command.args[2] === "c333") {
+          return "";
+        }
+
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.mode, "stack");
+  assert.equal(result.branch, "Bug-101");
+  assert.deepEqual(result.commits, ["root000", "a111", "b222"]);
+  assert.deepEqual(result.skippedMainCommits, ["c333"]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-100", originalHash: "a111", hash: "new111" },
+    { branch: "Bug-101", originalHash: "b222", hash: "new222" },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    [
+      ["cherry-pick", "--no-commit", "root000"],
+      ["cherry-pick", "--no-commit", "a111"],
+      ["cherry-pick", "--no-commit", "b222"],
+    ],
+  );
+});
+
+test("rebaseCommit rejects equal length stacks without a matching branch hint", async () => {
+  await assert.rejects(
+    rebaseCommit({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        knownHashes: new Set(["a111"]),
+      },
+      hash: "a111",
+      preferredBranch: "Bug-999",
+      runCommand: async (command) => {
+        if (command.args[0] === "status") {
+          return "";
+        }
+
+        if (command.args[0] === "branch") {
+          return "main\n";
+        }
+
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--points-at")
+        ) {
+          return "Bug-100\n";
+        }
+
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--contains")
+        ) {
+          return "Bug-100\nBug-102\nBug-202\n";
+        }
+
+        if (command.args[0] === "rev-list") {
+          return {
+            "a111..Bug-100": "",
+            "a111..Bug-102": "b222\nc333\n",
+            "a111..Bug-202": "d444\ne555\n",
+          }[command.args.at(-1)] || "";
+        }
+
+        if (command.args[0] === "merge-base") {
+          throw new Error("not on main");
+        }
+
+        if (command.args[0] === "rev-parse") {
+          return "base000\n";
+        }
+
+        return "";
+      },
+    }),
+    /multiple descendant branch stacks \(Bug-102, Bug-202\)/,
   );
 });
 
@@ -2839,6 +3430,10 @@ test("rebaseCommit refuses when the current checkout is inside the selected stac
 
         if (command.args[0] === "rev-list") {
           return "def456\n";
+        }
+
+        if (command.args[0] === "merge-base") {
+          throw new Error("not on main");
         }
 
         return "";
@@ -4329,6 +4924,10 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /id="commit-context-menu"/);
   assert.match(html, /data-action="checkout"/);
   assert.match(html, /data-action="rebase"/);
+  assert.match(html, /data-rebase-mode="selected"/);
+  assert.match(html, /data-rebase-mode="children"/);
+  assert.match(html, /data-rebase-mode="descendants"/);
+  assert.match(html, /data-rebase-mode="stack"/);
   assert.match(html, /data-action="branch"/);
   assert.match(html, /data-action="prune"/);
   assert.match(
@@ -4694,6 +5293,9 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /button\.dataset\.action !== "prune"/);
   assert.match(client, /button\.style\.display = hidden \? "none" : ""/);
   assert.match(client, /Uncommitted changes/);
+  assert.match(client, /rebaseMode: button\.dataset\.rebaseMode \|\| ""/);
+  assert.match(client, /preferredBranch/);
+  assert.match(client, /rebaseMode/);
   assert.match(client, /commitGroup\.addEventListener\("contextmenu"/);
   assert.match(
     client,
@@ -5202,6 +5804,10 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
 
       if (command.args[0] === "ls-remote") {
         return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/main\n";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
       }
 
       if (command.args[0] === "rev-parse") {

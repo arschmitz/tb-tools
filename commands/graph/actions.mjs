@@ -37,7 +37,6 @@ import {
 import {
   chooseCheckoutBranch,
   choosePruneBranches,
-  chooseRebaseBranch,
   chooseRewordBranch,
   ensureAmendedCommitMessage,
   getContentHash,
@@ -64,6 +63,17 @@ const RUST_UPSTREAM_FILES = {
   mc_hack_toml: "build/workspace-hack/Cargo.toml",
   mc_cargo_lock: "Cargo.lock",
 };
+const GRAPH_REBASE_MODE_SELECTED = "selected";
+const GRAPH_REBASE_MODE_CHILDREN = "children";
+const GRAPH_REBASE_MODE_DESCENDANTS = "descendants";
+const GRAPH_REBASE_MODE_STACK = "stack";
+const DEFAULT_GRAPH_REBASE_MODE = GRAPH_REBASE_MODE_DESCENDANTS;
+const GRAPH_REBASE_MODES = new Set([
+  GRAPH_REBASE_MODE_SELECTED,
+  GRAPH_REBASE_MODE_CHILDREN,
+  GRAPH_REBASE_MODE_DESCENDANTS,
+  GRAPH_REBASE_MODE_STACK,
+]);
 
 async function amendCheckedOutCommit({
   graph,
@@ -506,6 +516,222 @@ async function getRebaseCommitStack(graph, hash, branch, runCommand) {
   const descendants = output.trim().split(/\s+/).filter(Boolean);
 
   return [hash, ...descendants.filter((commit) => commit !== hash)];
+}
+
+function normalizeRebaseMode(mode = DEFAULT_GRAPH_REBASE_MODE) {
+  const normalized = String(mode || DEFAULT_GRAPH_REBASE_MODE).trim();
+
+  if (!GRAPH_REBASE_MODES.has(normalized)) {
+    const error = new Error(`Unknown rebase mode: ${normalized}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
+function isCommitStackPrefix(candidate, target) {
+  return candidate.every((commit, index) => target[index] === commit);
+}
+
+function getCommitStackSignature(commits) {
+  return commits.join("\0");
+}
+
+function chooseRebaseStackCandidate({
+  candidates = [],
+  currentBranch = "",
+  hash = "",
+  preferredBranch = "",
+} = {}) {
+  if (!candidates.length) {
+    return {
+      branch: "",
+      commits: [hash],
+    };
+  }
+
+  const longestLength = Math.max(
+    ...candidates.map((candidate) => candidate.commits.length),
+  );
+  const longestCandidates = candidates.filter(
+    (candidate) => candidate.commits.length === longestLength,
+  );
+  const uniqueLongestStacks = new Set(
+    longestCandidates.map((candidate) =>
+      getCommitStackSignature(candidate.commits),
+    ),
+  );
+  const preferredCandidate = candidates.find(
+    (candidate) => candidate.branch === preferredBranch,
+  );
+  const currentLongestCandidate = longestCandidates.find(
+    (candidate) => candidate.branch === currentBranch,
+  );
+  const hintedCandidate = preferredCandidate || currentLongestCandidate;
+
+  if (uniqueLongestStacks.size > 1 && !hintedCandidate) {
+    const error = new Error(
+      `Commit ${hash.slice(0, 12)} is contained by multiple descendant branch stacks (${longestCandidates.map((candidate) => candidate.branch).join(", ")}). Leave one source stack containing the commit, then try again.`,
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const selectedCandidate = hintedCandidate || longestCandidates[0];
+  const targetCommits = selectedCandidate.commits;
+  const divergentCandidates = candidates.filter(
+    (candidate) => !isCommitStackPrefix(candidate.commits, targetCommits),
+  );
+
+  if (divergentCandidates.length && !hintedCandidate) {
+    const error = new Error(
+      `Commit ${hash.slice(0, 12)} is contained by divergent branch stacks (${divergentCandidates.map((candidate) => candidate.branch).join(", ")}). Leave one source stack containing the commit, then try again.`,
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const branch = chooseCheckoutBranch(
+    longestCandidates.map((candidate) => candidate.branch).join("\n"),
+    currentBranch,
+  );
+
+  return {
+    branch: hintedCandidate?.branch || branch || selectedCandidate.branch,
+    commits: targetCommits,
+  };
+}
+
+async function getRebaseStackCandidate(graph, hash, branch, runCommand) {
+  return {
+    branch,
+    commits: await getRebaseCommitStack(graph, hash, branch, runCommand),
+  };
+}
+
+async function getWholeRebaseStackPrefix(graph, hash, runCommand) {
+  const output = await runCommand({
+    cmd: "git",
+    args: [
+      "rev-list",
+      "--reverse",
+      "--topo-order",
+      `origin/${DEFAULT_BRANCH}..${hash}`,
+    ],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  }).catch(() => "");
+  const commits = output.trim().split(/\s+/).filter(Boolean);
+  const selectedIndex = commits.indexOf(hash);
+
+  if (selectedIndex === -1) {
+    return [];
+  }
+
+  return commits.slice(0, selectedIndex);
+}
+
+async function getRebaseCommitsForMode({
+  graph,
+  hash,
+  mode,
+  stackCommits,
+  runCommand,
+}) {
+  if (mode === GRAPH_REBASE_MODE_SELECTED) {
+    return [hash];
+  }
+
+  if (mode === GRAPH_REBASE_MODE_CHILDREN) {
+    return stackCommits.slice(0, 2);
+  }
+
+  if (mode === GRAPH_REBASE_MODE_STACK) {
+    return [
+      ...(await getWholeRebaseStackPrefix(graph, hash, runCommand)),
+      ...stackCommits,
+    ];
+  }
+
+  return stackCommits;
+}
+
+function uniqueCommits(commits = []) {
+  return Array.from(new Set(commits.filter(Boolean)));
+}
+
+async function isCommitReachableFromMain(graph, hash, runCommand) {
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["merge-base", "--is-ancestor", hash, `origin/${DEFAULT_BRANCH}`],
+      cwd: graph.path,
+      silent: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function filterRebaseCommitsOnMain(graph, commits, runCommand) {
+  const kept = [];
+  const skipped = [];
+
+  for (const hash of commits) {
+    if (await isCommitReachableFromMain(graph, hash, runCommand)) {
+      skipped.push(hash);
+    } else {
+      kept.push(hash);
+    }
+  }
+
+  return { kept, skipped };
+}
+
+async function getRebaseStackBranches({
+  graph,
+  stackCommits,
+  selectedHash = "",
+  selectedCommitRefs = "",
+  runCommand,
+}) {
+  const entries = [];
+
+  for (const hash of stackCommits) {
+    entries.push({
+      hash,
+      branches:
+        hash === selectedHash
+          ? parseBranchRefs(selectedCommitRefs)
+          : parseBranchRefs(
+              await getLocalBranchesAtCommit(graph, hash, runCommand),
+            ),
+    });
+  }
+
+  return entries;
+}
+
+function chooseRebaseResultBranch({
+  stackBranchRefs = [],
+  candidateBranch = "",
+  currentBranch = "",
+  preferredBranch = "",
+}) {
+  const lastBranches = stackBranchRefs.at(-1)?.branches || [];
+
+  if (candidateBranch && lastBranches.includes(candidateBranch)) {
+    return candidateBranch;
+  }
+
+  if (preferredBranch && lastBranches.includes(preferredBranch)) {
+    return preferredBranch;
+  }
+
+  return chooseCheckoutBranch(lastBranches.join("\n"), currentBranch);
 }
 
 export async function getCurrentGraphBase(graph, runCommand) {
@@ -2611,9 +2837,12 @@ export async function checkoutCommit({
 export async function rebaseCommit({
   graph,
   hash,
+  preferredBranch = "",
+  rebaseMode = DEFAULT_GRAPH_REBASE_MODE,
   runCommand = run,
 }) {
   ensureKnownGraphCommit(graph, hash);
+  const mode = normalizeRebaseMode(rebaseMode);
 
   if (isWorkingTreeCommitHash(hash)) {
     const error = new Error("Uncommitted changes cannot be rebased from the graph.");
@@ -2636,24 +2865,72 @@ export async function rebaseCommit({
     getLocalBranchesContainingCommit(graph, hash, runCommand),
   ]);
   const containingBranches = parseBranchRefs(containingBranchRefs);
-  const branch = chooseRebaseBranch({
-    containingRefs: containingBranchRefs,
-    tipRefs: branchRefs,
-    currentBranch: base.branch,
+  const stackCandidate =
+    mode === GRAPH_REBASE_MODE_SELECTED
+      ? {
+          branch: chooseCheckoutBranch(branchRefs, preferredBranch || base.branch),
+          commits: [hash],
+        }
+      : chooseRebaseStackCandidate({
+          candidates: await Promise.all(
+            containingBranches.map((candidateBranch) =>
+              getRebaseStackCandidate(graph, hash, candidateBranch, runCommand),
+            ),
+          ),
+          currentBranch: base.branch,
+          hash,
+          preferredBranch,
+        });
+  const rawStackCommits = uniqueCommits(
+    await getRebaseCommitsForMode({
+      graph,
+      hash,
+      mode,
+      stackCommits: stackCandidate.commits,
+      runCommand,
+    }),
+  );
+  const { kept: stackCommits, skipped: skippedMainCommits } =
+    await filterRebaseCommitsOnMain(graph, rawStackCommits, runCommand);
+  const stackBranchRefs = await getRebaseStackBranches({
+    graph,
+    stackCommits,
+    selectedHash: hash,
+    selectedCommitRefs: branchRefs,
+    runCommand,
   });
-
-  if (!branch && containingBranches.length > 1) {
-    const error = new Error(`Commit ${hash.slice(0, 12)} is contained by multiple local branches (${containingBranches.join(", ")}). Check out the target base and leave only one source branch containing the commit, then try again.`);
-    error.statusCode = 409;
-    throw error;
-  }
-
-  const stackCommits = await getRebaseCommitStack(graph, hash, branch, runCommand);
+  const branch = chooseRebaseResultBranch({
+    stackBranchRefs,
+    candidateBranch: stackCandidate.branch,
+    currentBranch: base.branch,
+    preferredBranch,
+  });
 
   if (stackCommits.includes(base.hash)) {
     const error = new Error(`Cannot rebase ${hash.slice(0, 12)} because the current checkout is inside the selected commit stack.`);
     error.statusCode = 409;
     throw error;
+  }
+
+  if (!stackCommits.length) {
+    graph.branch = base.branch || "(detached)";
+    return {
+      action: "rebase",
+      label: graph.label,
+      path: graph.path,
+      hash,
+      branch: graph.branch,
+      base: base.hash,
+      mode,
+      commits: [],
+      skippedMainCommits,
+      rewrittenCommits: [],
+      branchUpdates: [],
+      rebasedCount: 0,
+      currentHash: base.hash,
+      detached: !base.branch,
+      message: `${graph.label} had no commits to rebase${skippedMainCommits.length ? `; skipped ${skippedMainCommits.length} already on origin/${DEFAULT_BRANCH}` : ""}.`,
+    };
   }
 
   await runCommand({
@@ -2662,6 +2939,8 @@ export async function rebaseCommit({
     cwd: graph.path,
     silent: true,
   });
+
+  const rewrittenCommits = [];
 
   for (const commit of stackCommits) {
     await runCommand({
@@ -2677,23 +2956,57 @@ export async function rebaseCommit({
       cwd: graph.path,
       silent: true,
     });
+
+    rewrittenCommits.push({
+      originalHash: commit,
+      hash: await getCurrentGraphHeadHash(graph, runCommand),
+    });
   }
 
-  let currentHash = (await runCommand({
-    cmd: "git",
-    args: ["rev-parse", "HEAD"],
-    cwd: graph.path,
-    capture: true,
-    silent: true,
-  })).trim();
+  const rewrittenHashByOriginalHash = new Map(
+    rewrittenCommits.map((commit) => [commit.originalHash, commit.hash]),
+  );
+  const branchUpdates = [];
 
-  if (branch) {
+  for (const { hash: originalHash, branches } of stackBranchRefs) {
+    const rewrittenHash = rewrittenHashByOriginalHash.get(originalHash);
+
+    if (!rewrittenHash) {
+      continue;
+    }
+
+    for (const branchName of branches) {
+      await runCommand({
+        cmd: "git",
+        args: ["branch", "-f", branchName, rewrittenHash],
+        cwd: graph.path,
+        silent: true,
+      });
+      branchUpdates.push({
+        branch: branchName,
+        originalHash,
+        hash: rewrittenHash,
+      });
+    }
+  }
+
+  let currentHash = rewrittenCommits.at(-1)?.hash || base.hash;
+
+  if (branch && !branchUpdates.some((update) => update.branch === branch)) {
     await runCommand({
       cmd: "git",
       args: ["branch", "-f", branch, currentHash],
       cwd: graph.path,
       silent: true,
     });
+    branchUpdates.push({
+      branch,
+      originalHash: stackCommits.at(-1),
+      hash: currentHash,
+    });
+  }
+
+  if (branch) {
     await runCommand({
       cmd: "git",
       args: ["switch", branch],
@@ -2719,11 +3032,15 @@ export async function rebaseCommit({
     hash,
     branch,
     base: base.hash,
+    mode,
     commits: stackCommits,
+    skippedMainCommits,
+    rewrittenCommits,
+    branchUpdates,
     rebasedCount: stackCommits.length,
     currentHash,
     detached: !branch,
-    message: `${graph.label} rebased ${branch ? `branch ${branch}` : hash.slice(0, 12)}${stackCommits.length > 1 ? ` (${stackCommits.length} commits)` : ""} onto ${base.branch || base.hash.slice(0, 12)}.`,
+    message: `${graph.label} rebased ${branch ? `branch ${branch}` : hash.slice(0, 12)}${stackCommits.length > 1 ? ` (${stackCommits.length} commits)` : ""} onto ${base.branch || base.hash.slice(0, 12)}${skippedMainCommits.length ? `; skipped ${skippedMainCommits.length} already on origin/${DEFAULT_BRANCH}` : ""}.`,
   };
 }
 
@@ -3069,6 +3386,8 @@ export async function runGraphCommitAction({
   graphIndex,
   hash,
   action,
+  preferredBranch = "",
+  rebaseMode = DEFAULT_GRAPH_REBASE_MODE,
   runCommand = run,
 }) {
   const graph = graphs[Number(graphIndex)];
@@ -3077,7 +3396,13 @@ export async function runGraphCommitAction({
     case "checkout":
       return checkoutCommit({ graph, hash, runCommand });
     case "rebase":
-      return rebaseCommit({ graph, hash, runCommand });
+      return rebaseCommit({
+        graph,
+        hash,
+        preferredBranch,
+        rebaseMode,
+        runCommand,
+      });
     case "branch":
       return createBranchForCommit({ graph, hash, runCommand });
     case "prune":

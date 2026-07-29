@@ -254,7 +254,10 @@ contextMenu.addEventListener("click", (event) => {
   }
 
   event.stopPropagation();
-  const actionState = uiState.contextMenuState;
+  const actionState = {
+    ...uiState.contextMenuState,
+    rebaseMode: button.dataset.rebaseMode || "",
+  };
   hideCommitContextMenu();
   runCommitAction(button.dataset.action, actionState);
 });

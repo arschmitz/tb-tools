@@ -192,7 +192,10 @@ ${testOutputTab}</nav>
   <div class="context-menu" id="commit-context-menu" hidden role="menu" aria-label="Commit actions">
     <div class="context-menu-title"></div>
     <button type="button" role="menuitem" data-action="checkout">Checkout</button>
-    <button type="button" role="menuitem" data-action="rebase">Rebase</button>
+    <button type="button" role="menuitem" data-action="rebase" data-rebase-mode="selected">Rebase Selected</button>
+    <button type="button" role="menuitem" data-action="rebase" data-rebase-mode="children">Rebase + Children</button>
+    <button type="button" role="menuitem" data-action="rebase" data-rebase-mode="descendants">Rebase + Descendants</button>
+    <button type="button" role="menuitem" data-action="rebase" data-rebase-mode="stack">Rebase Whole Stack</button>
     <button type="button" role="menuitem" data-action="branch">Branch</button>
     <button type="button" role="menuitem" data-action="prune">Prune</button>
   </div>

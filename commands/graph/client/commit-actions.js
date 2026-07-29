@@ -131,7 +131,28 @@ export async function showDiff(graph, index, commit) {
   setDiffText(body, diff.text || "No diff for this commit.");
 }
 
-export function getCommitActionDetails(action, label, hash, { workingTree = false } = {}) {
+function getRebaseModeLabel(mode = "") {
+  if (mode === "selected") {
+    return "selected commit";
+  }
+
+  if (mode === "children") {
+    return "selected commit plus one child";
+  }
+
+  if (mode === "stack") {
+    return "whole local stack";
+  }
+
+  return "selected commit plus descendants";
+}
+
+export function getCommitActionDetails(
+  action,
+  label,
+  hash,
+  { rebaseMode = "", workingTree = false } = {},
+) {
   const shortHash = hash.substring(0, 12);
 
   if (action === "checkout") {
@@ -142,8 +163,10 @@ export function getCommitActionDetails(action, label, hash, { workingTree = fals
   }
 
   if (action === "rebase") {
+    const modeLabel = getRebaseModeLabel(rebaseMode);
+
     return {
-      confirm: "Rebase " + shortHash + " in " + label + " onto the current checkout?",
+      confirm: "Rebase " + modeLabel + " from " + shortHash + " in " + label + " onto the current checkout?",
       progress: "Rebasing...",
     };
   }
@@ -175,8 +198,21 @@ export function getCommitActionDetails(action, label, hash, { workingTree = fals
   };
 }
 
-export async function runCommitAction(action, { graphIndex, hash, label, workingTree = false }) {
-  const details = getCommitActionDetails(action, label, hash, { workingTree });
+export async function runCommitAction(
+  action,
+  {
+    graphIndex,
+    hash,
+    label,
+    preferredBranch = "",
+    rebaseMode = "",
+    workingTree = false,
+  },
+) {
+  const details = getCommitActionDetails(action, label, hash, {
+    rebaseMode,
+    workingTree,
+  });
   const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
 
   if (!confirm(details.confirm)) {
@@ -195,6 +231,8 @@ export async function runCommitAction(action, { graphIndex, hash, label, working
         graphIndex,
         hash,
         action,
+        preferredBranch,
+        rebaseMode,
         snapshotLimit: getLoadedGitCommitLimit(graphStates[graphIndex]),
       }),
     });

@@ -219,15 +219,11 @@ export function getLaneRows(index, commits) {
         branch: explicitBranch,
       });
       lane = lanes.length - 1;
-    } else if (explicitBranch) {
-      lanes[lane] = {
-        ...lanes[lane],
-        branch: explicitBranch,
-      };
     }
 
+    const laneBranch = lanes[lane]?.branch || "";
     const lanesBefore = lanes.map((item) => ({ ...item }));
-    const branch = explicitBranch || lanesBefore[lane]?.branch || "";
+    const branch = laneBranch || explicitBranch || "";
     const parents = getKnownParentHashes(commits, commit);
     const lanesAfter = lanesBefore
       .filter((item, index) => index !== lane)
@@ -236,18 +232,21 @@ export function getLaneRows(index, commits) {
       .filter((parent, parentIndex) => parents.indexOf(parent) === parentIndex)
       .map((parent, parentIndex) => {
         const existing = lanesAfter.find((item) => item.hash === parent);
-        const parentBranch = getPrimaryBranchRef(index, commitsByHash.get(parent)) || (parentIndex === 0 ? branch : "");
+        const parentBranch =
+          getPrimaryBranchRef(index, commitsByHash.get(parent)) ||
+          (parentIndex === 0 ? branch : "");
+        const nextParentBranch = parentIndex === 0 ? branch : parentBranch;
 
         if (existing) {
-          if (parentBranch && !existing.branch) {
-            existing.branch = parentBranch;
+          if (nextParentBranch && !existing.branch) {
+            existing.branch = nextParentBranch;
           }
           return null;
         }
 
         return {
           hash: parent,
-          branch: parentBranch,
+          branch: nextParentBranch,
         };
       })
       .filter(Boolean);
@@ -360,12 +359,17 @@ export function showCommitContextMenu(event, index, commit) {
   event.preventDefault();
   event.stopPropagation();
   const workingTree = isWorkingTreeCommit(commit);
+  const branchTarget = event.target.closest("[data-branch-ref]");
+  const preferredBranch = branchTarget?.dataset.branchRef ||
+    event.currentTarget?.dataset.branchRef ||
+    getPrimaryBranchRef(index, commit);
 
   uiState.contextMenuState = {
     graphIndex: index,
     hash: commit.hash,
     label: graphStates[index].graph.label,
     subject: commit.subject,
+    preferredBranch,
     workingTree,
   };
   contextMenu.querySelectorAll("button[data-action]").forEach((button) => {
@@ -417,6 +421,7 @@ export function addBranchLabels(group, index, commit, x, y, fallbackLane) {
     const labelWidth = getBranchLabelWidth(branch);
     const rect = createSvgElement("rect", {
       class: "branch-label-bg",
+      "data-branch-ref": branch,
       x: nextX,
       y: y - BRANCH_LABEL_HEIGHT / 2,
       width: labelWidth,
@@ -427,6 +432,7 @@ export function addBranchLabels(group, index, commit, x, y, fallbackLane) {
     });
     const label = createSvgElement("text", {
       class: "branch-label-text",
+      "data-branch-ref": branch,
       x: nextX + BRANCH_LABEL_PADDING_X,
       y,
       fill: color,
@@ -481,6 +487,7 @@ export function addLaneCommitRow({ svg, index, row, messageX, width }) {
   });
 
   group.dataset.hash = commit.hash;
+  group.dataset.branchRef = row.branch || getPrimaryBranchRef(index, commit);
   hash.textContent = commit.hash.substring(0, 12);
   message.textContent = commit.subject;
   group.append(hitbox, dot, hash);
@@ -569,6 +576,7 @@ export function decorateCommitRows(index) {
     commitGroup.classList.add("commit-row");
     commitGroup.classList.toggle("working-tree", isWorkingTreeCommit(commit));
     commitGroup.dataset.hash = commit.hash;
+    commitGroup.dataset.branchRef = getPrimaryBranchRef(index, commit);
     commitGroup.setAttribute("role", "button");
     commitGroup.setAttribute("tabindex", "0");
     commitGroup.setAttribute("aria-label", "Show diff for " + commit.hash.substring(0, 12) + " " + commit.subject);
