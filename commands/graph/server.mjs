@@ -31,6 +31,13 @@ import {
   isWorkingTreeCommitHash,
 } from "./data.mjs";
 import {
+  createGraphCommit,
+  getGraphCommitMetadata,
+  getReviewerSearchRoute,
+  isReviewerSearchRateLimitError,
+  searchGraphCommitReviewers,
+} from "./commit.mjs";
+import {
   amendCommitMessage,
   checkoutGraphCommit,
   chooseGraphMachCheckout,
@@ -69,6 +76,8 @@ import {
   serializeGraphTestSession,
 } from "./testing.mjs";
 
+const REVIEWER_RATE_LIMIT_COOLDOWN_MS = 60_000;
+
 async function readRequestJson(request) {
   const chunks = [];
 
@@ -87,7 +96,12 @@ function sendJson(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
-function sendText(response, statusCode, body, contentType = "text/plain; charset=utf-8") {
+function sendText(
+  response,
+  statusCode,
+  body,
+  contentType = "text/plain; charset=utf-8",
+) {
   response.writeHead(statusCode, {
     "content-type": contentType,
     "cache-control": "no-store",
@@ -104,7 +118,9 @@ function validateToken(token, expectedToken) {
 }
 
 function mergeGraphCommits(existingCommits = [], nextCommits = []) {
-  const commits = new Map(existingCommits.map((commit) => [commit.hash, commit]));
+  const commits = new Map(
+    existingCommits.map((commit) => [commit.hash, commit]),
+  );
 
   for (const commit of nextCommits) {
     commits.set(commit.hash, commit);
@@ -158,6 +174,9 @@ export async function startInteractiveGraphServer({
   const trySessions = new Map();
   const landSessions = new Map();
   const testSessions = new Map();
+  const reviewerSearchCache = new Map();
+  const reviewerSearchInflight = new Map();
+  const reviewerSearchRouteCooldowns = new Map();
   const sockets = new Set();
   const browserClients = new Map();
   let closeTimer;
@@ -202,19 +221,25 @@ export async function startInteractiveGraphServer({
     }
   }
 
-  function scheduleNoBrowserClientsShutdown(delay = clientDisconnectGraceMs, reason = "all browser tabs closed") {
+  function scheduleNoBrowserClientsShutdown(
+    delay = clientDisconnectGraceMs,
+    reason = "all browser tabs closed",
+  ) {
     if (shuttingDown || noClientCloseTimer) {
       return;
     }
 
-    noClientCloseTimer = setTimeout(() => {
-      noClientCloseTimer = undefined;
-      pruneStaleBrowserClients();
+    noClientCloseTimer = setTimeout(
+      () => {
+        noClientCloseTimer = undefined;
+        pruneStaleBrowserClients();
 
-      if (!browserClients.size) {
-        shutdown(0, reason);
-      }
-    }, Math.max(0, Number(delay) || 0));
+        if (!browserClients.size) {
+          shutdown(0, reason);
+        }
+      },
+      Math.max(0, Number(delay) || 0),
+    );
     noClientCloseTimer.unref?.();
   }
 
@@ -227,8 +252,15 @@ export async function startInteractiveGraphServer({
       return;
     }
 
-    if (browserMonitorStarted && lastBrowserActivity && now - lastBrowserActivity > heartbeatTimeoutMs) {
-      shutdown(0, `browser heartbeat timed out after ${formatDurationLabel(heartbeatTimeoutMs)}`);
+    if (
+      browserMonitorStarted &&
+      lastBrowserActivity &&
+      now - lastBrowserActivity > heartbeatTimeoutMs
+    ) {
+      shutdown(
+        0,
+        `browser heartbeat timed out after ${formatDurationLabel(heartbeatTimeoutMs)}`,
+      );
     }
   }, heartbeatIntervalMs);
 
@@ -286,9 +318,11 @@ export async function startInteractiveGraphServer({
   }
 
   async function getServerGraphSnapshots(body) {
-    return Promise.all(serverGraphs.map((graph, index) => (
-      getServerGraphSnapshot(graph, getRequestSnapshotLimit(body, index))
-    )));
+    return Promise.all(
+      serverGraphs.map((graph, index) =>
+        getServerGraphSnapshot(graph, getRequestSnapshotLimit(body, index)),
+      ),
+    );
   }
 
   async function getServerOriginMainStatus(graph, { force = false } = {}) {
@@ -301,7 +335,8 @@ export async function startInteractiveGraphServer({
       !force &&
       graph.originMainStatus &&
       graph.originMainStatusCheckedAt &&
-      now - graph.originMainStatusCheckedAt < DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS
+      now - graph.originMainStatusCheckedAt <
+        DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS
     ) {
       return graph.originMainStatus;
     }
@@ -341,9 +376,13 @@ export async function startInteractiveGraphServer({
   }
 
   async function getServerOriginMainStatuses({ force = false } = {}) {
-    const statuses = (await Promise.all(serverGraphs.map((graph) => (
-      getServerOriginMainStatus(graph, { force })
-    )))).filter(Boolean);
+    const statuses = (
+      await Promise.all(
+        serverGraphs.map((graph) =>
+          getServerOriginMainStatus(graph, { force }),
+        ),
+      )
+    ).filter(Boolean);
     statuses.push(await getServerRustUpstreamStatus({ force }));
 
     return statuses;
@@ -364,7 +403,8 @@ export async function startInteractiveGraphServer({
       return rustUpstreamStatusPromise;
     }
 
-    rustUpstreamStatus = rustUpstreamStatus || getServerRustUpstreamCheckingStatus();
+    rustUpstreamStatus =
+      rustUpstreamStatus || getServerRustUpstreamCheckingStatus();
     rustUpstreamStatusPromise = (async () => {
       try {
         rustUpstreamStatus = await getRustUpstreamStatus({
@@ -414,11 +454,96 @@ export async function startInteractiveGraphServer({
     return rustUpstreamStatus || getServerRustUpstreamCheckingStatus();
   }
 
+  async function getServerReviewerSearch({ query = "", limit = 30 } = {}) {
+    const normalizedLimit = Math.max(1, Math.min(100, Number(limit) || 30));
+    const normalizedQuery = String(query || "")
+      .trim()
+      .toLowerCase();
+    const key = `${normalizedLimit}:${normalizedQuery}`;
+    const now = Date.now();
+    const cached = reviewerSearchCache.get(key);
+
+    if (
+      cached &&
+      now - cached.checkedAt < DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS
+    ) {
+      return cached.result;
+    }
+
+    if (reviewerSearchInflight.has(key)) {
+      return reviewerSearchInflight.get(key);
+    }
+
+    const limitedRoutes = new Map();
+    const searchPhab = async (request) => {
+      const route = request.route;
+      const requestNow = Date.now();
+      const cooldownUntil = reviewerSearchRouteCooldowns.get(route) || 0;
+
+      if (cooldownUntil > requestNow) {
+        const error = new Error(
+          `Phabricator ${route} is temporarily rate limited.`,
+        );
+        error.statusCode = 429;
+        error.retryAfterMs = cooldownUntil - requestNow;
+        limitedRoutes.set(route, cooldownUntil);
+        throw error;
+      }
+
+      try {
+        return await phab(request);
+      } catch (error) {
+        if (isReviewerSearchRateLimitError(error)) {
+          const retryAt = Date.now() + REVIEWER_RATE_LIMIT_COOLDOWN_MS;
+          reviewerSearchRouteCooldowns.set(route, retryAt);
+          limitedRoutes.set(route, retryAt);
+        }
+
+        throw error;
+      }
+    };
+
+    const promise = searchGraphCommitReviewers({
+      query,
+      limit: normalizedLimit,
+      phab: searchPhab,
+    })
+      .then((reviewers) => {
+        const retryAt = Math.max(0, ...limitedRoutes.values());
+        const result = {
+          reviewers,
+          rateLimited: Boolean(limitedRoutes.size),
+          rateLimitedRoute: limitedRoutes.size
+            ? getReviewerSearchRoute(query)
+            : "",
+          retryAfterMs: retryAt ? Math.max(0, retryAt - Date.now()) : 0,
+        };
+
+        if (!result.rateLimited) {
+          reviewerSearchCache.set(key, {
+            checkedAt: Date.now(),
+            result,
+          });
+        }
+
+        return result;
+      })
+      .finally(() => {
+        reviewerSearchInflight.delete(key);
+      });
+
+    reviewerSearchInflight.set(key, promise);
+    return promise;
+  }
+
   const server = serverFactory(async (request, response) => {
     try {
       const url = new URL(request.url, `http://${request.headers.host}`);
 
-      if (request.method === "GET" && ["/", "/index.html"].includes(url.pathname)) {
+      if (
+        request.method === "GET" &&
+        ["/", "/index.html"].includes(url.pathname)
+      ) {
         noteBrowserActivity();
         response.writeHead(200, {
           "content-type": "text/html; charset=utf-8",
@@ -428,33 +553,41 @@ export async function startInteractiveGraphServer({
         return;
       }
 
-      const clientScript = GRAPH_CLIENT_SCRIPTS.find((script) => url.pathname === `/assets/${script.output}`);
+      const clientScript = GRAPH_CLIENT_SCRIPTS.find(
+        (script) => url.pathname === `/assets/${script.output}`,
+      );
       if (request.method === "GET" && clientScript) {
         noteBrowserActivity();
         sendText(
           response,
           200,
           await readFile(getGraphClientScriptPath(clientScript), "utf8"),
-          "application/javascript; charset=utf-8"
+          "application/javascript; charset=utf-8",
         );
         return;
       }
 
-      const clientStylesheet = GRAPH_CLIENT_STYLESHEETS.find((stylesheet) => (
-        url.pathname === `/assets/${stylesheet.output}`
-      ));
+      const clientStylesheet = GRAPH_CLIENT_STYLESHEETS.find(
+        (stylesheet) => url.pathname === `/assets/${stylesheet.output}`,
+      );
       if (request.method === "GET" && clientStylesheet) {
         noteBrowserActivity();
         sendText(
           response,
           200,
-          await readFile(getGraphClientStylesheetPath(clientStylesheet), "utf8"),
-          "text/css; charset=utf-8"
+          await readFile(
+            getGraphClientStylesheetPath(clientStylesheet),
+            "utf8",
+          ),
+          "text/css; charset=utf-8",
         );
         return;
       }
 
-      if (request.method === "GET" && url.pathname === "/api/origin-main-status") {
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/origin-main-status"
+      ) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
         const statuses = await getServerOriginMainStatuses({
@@ -465,13 +598,18 @@ export async function startInteractiveGraphServer({
         return;
       }
 
-      const commitPageMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/commits$/);
+      const commitPageMatch = url.pathname.match(
+        /^\/api\/graph\/(\d+)\/commits$/,
+      );
       if (request.method === "GET" && commitPageMatch) {
         validateToken(url.searchParams.get("token"), token);
         const graph = serverGraphs[Number(commitPageMatch[1])];
 
         if (!graph) {
-          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
           return;
         }
 
@@ -481,7 +619,10 @@ export async function startInteractiveGraphServer({
         }
 
         const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
-        const limit = Math.max(1, Number(url.searchParams.get("limit") || pageSize) || pageSize);
+        const limit = Math.max(
+          1,
+          Number(url.searchParams.get("limit") || pageSize) || pageSize,
+        );
         const page = await getCheckoutCommitPage({
           graph,
           cwd: graph.path,
@@ -492,21 +633,27 @@ export async function startInteractiveGraphServer({
           runCommand,
         });
 
-        graph.workingTreeCount = page.workingTreeCount || graph.workingTreeCount || 0;
+        graph.workingTreeCount =
+          page.workingTreeCount || graph.workingTreeCount || 0;
         graph.commits = mergeGraphCommits(graph.commits, page.commits);
         page.commits.forEach((commit) => graph.knownHashes.add(commit.hash));
         sendJson(response, 200, { ok: true, ...page });
         return;
       }
 
-      const snapshotMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/snapshot$/);
+      const snapshotMatch = url.pathname.match(
+        /^\/api\/graph\/(\d+)\/snapshot$/,
+      );
       if (request.method === "GET" && snapshotMatch) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
         const graph = serverGraphs[Number(snapshotMatch[1])];
 
         if (!graph) {
-          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
           return;
         }
 
@@ -522,13 +669,18 @@ export async function startInteractiveGraphServer({
         return;
       }
 
-      const commitMessageMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/current-message$/);
+      const commitMessageMatch = url.pathname.match(
+        /^\/api\/graph\/(\d+)\/current-message$/,
+      );
       if (request.method === "GET" && commitMessageMatch) {
         validateToken(url.searchParams.get("token"), token);
         const graph = serverGraphs[Number(commitMessageMatch[1])];
 
         if (!graph) {
-          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
           return;
         }
 
@@ -540,19 +692,31 @@ export async function startInteractiveGraphServer({
         return;
       }
 
-      const selectedCommitMessageMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/message\/(.+)$/);
+      const selectedCommitMessageMatch = url.pathname.match(
+        /^\/api\/graph\/(\d+)\/message\/(.+)$/,
+      );
       if (request.method === "GET" && selectedCommitMessageMatch) {
         validateToken(url.searchParams.get("token"), token);
         const graph = serverGraphs[Number(selectedCommitMessageMatch[1])];
         const hash = decodeURIComponent(selectedCommitMessageMatch[2]);
 
         if (!graph) {
-          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
           return;
         }
 
-        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD" && !graph.knownHashes.has(hash)) {
-          sendJson(response, 404, { ok: false, error: "Commit has not been loaded by this graph." });
+        if (
+          !isWorkingTreeCommitHash(hash) &&
+          hash !== "HEAD" &&
+          !graph.knownHashes.has(hash)
+        ) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Commit has not been loaded by this graph.",
+          });
           return;
         }
 
@@ -565,19 +729,31 @@ export async function startInteractiveGraphServer({
         return;
       }
 
-      const integrationMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/integration\/(.+)$/);
+      const integrationMatch = url.pathname.match(
+        /^\/api\/graph\/(\d+)\/integration\/(.+)$/,
+      );
       if (request.method === "GET" && integrationMatch) {
         validateToken(url.searchParams.get("token"), token);
         const graph = serverGraphs[Number(integrationMatch[1])];
         const hash = decodeURIComponent(integrationMatch[2]);
 
         if (!graph) {
-          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
           return;
         }
 
-        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD" && !graph.knownHashes.has(hash)) {
-          sendJson(response, 404, { ok: false, error: "Commit has not been loaded by this graph." });
+        if (
+          !isWorkingTreeCommitHash(hash) &&
+          hash !== "HEAD" &&
+          !graph.knownHashes.has(hash)
+        ) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Commit has not been loaded by this graph.",
+          });
           return;
         }
 
@@ -592,7 +768,10 @@ export async function startInteractiveGraphServer({
         return;
       }
 
-      if (request.method === "POST" && url.pathname === "/api/bugzilla/checkin") {
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/bugzilla/checkin"
+      ) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         noteBrowserActivity();
@@ -600,12 +779,22 @@ export async function startInteractiveGraphServer({
         const hash = String(body.hash || "");
 
         if (!graph) {
-          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
           return;
         }
 
-        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD" && !graph.knownHashes.has(hash)) {
-          sendJson(response, 404, { ok: false, error: "Commit has not been loaded by this graph." });
+        if (
+          !isWorkingTreeCommitHash(hash) &&
+          hash !== "HEAD" &&
+          !graph.knownHashes.has(hash)
+        ) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Commit has not been loaded by this graph.",
+          });
           return;
         }
 
@@ -629,7 +818,10 @@ export async function startInteractiveGraphServer({
         const hash = decodeURIComponent(diffMatch[2]);
 
         if (!graph?.knownHashes.has(hash)) {
-          sendJson(response, 404, { ok: false, error: "Commit has not been loaded by this graph." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Commit has not been loaded by this graph.",
+          });
           return;
         }
 
@@ -654,7 +846,7 @@ export async function startInteractiveGraphServer({
         });
         const snapshot = await getServerGraphSnapshot(
           serverGraphs[Number(body.graphIndex)],
-          getRequestLimit(body.snapshotLimit)
+          getRequestLimit(body.snapshotLimit),
         );
         sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
@@ -672,9 +864,57 @@ export async function startInteractiveGraphServer({
         });
         const snapshot = await getServerGraphSnapshot(
           serverGraphs[Number(body.graphIndex)],
-          getRequestLimit(body.snapshotLimit)
+          getRequestLimit(body.snapshotLimit),
         );
         sendJson(response, 200, { ok: true, ...result, snapshot });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/commit/metadata") {
+        validateToken(url.searchParams.get("token"), token);
+        noteBrowserActivity();
+        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const metadata = await getGraphCommitMetadata({
+          graph,
+          runCommand,
+        });
+
+        sendJson(response, 200, {
+          ok: true,
+          graphIndex: index,
+          metadata: { ...metadata, graphIndex: index },
+        });
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/commit/reviewers"
+      ) {
+        validateToken(url.searchParams.get("token"), token);
+        noteBrowserActivity();
+        const reviewerSearch = await getServerReviewerSearch({
+          query: url.searchParams.get("query") || "",
+          limit: url.searchParams.get("limit") || 30,
+        });
+
+        sendJson(response, 200, { ok: true, ...reviewerSearch });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/commit") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        noteBrowserActivity();
+        const { graph } = chooseGraphMachCheckout(serverGraphs);
+        const result = await createGraphCommit({
+          graph,
+          options: body.options || {},
+          runCommand,
+        });
+        const snapshots = await getServerGraphSnapshots(body);
+
+        sendJson(response, 200, { ok: true, ...result, snapshots });
         return;
       }
 
@@ -725,7 +965,10 @@ export async function startInteractiveGraphServer({
         });
 
         machSessions.set(session.id, session);
-        sendJson(response, 200, { ok: true, ...serializeGraphMachSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphMachSession(session),
+        });
         return;
       }
 
@@ -746,7 +989,10 @@ export async function startInteractiveGraphServer({
         });
 
         trySessions.set(session.id, session);
-        sendJson(response, 200, { ok: true, ...serializeGraphTrySession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphTrySession(session),
+        });
         return;
       }
 
@@ -764,7 +1010,10 @@ export async function startInteractiveGraphServer({
         });
 
         lintSessions.set(session.id, session);
-        sendJson(response, 200, { ok: true, ...serializeGraphLintSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphLintSession(session),
+        });
         return;
       }
 
@@ -782,7 +1031,10 @@ export async function startInteractiveGraphServer({
         });
 
         testSessions.set(session.id, session);
-        sendJson(response, 200, { ok: true, ...serializeGraphTestSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphTestSession(session),
+        });
         return;
       }
 
@@ -792,13 +1044,16 @@ export async function startInteractiveGraphServer({
         noteBrowserActivity();
 
         const { graph, index } = chooseGraphMachCheckout(serverGraphs);
-        const snapshotLimits = Array.isArray(body.snapshotLimits) ? body.snapshotLimits.map(getRequestLimit) : [];
+        const snapshotLimits = Array.isArray(body.snapshotLimits)
+          ? body.snapshotLimits.map(getRequestLimit)
+          : [];
         const session = createGraphNewPatchSession({
           graphs: serverGraphs,
           graph,
           graphIndex: index,
           snapshotLimits,
-          getSnapshots: (limits) => getServerGraphSnapshots({ snapshotLimits: limits }),
+          getSnapshots: (limits) =>
+            getServerGraphSnapshots({ snapshotLimits: limits }),
           options: body.options || {},
           runCommand,
           updateBug,
@@ -806,7 +1061,10 @@ export async function startInteractiveGraphServer({
         });
 
         newPatchSessions.set(session.id, session);
-        sendJson(response, 200, { ok: true, ...serializeGraphNewPatchSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphNewPatchSession(session),
+        });
         return;
       }
 
@@ -826,7 +1084,10 @@ export async function startInteractiveGraphServer({
         });
 
         patchSessions.set(session.id, session);
-        sendJson(response, 200, { ok: true, ...serializeGraphPatchSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphPatchSession(session),
+        });
         return;
       }
 
@@ -846,8 +1107,11 @@ export async function startInteractiveGraphServer({
           graphs: serverGraphs,
           graph,
           graphIndex: index,
-          snapshotLimits: Array.isArray(body.snapshotLimits) ? body.snapshotLimits.map(getRequestLimit) : [],
-          getSnapshots: (snapshotLimits) => getServerGraphSnapshots({ snapshotLimits }),
+          snapshotLimits: Array.isArray(body.snapshotLimits)
+            ? body.snapshotLimits.map(getRequestLimit)
+            : [],
+          getSnapshots: (snapshotLimits) =>
+            getServerGraphSnapshots({ snapshotLimits }),
           options: body.options || {},
           runCommand,
           getBugs,
@@ -859,7 +1123,10 @@ export async function startInteractiveGraphServer({
         });
 
         landSessions.set(session.id, session);
-        sendJson(response, 200, { ok: true, ...serializeGraphLandSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphLandSession(session),
+        });
         return;
       }
 
@@ -867,48 +1134,76 @@ export async function startInteractiveGraphServer({
       if (request.method === "GET" && landStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
-        const session = landSessions.get(decodeURIComponent(landStatusMatch[1]));
+        const session = landSessions.get(
+          decodeURIComponent(landStatusMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown landing session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown landing session.",
+          });
           return;
         }
 
-        sendJson(response, 200, { ok: true, ...serializeGraphLandSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphLandSession(session),
+        });
         return;
       }
 
-      const landAnswerMatch = url.pathname.match(/^\/api\/land\/([^/]+)\/answer$/);
+      const landAnswerMatch = url.pathname.match(
+        /^\/api\/land\/([^/]+)\/answer$/,
+      );
       if (request.method === "POST" && landAnswerMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         noteBrowserActivity();
-        const session = landSessions.get(decodeURIComponent(landAnswerMatch[1]));
+        const session = landSessions.get(
+          decodeURIComponent(landAnswerMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown landing session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown landing session.",
+          });
           return;
         }
 
         session.answer(body.promptId, body.answer);
-        sendJson(response, 200, { ok: true, ...serializeGraphLandSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphLandSession(session),
+        });
         return;
       }
 
-      const landCancelMatch = url.pathname.match(/^\/api\/land\/([^/]+)\/cancel$/);
+      const landCancelMatch = url.pathname.match(
+        /^\/api\/land\/([^/]+)\/cancel$/,
+      );
       if (request.method === "POST" && landCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         noteBrowserActivity();
-        const session = landSessions.get(decodeURIComponent(landCancelMatch[1]));
+        const session = landSessions.get(
+          decodeURIComponent(landCancelMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown landing session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown landing session.",
+          });
           return;
         }
 
         session.cancel();
-        sendJson(response, 200, { ok: true, ...serializeGraphLandSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphLandSession(session),
+        });
         return;
       }
 
@@ -923,7 +1218,10 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        sendJson(response, 200, { ok: true, ...serializeGraphTrySession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphTrySession(session),
+        });
         return;
       }
 
@@ -931,14 +1229,22 @@ export async function startInteractiveGraphServer({
       if (request.method === "GET" && lintStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
-        const session = lintSessions.get(decodeURIComponent(lintStatusMatch[1]));
+        const session = lintSessions.get(
+          decodeURIComponent(lintStatusMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown lint session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown lint session.",
+          });
           return;
         }
 
-        sendJson(response, 200, { ok: true, ...serializeGraphLintSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphLintSession(session),
+        });
         return;
       }
 
@@ -946,63 +1252,101 @@ export async function startInteractiveGraphServer({
       if (request.method === "GET" && testStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
-        const session = testSessions.get(decodeURIComponent(testStatusMatch[1]));
+        const session = testSessions.get(
+          decodeURIComponent(testStatusMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown test session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown test session.",
+          });
           return;
         }
 
-        sendJson(response, 200, { ok: true, ...serializeGraphTestSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphTestSession(session),
+        });
         return;
       }
 
-      const testCancelMatch = url.pathname.match(/^\/api\/test\/([^/]+)\/cancel$/);
+      const testCancelMatch = url.pathname.match(
+        /^\/api\/test\/([^/]+)\/cancel$/,
+      );
       if (request.method === "POST" && testCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         noteBrowserActivity();
-        const session = testSessions.get(decodeURIComponent(testCancelMatch[1]));
+        const session = testSessions.get(
+          decodeURIComponent(testCancelMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown test session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown test session.",
+          });
           return;
         }
 
         session.cancel();
-        sendJson(response, 200, { ok: true, ...serializeGraphTestSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphTestSession(session),
+        });
         return;
       }
 
-      const newPatchStatusMatch = url.pathname.match(/^\/api\/new-patch\/([^/]+)$/);
+      const newPatchStatusMatch = url.pathname.match(
+        /^\/api\/new-patch\/([^/]+)$/,
+      );
       if (request.method === "GET" && newPatchStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
-        const session = newPatchSessions.get(decodeURIComponent(newPatchStatusMatch[1]));
+        const session = newPatchSessions.get(
+          decodeURIComponent(newPatchStatusMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown new patch session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown new patch session.",
+          });
           return;
         }
 
-        sendJson(response, 200, { ok: true, ...serializeGraphNewPatchSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphNewPatchSession(session),
+        });
         return;
       }
 
-      const newPatchCancelMatch = url.pathname.match(/^\/api\/new-patch\/([^/]+)\/cancel$/);
+      const newPatchCancelMatch = url.pathname.match(
+        /^\/api\/new-patch\/([^/]+)\/cancel$/,
+      );
       if (request.method === "POST" && newPatchCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         noteBrowserActivity();
-        const session = newPatchSessions.get(decodeURIComponent(newPatchCancelMatch[1]));
+        const session = newPatchSessions.get(
+          decodeURIComponent(newPatchCancelMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown new patch session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown new patch session.",
+          });
           return;
         }
 
         session.cancel();
-        sendJson(response, 200, { ok: true, ...serializeGraphNewPatchSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphNewPatchSession(session),
+        });
         return;
       }
 
@@ -1010,96 +1354,158 @@ export async function startInteractiveGraphServer({
       if (request.method === "GET" && patchStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
-        const session = patchSessions.get(decodeURIComponent(patchStatusMatch[1]));
+        const session = patchSessions.get(
+          decodeURIComponent(patchStatusMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown patch pull session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown patch pull session.",
+          });
           return;
         }
 
-        sendJson(response, 200, { ok: true, ...serializeGraphPatchSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphPatchSession(session),
+        });
         return;
       }
 
-      const patchAnswerMatch = url.pathname.match(/^\/api\/patch\/([^/]+)\/answer$/);
+      const patchAnswerMatch = url.pathname.match(
+        /^\/api\/patch\/([^/]+)\/answer$/,
+      );
       if (request.method === "POST" && patchAnswerMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         noteBrowserActivity();
-        const session = patchSessions.get(decodeURIComponent(patchAnswerMatch[1]));
+        const session = patchSessions.get(
+          decodeURIComponent(patchAnswerMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown patch pull session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown patch pull session.",
+          });
           return;
         }
 
         session.answer(body.promptId, body.answer);
-        sendJson(response, 200, { ok: true, ...serializeGraphPatchSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphPatchSession(session),
+        });
         return;
       }
 
-      const patchCancelMatch = url.pathname.match(/^\/api\/patch\/([^/]+)\/cancel$/);
+      const patchCancelMatch = url.pathname.match(
+        /^\/api\/patch\/([^/]+)\/cancel$/,
+      );
       if (request.method === "POST" && patchCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         noteBrowserActivity();
-        const session = patchSessions.get(decodeURIComponent(patchCancelMatch[1]));
+        const session = patchSessions.get(
+          decodeURIComponent(patchCancelMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown patch pull session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown patch pull session.",
+          });
           return;
         }
 
         session.cancel();
-        sendJson(response, 200, { ok: true, ...serializeGraphPatchSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphPatchSession(session),
+        });
         return;
       }
 
-      const machStatusMatch = url.pathname.match(/^\/api\/mach-action\/([^/]+)$/);
+      const machStatusMatch = url.pathname.match(
+        /^\/api\/mach-action\/([^/]+)$/,
+      );
       if (request.method === "GET" && machStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
-        const session = machSessions.get(decodeURIComponent(machStatusMatch[1]));
+        const session = machSessions.get(
+          decodeURIComponent(machStatusMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown build/run session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown build/run session.",
+          });
           return;
         }
 
-        sendJson(response, 200, { ok: true, ...serializeGraphMachSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphMachSession(session),
+        });
         return;
       }
 
-      const machCancelMatch = url.pathname.match(/^\/api\/mach-action\/([^/]+)\/cancel$/);
+      const machCancelMatch = url.pathname.match(
+        /^\/api\/mach-action\/([^/]+)\/cancel$/,
+      );
       if (request.method === "POST" && machCancelMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         noteBrowserActivity();
-        const session = machSessions.get(decodeURIComponent(machCancelMatch[1]));
+        const session = machSessions.get(
+          decodeURIComponent(machCancelMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown build/run session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown build/run session.",
+          });
           return;
         }
 
         await session.cancel();
-        sendJson(response, 200, { ok: true, ...serializeGraphMachSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphMachSession(session),
+        });
         return;
       }
 
-      if (request.method === "POST" && (url.pathname === "/api/amend-current" || url.pathname === "/api/amend-message")) {
+      if (
+        request.method === "POST" &&
+        (url.pathname === "/api/amend-current" ||
+          url.pathname === "/api/amend-message")
+      ) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         const graph = serverGraphs[Number(body.graphIndex)];
         const hash = String(body.hash || "HEAD");
 
         if (!graph) {
-          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
           return;
         }
 
-        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD" && !graph.knownHashes.has(hash)) {
-          sendJson(response, 404, { ok: false, error: "Commit has not been loaded by this graph." });
+        if (
+          !isWorkingTreeCommitHash(hash) &&
+          hash !== "HEAD" &&
+          !graph.knownHashes.has(hash)
+        ) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Commit has not been loaded by this graph.",
+          });
           return;
         }
 
@@ -1113,7 +1519,7 @@ export async function startInteractiveGraphServer({
         });
         const snapshot = await getServerGraphSnapshot(
           graph,
-          getRequestLimit(body.snapshotLimit)
+          getRequestLimit(body.snapshotLimit),
         );
         sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
@@ -1127,7 +1533,10 @@ export async function startInteractiveGraphServer({
         const graph = serverGraphs[graphIndex];
 
         if (!graph) {
-          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
           return;
         }
 
@@ -1140,7 +1549,11 @@ export async function startInteractiveGraphServer({
         const requestedHash = String(body.hash || current.hash);
 
         if (requestedHash !== current.hash) {
-          sendJson(response, 409, { ok: false, error: "Submit is only available for the currently checked out commit." });
+          sendJson(response, 409, {
+            ok: false,
+            error:
+              "Submit is only available for the currently checked out commit.",
+          });
           return;
         }
 
@@ -1154,7 +1567,10 @@ export async function startInteractiveGraphServer({
         });
 
         submitSessions.set(session.id, session);
-        sendJson(response, 200, { ok: true, ...serializeSubmitSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeSubmitSession(session),
+        });
         return;
       }
 
@@ -1162,31 +1578,49 @@ export async function startInteractiveGraphServer({
       if (request.method === "GET" && submitStatusMatch) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
-        const session = submitSessions.get(decodeURIComponent(submitStatusMatch[1]));
+        const session = submitSessions.get(
+          decodeURIComponent(submitStatusMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown submit session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown submit session.",
+          });
           return;
         }
 
-        sendJson(response, 200, { ok: true, ...serializeSubmitSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeSubmitSession(session),
+        });
         return;
       }
 
-      const submitAnswerMatch = url.pathname.match(/^\/api\/submit\/([^/]+)\/answer$/);
+      const submitAnswerMatch = url.pathname.match(
+        /^\/api\/submit\/([^/]+)\/answer$/,
+      );
       if (request.method === "POST" && submitAnswerMatch) {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         noteBrowserActivity();
-        const session = submitSessions.get(decodeURIComponent(submitAnswerMatch[1]));
+        const session = submitSessions.get(
+          decodeURIComponent(submitAnswerMatch[1]),
+        );
 
         if (!session) {
-          sendJson(response, 404, { ok: false, error: "Unknown submit session." });
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown submit session.",
+          });
           return;
         }
 
         session.answer(body.promptId, body.answer);
-        sendJson(response, 200, { ok: true, ...serializeSubmitSession(session) });
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeSubmitSession(session),
+        });
         return;
       }
 
@@ -1206,10 +1640,16 @@ export async function startInteractiveGraphServer({
         if (clientId) {
           browserClients.delete(clientId);
           noteBrowserActivity();
-          sendJson(response, 200, { ok: true, remainingClients: browserClients.size });
+          sendJson(response, 200, {
+            ok: true,
+            remainingClients: browserClients.size,
+          });
 
           if (!browserClients.size) {
-            scheduleNoBrowserClientsShutdown(clientDisconnectGraceMs, "all browser tabs closed");
+            scheduleNoBrowserClientsShutdown(
+              clientDisconnectGraceMs,
+              "all browser tabs closed",
+            );
           }
 
           return;

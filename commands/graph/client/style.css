@@ -919,6 +919,189 @@ body.is-resizing-panes {
   cursor: wait;
   opacity: 0.65;
 }
+.commit-dialog {
+  border: 1px solid #b9c0cc;
+  border-radius: 8px;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+  color: #20242a;
+  max-width: min(640px, calc(100vw - 32px));
+  padding: 0;
+  width: 600px;
+}
+.commit-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.36);
+}
+.commit-form {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 16px;
+}
+.commit-title {
+  font-size: 16px;
+  margin: 0;
+}
+.commit-branch-status,
+.commit-status {
+  color: #59616d;
+  font-size: 13px;
+  margin: 0;
+}
+.commit-status.error {
+  color: #9b1c1c;
+}
+.commit-field {
+  color: #59616d;
+  display: grid;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+}
+.commit-field[hidden] {
+  display: none;
+}
+.commit-bug,
+.commit-summary,
+.commit-reviewer-input {
+  border: 1px solid #b9c0cc;
+  border-radius: 6px;
+  box-sizing: border-box;
+  color: #20242a;
+  font:
+    13px -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  padding: 7px 8px;
+  width: 100%;
+}
+.commit-reviewer-picker {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-radius: 6px;
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  position: relative;
+}
+.commit-reviewer-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.commit-reviewer-pill {
+  align-items: center;
+  background: #ddf4ff;
+  border: 1px solid #9bc8e2;
+  border-radius: 999px;
+  color: #0969da;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 5px;
+  padding: 3px 6px 3px 8px;
+}
+.commit-reviewer-pill.blocking {
+  background: #fff8c5;
+  border-color: #d4a72c;
+  color: #7d4e00;
+}
+.commit-reviewer-blocking,
+.commit-reviewer-remove {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  padding: 0 2px;
+}
+.commit-reviewer-blocking {
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-weight: 700;
+  min-inline-size: 18px;
+}
+.commit-reviewer-blocking[aria-pressed="true"] {
+  background: #0969da;
+  color: #fff;
+}
+.commit-reviewer-input {
+  border: 0;
+  outline: none;
+  padding: 3px 2px;
+}
+.commit-reviewer-list {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.18);
+  display: grid;
+  left: 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 4px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 4;
+}
+.commit-reviewer-list[hidden] {
+  display: none;
+}
+.commit-reviewer-option {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: #20242a;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 2px;
+  padding: 6px 8px;
+  text-align: left;
+}
+.commit-reviewer-option:hover,
+.commit-reviewer-option:focus,
+.commit-reviewer-option[aria-selected="true"] {
+  background: rgba(31, 95, 159, 0.1);
+  outline: none;
+}
+.commit-reviewer-option.blocking .commit-reviewer-option-label {
+  color: #7d4e00;
+}
+.commit-reviewer-option-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.commit-reviewer-option-description {
+  color: #59616d;
+  font-size: 12px;
+}
+.commit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.commit-actions button {
+  border: 1px solid #b9c0cc;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 10px;
+}
+.commit-close {
+  background: #fff;
+  color: #20242a;
+}
+.commit-submit {
+  background: #1f5f9f;
+  border-color: #1f5f9f;
+  color: #fff;
+}
+.commit-submit:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
 .submit-dialog {
   border: 1px solid #b9c0cc;
   border-radius: 8px;
@@ -2814,6 +2997,67 @@ body.is-resizing-panes {
     color: #f1f3f6;
   }
   .amend-submit {
+    background: #4b9eff;
+    border-color: #4b9eff;
+    color: #07111f;
+  }
+  .commit-dialog {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .commit-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.58);
+  }
+  .commit-branch-status,
+  .commit-status,
+  .commit-field,
+  .commit-reviewer-option-description {
+    color: #acb4c0;
+  }
+  .commit-status.error {
+    color: #ff9f9f;
+  }
+  .commit-bug,
+  .commit-summary,
+  .commit-reviewer-picker,
+  .commit-reviewer-input,
+  .commit-reviewer-list {
+    background: #0d1117;
+    border-color: #424b59;
+    color: #e6edf3;
+  }
+  .commit-reviewer-pill {
+    background: #0d2d4f;
+    border-color: #1f6feb;
+    color: #79c0ff;
+  }
+  .commit-reviewer-pill.blocking {
+    background: #4d3800;
+    border-color: #d4a72c;
+    color: #ffdf80;
+  }
+  .commit-reviewer-blocking[aria-pressed="true"] {
+    background: #79c0ff;
+    color: #07111f;
+  }
+  .commit-reviewer-option {
+    color: #f1f3f6;
+  }
+  .commit-reviewer-option:hover,
+  .commit-reviewer-option:focus,
+  .commit-reviewer-option[aria-selected="true"] {
+    background: rgba(75, 158, 255, 0.16);
+  }
+  .commit-reviewer-option.blocking .commit-reviewer-option-label {
+    color: #ffdf80;
+  }
+  .commit-close {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .commit-submit {
     background: #4b9eff;
     border-color: #4b9eff;
     color: #07111f;

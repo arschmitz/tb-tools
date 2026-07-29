@@ -33,6 +33,7 @@ Use the console to:
 
 - inspect live comm and Firefox branch graphs with the current checkout, uncommitted changes, branch labels, and tracked try runs
 - click commits for full commit messages, Bugzilla and Phabricator links, integration status, change totals, and GitHub-style syntax-highlighted diffs
+- create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, and blocking-review toggles
 - checkout, rebase, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit
 - update both repositories, update and rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches
 - run modified tests or explicit path/glob patterns, including headless runs, with parsed final summaries and rerun actions for failures
@@ -100,7 +101,6 @@ _Test runs preserve colored output and add parsed summaries, failed-file actions
 ## Sheriff Duty
 
 The land command is your all in one tool for handling landings in thunderbird. This command integrates with bugzilla, phabricator, and the Lando CLI to form an all in one solution. Just run the land command and tb-tools will check for rust changes and any accompanying patches. Then pulls all bugs marked for checkin and guide you through the process of landing them 1 at a time including viewing and updating the associated bugs and patches. If run with sanity enabled it will run linting and a build at the end before submitting commits through Lando. For detailed workflow and documentation see the land command below.
-
 ### amend
 ---
 Amends the current commit optionally adding new files
@@ -246,7 +246,6 @@ tb build-update
 5. Outputs the staged commits for approval
    * Approve - The stack is submitted with the Lando CLI
    * Cancel - The generated commit is discarded
-
 ```bash
 tb bump
 ```
@@ -297,7 +296,6 @@ tb help
 8. Upon approval the stack is submitted with the Lando CLI
 9. The bug is updated **EXPERIMENTAL**
    * The milestone is set
-
 ```bash
 tb land
 ```
@@ -434,7 +432,6 @@ tb run
      2. Check if rust updates are required
      3. If updates are still required check phabricator for patches.
      4. If no patches are found abort
-
 ```bash
 tb rust-check
 ```
@@ -468,7 +465,6 @@ Optionally:
 * Prompt to run tests
 * Prompt to submit a try run and post as a comment on phabricator
 * Prompt to Submit pending inline comments and comments marked as done,
-
 ```bash
 tb submit
 ```
@@ -574,5 +570,5 @@ tb update
                                      .-++++++++++++++++++++++++++-:
                                          :-=++++++++++++++++=-:.
                                                ..::::::..
-                      
+
 ```

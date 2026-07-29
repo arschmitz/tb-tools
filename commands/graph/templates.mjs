@@ -59,6 +59,7 @@ export function buildGraphHtml({
         <button class="graph-menu-button" type="button" aria-label="More actions" aria-haspopup="true" aria-expanded="false" aria-controls="graph-options-menu"><span aria-hidden="true">&#9776;</span></button>
         <div class="graph-options-menu" id="graph-options-menu" role="menu" aria-label="More actions" hidden>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="build">Build</button>
+          <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="commit">Commit</button>
           <div class="graph-menu-submenu" role="none">
             <button class="graph-menu-command graph-submenu-trigger" type="button" role="menuitem" aria-haspopup="true" aria-expanded="false" data-menu-action="lint">Lint</button>
             <div class="graph-submenu" role="menu" aria-label="Lint options">
@@ -203,6 +204,37 @@ ${testOutputTab}</nav>
       <div class="amend-actions">
         <button class="amend-cancel" type="button">Cancel</button>
         <button class="amend-submit" type="submit">Amend</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="commit-dialog" id="commit-dialog">
+    <form class="commit-form">
+      <h2 class="commit-title">Commit Changes</h2>
+      <p class="commit-branch-status" role="status">Loading checkout...</p>
+      <label class="commit-field commit-bug-field" hidden>Bugzilla bug ID
+        <input class="commit-bug" name="bug-id" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]{4,8}">
+      </label>
+      <label class="commit-field">Commit message
+        <input class="commit-summary" name="summary" type="text" autocomplete="off" required>
+      </label>
+      <label class="commit-field">Reviewers and groups
+        <div class="commit-reviewer-picker">
+          <div class="commit-reviewer-pills" aria-label="Selected reviewers"></div>
+          <input
+            class="commit-reviewer-input"
+            type="text"
+            autocomplete="off"
+            role="combobox"
+            aria-expanded="false"
+            aria-controls="commit-reviewer-list"
+          >
+          <div class="commit-reviewer-list" id="commit-reviewer-list" role="listbox" hidden></div>
+        </div>
+      </label>
+      <p class="commit-status" role="status">Ready to commit changes.</p>
+      <div class="commit-actions">
+        <button class="commit-close" type="button">Close</button>
+        <button class="commit-submit" type="submit">Commit</button>
       </div>
     </form>
   </dialog>

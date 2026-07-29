@@ -3,6 +3,11 @@ import {
   INTERACTIVE,
   amendDialog,
   amendForm,
+  commitClose,
+  commitForm,
+  commitReviewerInput,
+  commitReviewerList,
+  commitReviewerPills,
   contextMenu,
   graphStates,
   landClose,
@@ -93,6 +98,15 @@ import {
   runCommitAction,
   submitAmendDialog,
 } from "./commit-actions.js";
+import {
+  addCommitReviewerFromEvent,
+  closeCommitDialog,
+  handleCommitReviewerPillEvent,
+  handleCommitReviewerInputKeydown,
+  openCommitDialog,
+  scheduleCommitReviewerSearch,
+  submitCommitDialog,
+} from "./commit-dialog.js";
 import { markBugForCheckin } from "./diff-viewer.js";
 import { hideCommitContextMenu } from "./lane-renderer.js";
 
@@ -125,6 +139,10 @@ document.addEventListener("click", (event) => {
 
     if (menuAction === "build") {
       startGraphMachAction("build");
+    }
+
+    if (menuAction === "commit") {
+      openCommitDialog();
     }
 
     if (menuAction === "lint-all" || menuAction === "lint-outgoing") {
@@ -246,10 +264,30 @@ amendForm.addEventListener("submit", (event) => {
   submitAmendDialog();
 });
 
-amendDialog.querySelector(".amend-cancel").addEventListener("click", closeAmendDialog);
+amendDialog
+  .querySelector(".amend-cancel")
+  .addEventListener("click", closeAmendDialog);
+commitForm.addEventListener("submit", submitCommitDialog);
+commitClose.addEventListener("click", closeCommitDialog);
+commitReviewerInput.addEventListener("focus", scheduleCommitReviewerSearch);
+commitReviewerInput.addEventListener("input", scheduleCommitReviewerSearch);
+commitReviewerInput.addEventListener(
+  "keydown",
+  handleCommitReviewerInputKeydown,
+);
+commitReviewerList.addEventListener("mousedown", (event) => {
+  if (addCommitReviewerFromEvent(event)) {
+    event.preventDefault();
+  }
+});
+commitReviewerPills.addEventListener("click", (event) => {
+  handleCommitReviewerPillEvent(event);
+});
 submitClose.addEventListener("click", closeSubmitDialog);
 submitDialog.querySelectorAll("button[data-answer]").forEach((button) => {
-  button.addEventListener("click", () => answerSubmitPrompt(button.dataset.answer === "true"));
+  button.addEventListener("click", () =>
+    answerSubmitPrompt(button.dataset.answer === "true"),
+  );
 });
 trySelector.addEventListener("change", updateTryDialogFields);
 tryForm.addEventListener("submit", submitTryDialog);
@@ -279,9 +317,13 @@ newPatchForm.addEventListener("submit", startGraphNewPatchSession);
 newPatchClose.addEventListener("click", cancelOrCloseNewPatchDialog);
 patchForm.addEventListener("submit", startGraphPatchSession);
 patchRaw.addEventListener("change", updatePatchDialogFields);
-patchDialog.querySelector(".patch-close").addEventListener("click", cancelOrClosePatchDialog);
+patchDialog
+  .querySelector(".patch-close")
+  .addEventListener("click", cancelOrClosePatchDialog);
 patchDialog.querySelectorAll("button[data-answer]").forEach((button) => {
-  button.addEventListener("click", () => answerPatchPrompt(button.dataset.answer === "true"));
+  button.addEventListener("click", () =>
+    answerPatchPrompt(button.dataset.answer === "true"),
+  );
 });
 testForm.addEventListener("submit", startGraphTestSession);
 testClose.addEventListener("click", () => {
@@ -295,17 +337,22 @@ landDialog.addEventListener("click", (event) => {
     return;
   }
 
-  const answer = button.dataset.answerType === "boolean"
-    ? button.dataset.landAnswer === "true"
-    : button.dataset.landAnswer || button.dataset.answer;
+  const answer =
+    button.dataset.answerType === "boolean"
+      ? button.dataset.landAnswer === "true"
+      : button.dataset.landAnswer || button.dataset.answer;
 
   answerLandPrompt(answer);
 });
 
-window.addEventListener("scroll", () => {
-  hideCommitContextMenu();
-  closeGraphOptionsMenu();
-}, { passive: true });
+window.addEventListener(
+  "scroll",
+  () => {
+    hideCommitContextMenu();
+    closeGraphOptionsMenu();
+  },
+  { passive: true },
+);
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hideCommitContextMenu();
@@ -326,7 +373,9 @@ export function handleSentinelIntersections(entries) {
     if (
       !state.sentinelReady ||
       !state.scrolledTowardBottom ||
-      !document.querySelector('.panel[data-index="' + index + '"]').classList.contains("active")
+      !document
+        .querySelector('.panel[data-index="' + index + '"]')
+        .classList.contains("active")
     ) {
       continue;
     }
@@ -338,7 +387,9 @@ export function handleSentinelIntersections(entries) {
 }
 
 uiState.loadObserver = INTERACTIVE.enabled
-  ? new IntersectionObserver(handleSentinelIntersections, { rootMargin: "0px 0px 240px 0px" })
+  ? new IntersectionObserver(handleSentinelIntersections, {
+      rootMargin: "0px 0px 240px 0px",
+    })
   : null;
 
 export function trackScrollDirection() {
@@ -396,21 +447,31 @@ export function renderGraph(index) {
   }
 
   try {
-    state.currentHash = getCurrentCommitHash(state.commits) || state.currentHash;
+    state.currentHash =
+      getCurrentCommitHash(state.commits) || state.currentHash;
     renderLaneGraph(index, state.commits);
     scheduleGraphEnhancements(index);
     state.rendered = true;
   } catch (error) {
-    showError(container, error && error.message ? error.message : String(error));
+    showError(
+      container,
+      error && error.message ? error.message : String(error),
+    );
   }
 }
 
 export function showTab(index) {
-  document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
+  document
+    .querySelectorAll(".tab, .panel")
+    .forEach((node) => node.classList.remove("active"));
   testOutputPanel.hidden = true;
   testOutputTab.classList.remove("active");
-  document.querySelector('.tab[data-index="' + index + '"]').classList.add("active");
-  document.querySelector('.panel[data-index="' + index + '"]').classList.add("active");
+  document
+    .querySelector('.tab[data-index="' + index + '"]')
+    .classList.add("active");
+  document
+    .querySelector('.panel[data-index="' + index + '"]')
+    .classList.add("active");
   restoreGraphPaneWidth(index);
   renderGraph(index);
   scheduleGraphEnhancements(index);
@@ -426,13 +487,17 @@ document.querySelectorAll(".pane-resizer").forEach((resizer) => {
 });
 
 window.addEventListener("scroll", trackScrollDirection, { passive: true });
-window.addEventListener("resize", () => {
-  const activePanel = document.querySelector(".panel.active");
+window.addEventListener(
+  "resize",
+  () => {
+    const activePanel = document.querySelector(".panel.active");
 
-  if (activePanel) {
-    restoreGraphPaneWidth(Number(activePanel.dataset.index));
-  }
-}, { passive: true });
+    if (activePanel) {
+      restoreGraphPaneWidth(Number(activePanel.dataset.index));
+    }
+  },
+  { passive: true },
+);
 
 if (INTERACTIVE.enabled) {
   function createClientId() {
@@ -459,7 +524,10 @@ if (INTERACTIVE.enabled) {
     const payload = getClientPayload();
 
     if (navigator.sendBeacon) {
-      navigator.sendBeacon("/api/close", new Blob([payload], { type: "application/json" }));
+      navigator.sendBeacon(
+        "/api/close",
+        new Blob([payload], { type: "application/json" }),
+      );
       return;
     }
 
@@ -484,42 +552,46 @@ if (INTERACTIVE.enabled) {
   const graphPoll = setInterval(pollGraphUpdates, INTERACTIVE.pollIntervalMs);
   const originMainStatusPoll = setInterval(
     refreshOriginMainStatus,
-    Math.max(INTERACTIVE.pollIntervalMs, DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS)
+    Math.max(INTERACTIVE.pollIntervalMs, DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS),
   );
 
   sendHeartbeat();
   refreshOriginMainStatus();
 
-  window.addEventListener("pagehide", () => {
-    clearInterval(heartbeat);
-    clearInterval(graphPoll);
-    clearInterval(originMainStatusPoll);
-    if (uiState.machPollTimer) {
-      window.clearTimeout(uiState.machPollTimer);
-    }
-    if (uiState.lintPollTimer) {
-      window.clearTimeout(uiState.lintPollTimer);
-    }
-    if (uiState.newPatchPollTimer) {
-      window.clearTimeout(uiState.newPatchPollTimer);
-    }
-    if (uiState.patchPollTimer) {
-      window.clearTimeout(uiState.patchPollTimer);
-    }
-    if (uiState.testPollTimer) {
-      window.clearTimeout(uiState.testPollTimer);
-    }
-    if (uiState.landPollTimer) {
-      window.clearTimeout(uiState.landPollTimer);
-    }
-    if (uiState.commandElapsedTimer) {
-      window.clearInterval(uiState.commandElapsedTimer);
-    }
-    if (uiState.originMainStatusRetryTimer) {
-      window.clearTimeout(uiState.originMainStatusRetryTimer);
-    }
-    sendCloseSignal();
-  }, { once: true });
+  window.addEventListener(
+    "pagehide",
+    () => {
+      clearInterval(heartbeat);
+      clearInterval(graphPoll);
+      clearInterval(originMainStatusPoll);
+      if (uiState.machPollTimer) {
+        window.clearTimeout(uiState.machPollTimer);
+      }
+      if (uiState.lintPollTimer) {
+        window.clearTimeout(uiState.lintPollTimer);
+      }
+      if (uiState.newPatchPollTimer) {
+        window.clearTimeout(uiState.newPatchPollTimer);
+      }
+      if (uiState.patchPollTimer) {
+        window.clearTimeout(uiState.patchPollTimer);
+      }
+      if (uiState.testPollTimer) {
+        window.clearTimeout(uiState.testPollTimer);
+      }
+      if (uiState.landPollTimer) {
+        window.clearTimeout(uiState.landPollTimer);
+      }
+      if (uiState.commandElapsedTimer) {
+        window.clearInterval(uiState.commandElapsedTimer);
+      }
+      if (uiState.originMainStatusRetryTimer) {
+        window.clearTimeout(uiState.originMainStatusRetryTimer);
+      }
+      sendCloseSignal();
+    },
+    { once: true },
+  );
 }
 
 restoreGraphPaneWidth(0);

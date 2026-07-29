@@ -1,28 +1,32 @@
-import fs from 'fs';
-import banner from '../lib/banner.mjs';
-import { writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import fs from "fs";
+import banner from "../lib/banner.mjs";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 
 const consoleScreenshots = [
   {
     path: "/images/console-overview.png",
     alt: "Thunderbird Desktop Console showing a selected commit, integration badges, and a GitHub-style diff",
-    caption: "The main console view keeps the comm graph, checkout state, Bugzilla and Phabricator status, tracked try runs, and a syntax-highlighted diff in one place.",
+    caption:
+      "The main console view keeps the comm graph, checkout state, Bugzilla and Phabricator status, tracked try runs, and a syntax-highlighted diff in one place.",
   },
   {
     path: "/images/console-try.png",
     alt: "Thunderbird Desktop Console try run dialog",
-    caption: "The try dialog exposes the normal `mach try` selectors, presets, task regexes, artifact builds, and optional Phabricator comments without leaving the browser flow.",
+    caption:
+      "The try dialog exposes the normal `mach try` selectors, presets, task regexes, artifact builds, and optional Phabricator comments without leaving the browser flow.",
   },
   {
     path: "/images/console-land.png",
     alt: "Thunderbird Desktop Console land patches dialog",
-    caption: "The Land Patches flow brings the `tb land` sheriff workflow into the console, showing accepted checkin-needed patches, related links, prompts, and Lando output.",
+    caption:
+      "The Land Patches flow brings the `tb land` sheriff workflow into the console, showing accepted checkin-needed patches, related links, prompts, and Lando output.",
   },
   {
     path: "/images/console-test-output.png",
     alt: "Thunderbird Desktop Console parsed test output",
-    caption: "Test runs preserve colored output and add parsed summaries, failed-file actions, rerun controls, copy buttons, and VS Code links.",
+    caption:
+      "Test runs preserve colored output and add parsed summaries, failed-file actions, rerun controls, copy buttons, and VS Code links.",
   },
 ];
 
@@ -36,12 +40,13 @@ function pushConsoleSection(lines) {
     "",
     "- inspect live comm and Firefox branch graphs with the current checkout, uncommitted changes, branch labels, and tracked try runs",
     "- click commits for full commit messages, Bugzilla and Phabricator links, integration status, change totals, and GitHub-style syntax-highlighted diffs",
+    "- create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, and blocking-review toggles",
     "- checkout, rebase, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit",
     "- update both repositories, update and rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches",
     "- run modified tests or explicit path/glob patterns, including headless runs, with parsed final summaries and rerun actions for failures",
     "- watch command progress in a slim status bar with elapsed time, cancellable running work, and toggleable output",
     "- monitor comm and Firefox `origin/main` freshness plus Rust dependency sync warnings before remote-build workflows like try and submit",
-    ""
+    "",
   );
 
   for (const screenshot of consoleScreenshots) {
@@ -49,7 +54,7 @@ function pushConsoleSection(lines) {
       `![${screenshot.alt}](${screenshot.path})`,
       "",
       `_${screenshot.caption}_`,
-      ""
+      "",
     );
   }
 }
@@ -89,7 +94,7 @@ export default async function (optionList, subOptions) {
     "TB Tools uses a configuration `.tb.json` file in your user's home directory to enable some features.",
     "This file currently contains credentials for phabricator and bugzilla, plus optional defaults for Lando. The Lando CLI itself reads credentials from `~/.mozbuild/lando.toml` or its documented environment variables.",
     "### Sample Configuration",
-`\`\`\`json
+    `\`\`\`json
 {
   "phabricator": {
     "user": "arschmitz",
@@ -109,16 +114,13 @@ export default async function (optionList, subOptions) {
 
   pushConsoleSection(lines);
 
-  lines.push(
-    "## Command List",
-    "##### <ins>Quick Links</ins>"
-  );
-  
+  lines.push("## Command List", "##### <ins>Quick Links</ins>");
+
   optionList.forEach((option) => {
-    lines.push(`- [${option.name}](#${option.name})`)
+    lines.push(`- [${option.name}](#${option.name})`);
   });
   lines.push(
-`
+    `
 ## Example Development Workflow
 
 1. Start work on a new bug run \`tb create\` and follow prompt
@@ -134,7 +136,8 @@ export default async function (optionList, subOptions) {
 ## Sheriff Duty
 
 The land command is your all in one tool for handling landings in thunderbird. This command integrates with bugzilla, phabricator, and the Lando CLI to form an all in one solution. Just run the land command and tb-tools will check for rust changes and any accompanying patches. Then pulls all bugs marked for checkin and guide you through the process of landing them 1 at a time including viewing and updating the associated bugs and patches. If run with sanity enabled it will run linting and a build at the end before submitting commits through Lando. For detailed workflow and documentation see the land command below.
-`)
+`,
+  );
   optionList.forEach((option) => {
     lines.push(`### ${option.name}`);
     lines.push("---");
@@ -144,27 +147,38 @@ The land command is your all in one tool for handling landings in thunderbird. T
     lines.push("```");
     if (fs.existsSync(path.join("images", `${option.name}.gif`))) {
       lines.push("<br/><br/>");
-      lines.push(`![Screen recording of ${option.name}.](/images/${option.name}.gif)`);
+      lines.push(
+        `![Screen recording of ${option.name}.](/images/${option.name}.gif)`,
+      );
     }
-  
+
     if (subOptions[option.name]) {
       lines.push(`#### Options`);
-      lines.push("|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|");
+      lines.push(
+        "|option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|",
+      );
       lines.push("|----|-----------|--|--|---|");
       subOptions[option.name].forEach((subOption) => {
         const defaultValue = formatDefaultValue(subOption.defaultValue);
         const example = formatOptionExample(option.name, subOption);
-        lines.push(`|--${subOption.name}|${subOption.alias ? "-" + subOption.alias : ""}|${subOption.description.replaceAll("|", "\\|")}|${defaultValue}|\`${example}\``);
+        lines.push(
+          `|--${subOption.name}|${subOption.alias ? "-" + subOption.alias : ""}|${subOption.description.replaceAll("|", "\\|")}|${defaultValue}|\`${example}\``,
+        );
       });
     }
     lines.push("");
     lines.push("<br/><br/>");
   });
   lines.push("```");
-  lines.push(...banner.split(/\n/).map((line) => `                      ${line}`));
+  lines.push(
+    ...banner.split(/\n/).map((line) => `                      ${line}`),
+  );
   lines.push("```");
-  
+
   if (fs.existsSync("./README.md")) {
-    await writeFile("./README.md", lines.join("\n"));
+    await writeFile(
+      "./README.md",
+      `${lines.map((line) => line.trimEnd()).join("\n")}\n`,
+    );
   }
 }

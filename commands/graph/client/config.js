@@ -57,6 +57,18 @@ export const amendForm = amendDialog.querySelector(".amend-form");
 export const amendMessage = amendDialog.querySelector(".amend-message");
 export const amendError = amendDialog.querySelector(".amend-error");
 export const amendSubmit = amendDialog.querySelector(".amend-submit");
+export const commitDialog = document.getElementById("commit-dialog");
+export const commitForm = commitDialog.querySelector(".commit-form");
+export const commitBranchStatus = commitDialog.querySelector(".commit-branch-status");
+export const commitBugField = commitDialog.querySelector(".commit-bug-field");
+export const commitBug = commitDialog.querySelector(".commit-bug");
+export const commitSummary = commitDialog.querySelector(".commit-summary");
+export const commitReviewerPills = commitDialog.querySelector(".commit-reviewer-pills");
+export const commitReviewerInput = commitDialog.querySelector(".commit-reviewer-input");
+export const commitReviewerList = commitDialog.querySelector(".commit-reviewer-list");
+export const commitStatus = commitDialog.querySelector(".commit-status");
+export const commitClose = commitDialog.querySelector(".commit-close");
+export const commitSubmit = commitDialog.querySelector(".commit-submit");
 export const submitDialog = document.getElementById("submit-dialog");
 export const submitTitle = submitDialog.querySelector(".submit-title");
 export const submitStatus = submitDialog.querySelector(".submit-status");
@@ -123,6 +135,7 @@ export const testOutputLog = testOutputPanel.querySelector(".test-output-log");
 export const uiState = {
   contextMenuState: null,
   amendDialogState: null,
+  commitDialogState: null,
   submitDialogState: null,
   submitPollTimer: null,
   landDialogState: null,

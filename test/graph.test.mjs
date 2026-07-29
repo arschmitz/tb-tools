@@ -11,14 +11,17 @@ import {
   amendCurrentCommit,
   attachGraphTryRunsToCommits,
   answerSubmitSessionPrompt,
+  buildGraphCommitMessage,
   chooseCheckoutBranch,
   choosePruneBranches,
   chooseRebaseBranch,
   chooseRewordBranch,
   checkoutCommit,
+  createGraphCommit,
   createGraphCommand,
   getGraphCommitMessage,
   getGraphCommitIntegrationStatus,
+  getGraphCommitMetadata,
   getGraphCurrentCommitMessage,
   discardWorkingTreeChanges,
   getGraphOriginMainStatus,
@@ -51,6 +54,8 @@ import {
   recordGraphTryRun,
   runGraphTrySubmission,
   runGraphCommitAction,
+  searchGraphCommitReviewers,
+  normalizeGraphCommitReviewers,
   getInteractiveYesNoPrompt,
   runGraphMachActionSession,
   runGraphRepositoryUpdate,
@@ -79,6 +84,7 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "diff-viewer.js", output: "graph-client/diff-viewer.js" },
   { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
   { source: "commit-actions.js", output: "graph-client/commit-actions.js" },
+  { source: "commit-dialog.js", output: "graph-client/commit-dialog.js" },
   { source: "landing-dialog.js", output: "graph-client/landing-dialog.js" },
   { source: "new-patch-dialog.js", output: "graph-client/new-patch-dialog.js" },
   { source: "patch-dialog.js", output: "graph-client/patch-dialog.js" },
@@ -87,14 +93,21 @@ const GRAPH_CLIENT_TEST_ASSETS = [
 ];
 
 function readGraphClientScripts() {
-  return GRAPH_CLIENT_TEST_ASSETS
-    .filter(({ source }) => source.endsWith(".js"))
-    .map(({ source }) => readFileSync(path.join(process.cwd(), "commands/graph/client", source), "utf8"))
+  return GRAPH_CLIENT_TEST_ASSETS.filter(({ source }) => source.endsWith(".js"))
+    .map(({ source }) =>
+      readFileSync(
+        path.join(process.cwd(), "commands/graph/client", source),
+        "utf8",
+      ),
+    )
     .join("\n");
 }
 
 function readGraphClientStylesheet() {
-  return readFileSync(path.join(process.cwd(), "commands/graph/client/style.css"), "utf8").replace(/\s+/g, " ");
+  return readFileSync(
+    path.join(process.cwd(), "commands/graph/client/style.css"),
+    "utf8",
+  ).replace(/\s+/g, " ");
 }
 
 async function waitForSubmitSession(url, predicate) {
@@ -161,132 +174,170 @@ test("parseDecorations expands HEAD arrows and tags", () => {
     "origin/main",
     "tag: v1.0.0",
   ]);
-  assert.deepEqual(parseDecorations("origin/HEAD -> origin/main"), ["origin/main"]);
-});
-
-test("parseGitLog converts git log records into graph data", () => {
-  const output = "\x1eabc123\x1fparent1 parent2\x1fHEAD -> main, tag: v1.0.0\x1fAlice\x1falice@example.com\x1f1710000000\x1fFix the thing\n";
-
-  assert.deepEqual(parseGitLog(output), [{
-    hash: "abc123",
-    parents: ["parent1", "parent2"],
-    refs: ["HEAD", "main", "tag: v1.0.0"],
-    author: {
-      name: "Alice",
-      email: "alice@example.com",
-      timestamp: 1710000000000,
-    },
-    subject: "Fix the thing",
-  }]);
-});
-
-test("pruneMissingParents removes parents outside the displayed commit window", () => {
-  assert.deepEqual(pruneMissingParents([
-    { hash: "child", parents: ["parent", "missing"] },
-    { hash: "parent", parents: ["older"] },
-  ]), [
-    { hash: "child", parents: ["parent"] },
-    { hash: "parent", parents: [] },
+  assert.deepEqual(parseDecorations("origin/HEAD -> origin/main"), [
+    "origin/main",
   ]);
 });
 
+test("parseGitLog converts git log records into graph data", () => {
+  const output =
+    "\x1eabc123\x1fparent1 parent2\x1fHEAD -> main, tag: v1.0.0\x1fAlice\x1falice@example.com\x1f1710000000\x1fFix the thing\n";
+
+  assert.deepEqual(parseGitLog(output), [
+    {
+      hash: "abc123",
+      parents: ["parent1", "parent2"],
+      refs: ["HEAD", "main", "tag: v1.0.0"],
+      author: {
+        name: "Alice",
+        email: "alice@example.com",
+        timestamp: 1710000000000,
+      },
+      subject: "Fix the thing",
+    },
+  ]);
+});
+
+test("pruneMissingParents removes parents outside the displayed commit window", () => {
+  assert.deepEqual(
+    pruneMissingParents([
+      { hash: "child", parents: ["parent", "missing"] },
+      { hash: "parent", parents: ["older"] },
+    ]),
+    [
+      { hash: "child", parents: ["parent"] },
+      { hash: "parent", parents: [] },
+    ],
+  );
+});
+
 test("normalizeGraphTryOptions mirrors the supported mach try option surface", () => {
-  assert.deepEqual(normalizeGraphTryOptions({
-    selector: "fuzzy",
-    query: "linux64 debug",
-    preset: "smoke",
-    artifact: false,
-    comment: true,
-  }), {
-    selector: "fuzzy",
-    query: "linux64 debug",
-    preset: "smoke",
-    artifact: false,
-    comment: true,
-  });
-  assert.deepEqual(normalizeGraphTryOptions({
-    selector: "surprise",
-    tasksRegex: "browser",
-  }), {
-    selector: "auto",
-    "tasks-regex": "browser",
-    artifact: true,
-    comment: false,
-  });
+  assert.deepEqual(
+    normalizeGraphTryOptions({
+      selector: "fuzzy",
+      query: "linux64 debug",
+      preset: "smoke",
+      artifact: false,
+      comment: true,
+    }),
+    {
+      selector: "fuzzy",
+      query: "linux64 debug",
+      preset: "smoke",
+      artifact: false,
+      comment: true,
+    },
+  );
+  assert.deepEqual(
+    normalizeGraphTryOptions({
+      selector: "surprise",
+      tasksRegex: "browser",
+    }),
+    {
+      selector: "auto",
+      "tasks-regex": "browser",
+      artifact: true,
+      comment: false,
+    },
+  );
 });
 
 test("normalizeGraphTestOptions supports flavor and comma or line separated patterns", () => {
-  assert.deepEqual(normalizeGraphTestOptions({
-    flavor: "browser",
-    headless: true,
-    pattern: "mail/**/browser_*.js,\ncalendar/test/unit/test_alarm.js",
-  }), {
-    flavor: "browser",
-    headless: true,
-    pattern: [
-      "mail/**/browser_*.js",
-      "calendar/test/unit/test_alarm.js",
-    ],
-  });
-  assert.deepEqual(normalizeGraphTestOptions({
-    flavor: "surprise",
-  }), {
-    flavor: "all",
-    pattern: [],
-    headless: false,
-  });
-  assert.equal(normalizeGraphTestOptions({ headless: "false" }).headless, false);
+  assert.deepEqual(
+    normalizeGraphTestOptions({
+      flavor: "browser",
+      headless: true,
+      pattern: "mail/**/browser_*.js,\ncalendar/test/unit/test_alarm.js",
+    }),
+    {
+      flavor: "browser",
+      headless: true,
+      pattern: ["mail/**/browser_*.js", "calendar/test/unit/test_alarm.js"],
+    },
+  );
+  assert.deepEqual(
+    normalizeGraphTestOptions({
+      flavor: "surprise",
+    }),
+    {
+      flavor: "all",
+      pattern: [],
+      headless: false,
+    },
+  );
+  assert.equal(
+    normalizeGraphTestOptions({ headless: "false" }).headless,
+    false,
+  );
 });
 
 test("getPseudoTerminalCommand wraps real test runs in script for color output", () => {
-  assert.deepEqual(getPseudoTerminalCommand({
-    cmd: "../mach",
-    args: ["test", "mail/test/browser/browser_color.js"],
-    cwd: "/repo/comm",
-    capture: true,
-  }, "darwin"), {
-    cmd: "script",
-    args: [
-      "-q",
-      "-e",
-      "-F",
-      "/dev/null",
-      "../mach",
-      "test",
-      "mail/test/browser/browser_color.js",
-    ],
-    cwd: "/repo/comm",
-    capture: true,
-  });
-  assert.deepEqual(getPseudoTerminalCommand({
-    cmd: "../mach",
-    args: ["test", "mail/test/browser/browser_color.js"],
-    cwd: "/repo/comm",
-  }, "linux"), {
-    cmd: "script",
-    args: [
-      "-q",
-      "-e",
-      "-f",
-      "-c",
-      "'../mach' 'test' 'mail/test/browser/browser_color.js'",
-      "/dev/null",
-    ],
-    cwd: "/repo/comm",
-  });
-  assert.deepEqual(getPseudoTerminalCommand({
-    cmd: "../mach",
-    args: ["test"],
-  }, "win32"), {
-    cmd: "../mach",
-    args: ["test"],
-  });
+  assert.deepEqual(
+    getPseudoTerminalCommand(
+      {
+        cmd: "../mach",
+        args: ["test", "mail/test/browser/browser_color.js"],
+        cwd: "/repo/comm",
+        capture: true,
+      },
+      "darwin",
+    ),
+    {
+      cmd: "script",
+      args: [
+        "-q",
+        "-e",
+        "-F",
+        "/dev/null",
+        "../mach",
+        "test",
+        "mail/test/browser/browser_color.js",
+      ],
+      cwd: "/repo/comm",
+      capture: true,
+    },
+  );
+  assert.deepEqual(
+    getPseudoTerminalCommand(
+      {
+        cmd: "../mach",
+        args: ["test", "mail/test/browser/browser_color.js"],
+        cwd: "/repo/comm",
+      },
+      "linux",
+    ),
+    {
+      cmd: "script",
+      args: [
+        "-q",
+        "-e",
+        "-f",
+        "-c",
+        "'../mach' 'test' 'mail/test/browser/browser_color.js'",
+        "/dev/null",
+      ],
+      cwd: "/repo/comm",
+    },
+  );
+  assert.deepEqual(
+    getPseudoTerminalCommand(
+      {
+        cmd: "../mach",
+        args: ["test"],
+      },
+      "win32",
+    ),
+    {
+      cmd: "../mach",
+      args: ["test"],
+    },
+  );
 });
 
 test("cleanGraphTestTerminalOutput removes terminal noise without stripping ANSI color", () => {
   assert.equal(
     cleanGraphTestTerminalOutput("^D\b\b\x1b(B\x1b[31mred\x1b[0m\n"),
-    "\x1b[31mred\x1b[0m\n"
+    "\x1b[31mred\x1b[0m\n",
   );
 });
 
@@ -309,18 +360,32 @@ test("parseGraphTestOutput summarizes live failure lines and creates VS Code lin
   assert.equal(summary.status, "failed");
   assert.equal(summary.passed, 7);
   assert.equal(summary.failureCount, 1);
-  assert.equal(summary.failures[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(
+    summary.failures[0].path,
+    "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+  );
   assert.equal(summary.failures[0].lineNumber, 42);
-  assert.equal(summary.failures[0].absolutePath, "/repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js");
-  assert.equal(summary.failures[0].vscodeUrl, "vscode://file//repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js:42");
-  assert.deepEqual(summary.failedFiles, [{
-    path: "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
-    lineNumber: 42,
-    absolutePath: "/repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js",
-    vscodeUrl: "vscode://file//repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js:42",
-    failureCount: 1,
-    firstLine: "TEST-UNEXPECTED-FAIL | mail/test/browser/folder-display/browser_messagePaneVisibility.js:42 | expected visible pane",
-  }]);
+  assert.equal(
+    summary.failures[0].absolutePath,
+    "/repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+  );
+  assert.equal(
+    summary.failures[0].vscodeUrl,
+    "vscode://file//repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js:42",
+  );
+  assert.deepEqual(summary.failedFiles, [
+    {
+      path: "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+      lineNumber: 42,
+      absolutePath:
+        "/repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+      vscodeUrl:
+        "vscode://file//repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js:42",
+      failureCount: 1,
+      firstLine:
+        "TEST-UNEXPECTED-FAIL | mail/test/browser/folder-display/browser_messagePaneVisibility.js:42 | expected visible pane",
+    },
+  ]);
 });
 
 test("parseGraphTestOutput summarizes final unexpected result files", () => {
@@ -355,7 +420,10 @@ test("parseGraphTestOutput summarizes final unexpected result files", () => {
   ]);
   assert.equal(summary.failures[0].status, "FAIL");
   assert.equal(summary.failures[0].message, "expected visible pane");
-  assert.equal(summary.failures[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(
+    summary.failures[0].path,
+    "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+  );
   assert.equal(summary.failures[0].lineNumber, 42);
   assert.equal(summary.failures[1].status, "ERROR");
   assert.equal(summary.failures[1].message, "alarm should fire");
@@ -378,12 +446,12 @@ test("parseGraphTestOutput handles mochitest Error Summary context lines", () =>
       "Unexpected results: 2",
       "  test: 1 (1 fail)",
       "  subtest: 1 (1 fail)",
-      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      'FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
       "",
       "Error Summary",
       "-------------",
       "comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
-      "  FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      '  FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
       "chrome://mochitests/content/browser/comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js:test_setStatePrefillsDiscoveredGraphConfig:495",
       "chrome://mochikit/content/browser-test.js:handleTask:1402",
       "  FAIL comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js - finished in 652ms",
@@ -402,13 +470,25 @@ test("parseGraphTestOutput handles mochitest Error Summary context lines", () =>
   assert.equal(summary.unexpected, 2);
   assert.equal(summary.failureCount, 1);
   assert.equal(summary.failedFiles.length, 1);
-  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(
+    summary.failedFiles[0].path,
+    "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+  );
   assert.equal(summary.failedFiles[0].failureCount, 1);
-  assert.equal(summary.failedPaths[0], "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(
+    summary.failedPaths[0],
+    "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+  );
   assert.equal(summary.failures.length, 1);
-  assert.equal(summary.failures[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(
+    summary.failures[0].path,
+    "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+  );
   assert.equal(summary.failures[0].lineNumber, 495);
-  assert.equal(summary.failures[0].message, "test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"");
+  assert.equal(
+    summary.failures[0].message,
+    'test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
+  );
 });
 
 test("parseGraphTestOutput keeps pre-summary live failures while a test is running", () => {
@@ -421,16 +501,22 @@ test("parseGraphTestOutput keeps pre-summary live failures while a test is runni
     output: [
       "mochitest-browser",
       "~~~~~~~~~~~~~~~~~",
-      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      'FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
     ].join("\n"),
   });
 
   assert.equal(summary.status, "failed");
   assert.equal(summary.failureCount, 1);
-  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(
+    summary.failedFiles[0].path,
+    "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+  );
   assert.equal(summary.failedFiles[0].failureCount, 1);
   assert.equal(summary.failures.length, 1);
-  assert.equal(summary.failures[0].message, "test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"");
+  assert.equal(
+    summary.failures[0].message,
+    'test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
+  );
 });
 
 test("parseGraphTestOutput uses live TEST-START context for bare failure lines", () => {
@@ -443,16 +529,22 @@ test("parseGraphTestOutput uses live TEST-START context for bare failure lines",
     running: true,
     output: [
       "TEST-START | comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
-      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      'FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
     ].join("\n"),
   });
 
   assert.equal(summary.status, "failed");
   assert.equal(summary.failureCount, 1);
   assert.equal(summary.failedFiles.length, 1);
-  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(
+    summary.failedFiles[0].path,
+    "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+  );
   assert.equal(summary.failures.length, 1);
-  assert.equal(summary.failures[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(
+    summary.failures[0].path,
+    "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+  );
 });
 
 test("parseGraphTestOutput replaces live failures with Error Summary while running", () => {
@@ -463,18 +555,21 @@ test("parseGraphTestOutput replaces live failures with Error Summary while runni
     ],
     running: true,
     output: [
-      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      'FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
       "",
       "Error Summary",
       "-------------",
       "comm/mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
-      "  FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      '  FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
     ].join("\n"),
   });
 
   assert.equal(summary.status, "failed");
   assert.equal(summary.failureCount, 1);
-  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(
+    summary.failedFiles[0].path,
+    "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+  );
   assert.equal(summary.failedFiles[0].failureCount, 1);
   assert.equal(summary.failures.length, 1);
   assert.equal(summary.failures[0].lineNumber, 0);
@@ -495,8 +590,10 @@ test("parseGraphTestOutput does not duplicate live failures when summary rows ar
         message: "test_first - first message",
         path: "mail/components/accountcreation/test/browser/browser_first.js",
         lineNumber: 42,
-        absolutePath: "/repo/comm/mail/components/accountcreation/test/browser/browser_first.js",
-        vscodeUrl: "vscode://file//repo/comm/mail/components/accountcreation/test/browser/browser_first.js:42",
+        absolutePath:
+          "/repo/comm/mail/components/accountcreation/test/browser/browser_first.js",
+        vscodeUrl:
+          "vscode://file//repo/comm/mail/components/accountcreation/test/browser/browser_first.js:42",
       },
       {
         line: "FAIL test_second - second message",
@@ -504,8 +601,10 @@ test("parseGraphTestOutput does not duplicate live failures when summary rows ar
         message: "test_second - second message",
         path: "mail/components/accountcreation/test/browser/browser_second.js",
         lineNumber: 84,
-        absolutePath: "/repo/comm/mail/components/accountcreation/test/browser/browser_second.js",
-        vscodeUrl: "vscode://file//repo/comm/mail/components/accountcreation/test/browser/browser_second.js:84",
+        absolutePath:
+          "/repo/comm/mail/components/accountcreation/test/browser/browser_second.js",
+        vscodeUrl:
+          "vscode://file//repo/comm/mail/components/accountcreation/test/browser/browser_second.js:84",
       },
     ],
     output: [
@@ -551,7 +650,7 @@ test("parseGraphTestOutput keeps live failures until Error Summary has rows", ()
       "mochitest-browser",
       "~~~~~~~~~~~~~~~~~",
       "Unexpected results: 2",
-      "FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"",
+      'FAIL test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
       "",
       "Error Summary",
       "-------------",
@@ -561,19 +660,28 @@ test("parseGraphTestOutput keeps live failures until Error Summary has rows", ()
   assert.equal(summary.status, "failed");
   assert.equal(summary.unexpected, 2);
   assert.equal(summary.failureCount, 1);
-  assert.equal(summary.failedFiles[0].path, "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js");
+  assert.equal(
+    summary.failedFiles[0].path,
+    "mail/components/accountcreation/test/browser/browser_accountHubEmailExchangeType.js",
+  );
   assert.equal(summary.failures.length, 1);
-  assert.equal(summary.failures[0].message, "test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - \"graph-user@example.com\" == \"graph-user@exale.com\"");
+  assert.equal(
+    summary.failures[0].message,
+    'test_setStatePrefillsDiscoveredGraphConfig - The username should be prefilled from the Graph config - "graph-user@example.com" == "graph-user@exale.com"',
+  );
 });
 
 test("createGraphTestSession keeps parsed failures after raw output is capped", async () => {
-  const failureLine = "\x1b(B\x1b[31mFAIL mail/test/browser/folder-display/browser_messagePaneVisibility.js:42 | expected visible pane\x1b[0m\n";
+  const failureLine =
+    "\x1b(B\x1b[31mFAIL mail/test/browser/folder-display/browser_messagePaneVisibility.js:42 | expected visible pane\x1b[0m\n";
   const longTail = "noise\n".repeat(40000);
   const session = createGraphTestSession({
     graph: { label: "comm", path: "/repo/comm" },
     graphIndex: 0,
     options: {
-      pattern: ["mail/test/browser/folder-display/browser_messagePaneVisibility.js"],
+      pattern: [
+        "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+      ],
     },
     runCommand: async (command) => {
       if (command.cmd.endsWith("mach")) {
@@ -596,9 +704,15 @@ test("createGraphTestSession keeps parsed failures after raw output is capped", 
   assert.equal(serialized.output.includes("(B"), false);
   assert.equal(serialized.summary.status, "failed");
   assert.equal(serialized.summary.failureCount, 1);
-  assert.equal(serialized.failures[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(
+    serialized.failures[0].path,
+    "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+  );
   assert.equal(serialized.failures[0].lineNumber, 42);
-  assert.equal(serialized.failedFiles[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(
+    serialized.failedFiles[0].path,
+    "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+  );
   assert.equal(serialized.canRerunFailures, false);
 });
 
@@ -651,17 +765,25 @@ test("graph try runs are stored by stable patch id and attach after a rebase", a
   const [commit] = await attachGraphTryRunsToCommits({
     graph,
     runCommand,
-    commits: [{
-      hash: "def456",
-      parents: [],
-      refs: ["HEAD"],
-      subject: "Bug 123 - Try this",
-    }],
+    commits: [
+      {
+        hash: "def456",
+        parents: [],
+        refs: ["HEAD"],
+        subject: "Bug 123 - Try this",
+      },
+    ],
   });
 
   assert.equal(commit.tryRuns.length, 2);
-  assert.equal(commit.tryRuns[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=two");
-  assert.equal(commit.tryRuns[1].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=one");
+  assert.equal(
+    commit.tryRuns[0].url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=two",
+  );
+  assert.equal(
+    commit.tryRuns[1].url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=one",
+  );
 
   const normalized = normalizeGraphTryStore({
     runsByPatchId: {
@@ -725,51 +847,74 @@ test("runGraphTrySubmission records mach try output for the current commit", asy
     },
   });
 
-  assert.equal(result.tryUrl, "https://treeherder.mozilla.org/jobs?repo=try&revision=abc");
+  assert.equal(
+    result.tryUrl,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
+  );
   assert.equal(result.tryRun.patchId, "stable-patch-id");
   assert.equal(result.tryRun.subject, "Bug 123 - Try me. r=#reviewers");
-  assert.match(session.output, /\$ \.\.\/mach try fuzzy --query linux64 debug --preset smoke --no-artifact/);
-  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "try fuzzy --query linux64 debug --preset smoke --no-artifact"), true);
+  assert.match(
+    session.output,
+    /\$ \.\.\/mach try fuzzy --query linux64 debug --preset smoke --no-artifact/,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd.endsWith("mach") &&
+        call.args.join(" ") ===
+          "try fuzzy --query linux64 debug --preset smoke --no-artifact",
+    ),
+    true,
+  );
 
   const runs = await getGraphTryRunsForCommit({
     graph,
     runCommand,
     commit: { hash: "rebased456", subject: "Bug 123 - Try me" },
   });
-  assert.equal(runs[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=abc");
+  assert.equal(
+    runs[0].url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
+  );
 });
 
 test("landing patch try status reads Treeherder links from Phabricator comments", () => {
   assert.deepEqual(
-    getTreeherderUrlsFromText("any comment https://treeherder.mozilla.org/jobs?repo=try&revision=abc."),
-    ["https://treeherder.mozilla.org/jobs?repo=try&revision=abc"]
+    getTreeherderUrlsFromText(
+      "any comment https://treeherder.mozilla.org/jobs?repo=try&revision=abc.",
+    ),
+    ["https://treeherder.mozilla.org/jobs?repo=try&revision=abc"],
   );
 
   const transactions = [
     {
       type: "comment",
       dateCreated: 1700000000,
-      comments: [{
-        content: {
-          raw: "Green enough: https://treeherder.mozilla.org/jobs?repo=try&revision=old",
+      comments: [
+        {
+          content: {
+            raw: "Green enough: https://treeherder.mozilla.org/jobs?repo=try&revision=old",
+          },
         },
-      }],
+      ],
     },
     {
       type: "comment",
       dateCreated: 1700000600,
-      comments: [{
-        content: {
-          raw: "Latest remote run https://treeherder.mozilla.org/jobs?repo=try-comm-central&revision=new",
+      comments: [
+        {
+          content: {
+            raw: "Latest remote run https://treeherder.mozilla.org/jobs?repo=try-comm-central&revision=new",
+          },
         },
-      }],
+      ],
     },
   ];
   const latest = getLatestLandingPatchTryRun({ transactions });
 
   assert.equal(
     latest.url,
-    "https://treeherder.mozilla.org/jobs?repo=try-comm-central&revision=new"
+    "https://treeherder.mozilla.org/jobs?repo=try-comm-central&revision=new",
   );
   assert.deepEqual(getLandingPatchTryStatus({ transactions }), {
     state: "current",
@@ -787,27 +932,36 @@ test("landing patch try status warns for missing and stale Treeherder runs", () 
 
   const status = getLandingPatchTryStatus({
     patch: {
-      diffs: [{
-        dateCreated: 1700000800,
-      }],
-    },
-    transactions: [{
-      type: "comment",
-      dateCreated: 1700000600,
-      comments: [{
-        content: {
-          raw: "https://treeherder.mozilla.org/jobs?repo=try&revision=before-diff",
+      diffs: [
+        {
+          dateCreated: 1700000800,
         },
-      }],
-    }],
+      ],
+    },
+    transactions: [
+      {
+        type: "comment",
+        dateCreated: 1700000600,
+        comments: [
+          {
+            content: {
+              raw: "https://treeherder.mozilla.org/jobs?repo=try&revision=before-diff",
+            },
+          },
+        ],
+      },
+    ],
   });
 
   assert.equal(status.state, "stale");
   assert.equal(
     status.latestTryRun.url,
-    "https://treeherder.mozilla.org/jobs?repo=try&revision=before-diff"
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=before-diff",
   );
-  assert.equal(status.warning, "Patch changes were posted after the latest Treeherder try run.");
+  assert.equal(
+    status.warning,
+    "Patch changes were posted after the latest Treeherder try run.",
+  );
 });
 
 test("chooseCheckoutBranch prefers the current branch when available", () => {
@@ -817,59 +971,95 @@ test("chooseCheckoutBranch prefers the current branch when available", () => {
 });
 
 test("choosePruneBranches picks the local branch to rewrite", () => {
-  assert.deepEqual(choosePruneBranches({
-    containingRefs: "topic\nmain\n",
-    currentBranch: "main",
-  }), ["main"]);
-  assert.deepEqual(choosePruneBranches({
-    containingRefs: "topic\nmain\n",
-    tipRefs: "topic\nmain\n",
-  }), ["topic", "main"]);
-  assert.deepEqual(choosePruneBranches({
-    containingRefs: "topic\n",
-  }), ["topic"]);
-  assert.deepEqual(choosePruneBranches({
-    containingRefs: "topic\nmain\n",
-  }), []);
+  assert.deepEqual(
+    choosePruneBranches({
+      containingRefs: "topic\nmain\n",
+      currentBranch: "main",
+    }),
+    ["main"],
+  );
+  assert.deepEqual(
+    choosePruneBranches({
+      containingRefs: "topic\nmain\n",
+      tipRefs: "topic\nmain\n",
+    }),
+    ["topic", "main"],
+  );
+  assert.deepEqual(
+    choosePruneBranches({
+      containingRefs: "topic\n",
+    }),
+    ["topic"],
+  );
+  assert.deepEqual(
+    choosePruneBranches({
+      containingRefs: "topic\nmain\n",
+    }),
+    [],
+  );
 });
 
 test("chooseRebaseBranch picks one source branch containing the selected commit", () => {
-  assert.equal(chooseRebaseBranch({
-    containingRefs: "topic\nmain\n",
-    tipRefs: "topic\nmain\n",
-    currentBranch: "main",
-  }), "main");
-  assert.equal(chooseRebaseBranch({
-    containingRefs: "topic\n",
-    currentBranch: "main",
-  }), "topic");
-  assert.equal(chooseRebaseBranch({
-    containingRefs: "topic\nother\n",
-    currentBranch: "main",
-  }), "");
-  assert.equal(chooseRebaseBranch({
-    containingRefs: "main\n",
-    currentBranch: "main",
-  }), "main");
+  assert.equal(
+    chooseRebaseBranch({
+      containingRefs: "topic\nmain\n",
+      tipRefs: "topic\nmain\n",
+      currentBranch: "main",
+    }),
+    "main",
+  );
+  assert.equal(
+    chooseRebaseBranch({
+      containingRefs: "topic\n",
+      currentBranch: "main",
+    }),
+    "topic",
+  );
+  assert.equal(
+    chooseRebaseBranch({
+      containingRefs: "topic\nother\n",
+      currentBranch: "main",
+    }),
+    "",
+  );
+  assert.equal(
+    chooseRebaseBranch({
+      containingRefs: "main\n",
+      currentBranch: "main",
+    }),
+    "main",
+  );
 });
 
 test("chooseRewordBranch prefers the checked-out branch containing the selected commit", () => {
-  assert.equal(chooseRewordBranch({
-    containingRefs: "topic\nmain\n",
-    currentBranch: "main",
-  }), "main");
-  assert.equal(chooseRewordBranch({
-    containingRefs: "topic\n",
-    currentBranch: "main",
-  }), "topic");
-  assert.equal(chooseRewordBranch({
-    containingRefs: "topic\nother\n",
-    currentBranch: "main",
-  }), "");
-  assert.equal(chooseRewordBranch({
-    containingRefs: "topic\nmain\n",
-    tipRefs: "topic\n",
-  }), "topic");
+  assert.equal(
+    chooseRewordBranch({
+      containingRefs: "topic\nmain\n",
+      currentBranch: "main",
+    }),
+    "main",
+  );
+  assert.equal(
+    chooseRewordBranch({
+      containingRefs: "topic\n",
+      currentBranch: "main",
+    }),
+    "topic",
+  );
+  assert.equal(
+    chooseRewordBranch({
+      containingRefs: "topic\nother\n",
+      currentBranch: "main",
+    }),
+    "",
+  );
+  assert.equal(
+    chooseRewordBranch({
+      containingRefs: "topic\nmain\n",
+      tipRefs: "topic\n",
+    }),
+    "topic",
+  );
 });
 
 test("truncateDiff caps embedded diff size", () => {
@@ -882,40 +1072,48 @@ test("truncateDiff caps embedded diff size", () => {
   });
   assert.deepEqual(truncateDiff("abcdef", 3), {
     text: "abc\n\n[diff truncated at 3 bytes]",
-    html: "<pre class=\"info\">[diff truncated at 3 bytes]</pre>",
+    html: '<pre class="info">[diff truncated at 3 bytes]</pre>',
     truncated: true,
     insertions: 0,
     deletions: 0,
   });
 
-  assert.deepEqual(truncateDiff([
-    "diff --git a/file.txt b/file.txt",
-    "@@ -1,2 +1,3 @@",
-    " unchanged",
-    "-old",
-    "+new",
-    "+extra",
-  ].join("\n"), 1000), {
-    text: [
-      "diff --git a/file.txt b/file.txt",
-      "@@ -1,2 +1,3 @@",
-      " unchanged",
-      "-old",
-      "+new",
-      "+extra",
-    ].join("\n"),
-    html: formatPrettyDiffHtml([
-      "diff --git a/file.txt b/file.txt",
-      "@@ -1,2 +1,3 @@",
-      " unchanged",
-      "-old",
-      "+new",
-      "+extra",
-    ].join("\n")),
-    truncated: false,
-    insertions: 2,
-    deletions: 1,
-  });
+  assert.deepEqual(
+    truncateDiff(
+      [
+        "diff --git a/file.txt b/file.txt",
+        "@@ -1,2 +1,3 @@",
+        " unchanged",
+        "-old",
+        "+new",
+        "+extra",
+      ].join("\n"),
+      1000,
+    ),
+    {
+      text: [
+        "diff --git a/file.txt b/file.txt",
+        "@@ -1,2 +1,3 @@",
+        " unchanged",
+        "-old",
+        "+new",
+        "+extra",
+      ].join("\n"),
+      html: formatPrettyDiffHtml(
+        [
+          "diff --git a/file.txt b/file.txt",
+          "@@ -1,2 +1,3 @@",
+          " unchanged",
+          "-old",
+          "+new",
+          "+extra",
+        ].join("\n"),
+      ),
+      truncated: false,
+      insertions: 2,
+      deletions: 1,
+    },
+  );
 });
 
 test("runInteractiveSubmitCommand routes child yes/no prompts through submit session", async () => {
@@ -935,7 +1133,10 @@ test("runInteractiveSubmitCommand routes child yes/no prompts through submit ses
     child.stdin = {
       write(value) {
         writes.push(value);
-        child.stdout.emit("data", "Submitted https://phabricator.services.mozilla.com/D123456\n");
+        child.stdout.emit(
+          "data",
+          "Submitted https://phabricator.services.mozilla.com/D123456\n",
+        );
         queueMicrotask(() => child.emit("exit", 0));
       },
     };
@@ -949,21 +1150,33 @@ test("runInteractiveSubmitCommand routes child yes/no prompts through submit ses
     spawnCommand,
   });
 
-  child.stdout.emit("data", "Submit to https://phabricator.services.mozilla.com (Yes/no/always)? ");
+  child.stdout.emit(
+    "data",
+    "Submit to https://phabricator.services.mozilla.com (Yes/no/always)? ",
+  );
   await waitForSubmitSessionLike(session, (item) => Boolean(item.prompt));
   assert.equal(
     getInteractiveYesNoPrompt(session.output),
-    "Submit to https://phabricator.services.mozilla.com (Yes/no/always)?"
+    "Submit to https://phabricator.services.mozilla.com (Yes/no/always)?",
   );
-  assert.equal(session.prompt.message, "Submit to https://phabricator.services.mozilla.com (Yes/no/always)?");
+  assert.equal(
+    session.prompt.message,
+    "Submit to https://phabricator.services.mozilla.com (Yes/no/always)?",
+  );
 
   answerSubmitSessionPrompt(session, session.prompt.id, true);
 
-  assert.equal(await command, "Submit to https://phabricator.services.mozilla.com (Yes/no/always)? Submitted https://phabricator.services.mozilla.com/D123456\n");
+  assert.equal(
+    await command,
+    "Submit to https://phabricator.services.mozilla.com (Yes/no/always)? Submitted https://phabricator.services.mozilla.com/D123456\n",
+  );
   assert.deepEqual(writes, ["y\n"]);
   assert.match(session.output, /\$ moz-phab submit/);
   assert.match(session.output, /> yes/);
-  assert.match(session.output, /Submitted https:\/\/phabricator\.services\.mozilla\.com\/D123456/);
+  assert.match(
+    session.output,
+    /Submitted https:\/\/phabricator\.services\.mozilla\.com\/D123456/,
+  );
 });
 
 test("runGraphMachActionSession keeps run active when mach exits but the process group remains", async (t) => {
@@ -1019,46 +1232,62 @@ test("runGraphMachActionSession keeps run active when mach exits but the process
 });
 
 test("splitPrettyDiffFiles groups patch output by file", () => {
-  assert.deepEqual(splitPrettyDiffFiles([
-    "diff --git a/file.txt b/file.txt",
-    "index 123..456 100644",
-    "--- a/file.txt",
-    "+++ b/file.txt",
-    "@@ -1 +1 @@",
-    "-old",
-    "+new",
-  ].join("\n")), {
-    "file.txt": [
+  assert.deepEqual(
+    splitPrettyDiffFiles(
+      [
+        "diff --git a/file.txt b/file.txt",
+        "index 123..456 100644",
+        "--- a/file.txt",
+        "+++ b/file.txt",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+      ].join("\n"),
+    ),
+    {
+      "file.txt": [
+        "diff --git a/file.txt b/file.txt",
+        "index 123..456 100644",
+        "--- a/file.txt",
+        "+++ b/file.txt",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+      ],
+    },
+  );
+});
+
+test("formatPrettyDiffHtml renders pretty-diff style markup", () => {
+  const html = formatPrettyDiffHtml(
+    [
       "diff --git a/file.txt b/file.txt",
       "index 123..456 100644",
       "--- a/file.txt",
       "+++ b/file.txt",
-      "@@ -1 +1 @@",
-      "-old",
-      "+new",
-    ],
-  });
-});
-
-test("formatPrettyDiffHtml renders pretty-diff style markup", () => {
-  const html = formatPrettyDiffHtml([
-    "diff --git a/file.txt b/file.txt",
-    "index 123..456 100644",
-    "--- a/file.txt",
-    "+++ b/file.txt",
-    "@@ -10,2 +20,2 @@",
-    " unchanged",
-    "-old <value>",
-    "+new & better",
-  ].join("\n"));
+      "@@ -10,2 +20,2 @@",
+      " unchanged",
+      "-old <value>",
+      "+new & better",
+    ].join("\n"),
+  );
 
   assert.match(html, /class="pretty-file"/);
   assert.match(html, /class="file-heading"/);
-  assert.match(html, /class="file-stats" aria-label="1 addition and 1 deletion"/);
+  assert.match(
+    html,
+    /class="file-stats" aria-label="1 addition and 1 deletion"/,
+  );
   assert.match(html, /class="stat-additions">\+1<\/span>/);
   assert.match(html, /class="stat-deletions">-1<\/span>/);
-  assert.match(html, /class="copy-path" type="button" data-path="file.txt">Copy path<\/button>/);
-  assert.match(html, /<div class="file-diff"><table class="diff-table"><tbody>/);
+  assert.match(
+    html,
+    /class="copy-path" type="button" data-path="file.txt">Copy path<\/button>/,
+  );
+  assert.match(
+    html,
+    /<div class="file-diff"><table class="diff-table"><tbody>/,
+  );
   assert.doesNotMatch(html, /diff --git/);
   assert.doesNotMatch(html, /index 123\.\.456/);
   assert.doesNotMatch(html, /--- a\/file\.txt/);
@@ -1072,46 +1301,70 @@ test("formatPrettyDiffHtml renders pretty-diff style markup", () => {
   assert.match(html, /class="diff-line delete"/);
   assert.match(html, /class="line-number old-line">11<\/td>/);
   assert.match(html, /class="line-number new-line"><\/td>/);
-  assert.match(html, /<span class="line-marker">-<\/span><span class="line-content">old &lt;value&gt;<\/span>/);
+  assert.match(
+    html,
+    /<span class="line-marker">-<\/span><span class="line-content">old &lt;value&gt;<\/span>/,
+  );
   assert.match(html, /class="diff-line insert"/);
   assert.match(html, /class="line-number old-line"><\/td>/);
   assert.match(html, /class="line-number new-line">21<\/td>/);
-  assert.match(html, /<span class="line-marker">\+<\/span><span class="line-content">new &amp; better<\/span>/);
+  assert.match(
+    html,
+    /<span class="line-marker">\+<\/span><span class="line-content">new &amp; better<\/span>/,
+  );
   assert.match(html, /data-path="file.txt"/);
 
-  const newFileHtml = formatPrettyDiffHtml([
-    "diff --git a/new.txt b/new.txt",
-    "@@ -0,0 +1,2 @@",
-    "+first",
-    "+second",
-  ].join("\n"));
+  const newFileHtml = formatPrettyDiffHtml(
+    [
+      "diff --git a/new.txt b/new.txt",
+      "@@ -0,0 +1,2 @@",
+      "+first",
+      "+second",
+    ].join("\n"),
+  );
 
   assert.match(newFileHtml, /class="line-number new-line">1<\/td>/);
   assert.match(newFileHtml, /class="line-number new-line">2<\/td>/);
 
-  const markerLikeContentHtml = formatPrettyDiffHtml([
-    "diff --git a/marker.txt b/marker.txt",
-    "--- a/marker.txt",
-    "+++ b/marker.txt",
-    "@@ -1 +1 @@",
-    "--- markdown heading",
-    "+++ plus heading",
-  ].join("\n"));
+  const markerLikeContentHtml = formatPrettyDiffHtml(
+    [
+      "diff --git a/marker.txt b/marker.txt",
+      "--- a/marker.txt",
+      "+++ b/marker.txt",
+      "@@ -1 +1 @@",
+      "--- markdown heading",
+      "+++ plus heading",
+    ].join("\n"),
+  );
 
-  assert.match(markerLikeContentHtml, /class="file-stats" aria-label="1 addition and 1 deletion"/);
-  assert.match(markerLikeContentHtml, /class="diff-line delete"[^]*<span class="line-marker">-<\/span><span class="line-content">-- markdown heading<\/span>/);
-  assert.match(markerLikeContentHtml, /class="diff-line insert"[^]*<span class="line-marker">\+<\/span><span class="line-content">\+\+ plus heading<\/span>/);
+  assert.match(
+    markerLikeContentHtml,
+    /class="file-stats" aria-label="1 addition and 1 deletion"/,
+  );
+  assert.match(
+    markerLikeContentHtml,
+    /class="diff-line delete"[^]*<span class="line-marker">-<\/span><span class="line-content">-- markdown heading<\/span>/,
+  );
+  assert.match(
+    markerLikeContentHtml,
+    /class="diff-line insert"[^]*<span class="line-marker">\+<\/span><span class="line-content">\+\+ plus heading<\/span>/,
+  );
 
-  const highlightedHtml = formatPrettyDiffHtml([
-    "diff --git a/file.mjs b/file.mjs",
-    "@@ -1 +1 @@",
-    "-const oldValue = 1;",
-    "+const newValue = \"ok\";",
-  ].join("\n"));
+  const highlightedHtml = formatPrettyDiffHtml(
+    [
+      "diff --git a/file.mjs b/file.mjs",
+      "@@ -1 +1 @@",
+      "-const oldValue = 1;",
+      '+const newValue = "ok";',
+    ].join("\n"),
+  );
 
   assert.match(highlightedHtml, /<span class="hljs-keyword">const<\/span>/);
   assert.match(highlightedHtml, /<span class="hljs-number">1<\/span>/);
-  assert.match(highlightedHtml, /<span class="hljs-string">&quot;ok&quot;<\/span>/);
+  assert.match(
+    highlightedHtml,
+    /<span class="hljs-string">&quot;ok&quot;<\/span>/,
+  );
 });
 
 test("getCommitDiffs collects git show output by commit hash", async () => {
@@ -1186,13 +1439,28 @@ test("getWorkingTreeCommits returns one uncommitted item for staged, unstaged, a
   assert.deepEqual(workingTree.commits[0].parents, ["abc123"]);
   assert.equal(workingTree.commits[0].workingTree, true);
   assert.match(workingTree.commits[0].changeId, /^[a-f0-9]{64}$/);
-  assert.match(workingTree.diffs[workingTree.commits[0].hash].text, /tracked\.txt/);
-  assert.match(workingTree.diffs[workingTree.commits[0].hash].text, /untracked\.txt/);
+  assert.match(
+    workingTree.diffs[workingTree.commits[0].hash].text,
+    /tracked\.txt/,
+  );
+  assert.match(
+    workingTree.diffs[workingTree.commits[0].hash].text,
+    /untracked\.txt/,
+  );
   assert.equal(workingTree.diffs[workingTree.commits[0].hash].insertions, 2);
   assert.equal(workingTree.diffs[workingTree.commits[0].hash].deletions, 1);
-  assert.equal(commands.some((command) => command.args.includes("HEAD")), true);
-  assert.equal(commands.some((command) => command.args[0] === "ls-files"), true);
-  assert.equal(commands.some((command) => command.args.includes("--no-index")), true);
+  assert.equal(
+    commands.some((command) => command.args.includes("HEAD")),
+    true,
+  );
+  assert.equal(
+    commands.some((command) => command.args[0] === "ls-files"),
+    true,
+  );
+  assert.equal(
+    commands.some((command) => command.args.includes("--no-index")),
+    true,
+  );
 });
 
 test("getWorkingTreeDiff returns an empty rendered diff when the working tree is clean", async () => {
@@ -1224,9 +1492,10 @@ test("getGraphCurrentCommitMessage reads the full current commit message", async
   });
 
   assert.equal(message, "Bug 123 - Fix thing. r=#reviewers\n\nBody text.\n");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["log", "-1", "--format=%B"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [["log", "-1", "--format=%B"]],
+  );
 });
 
 test("getGraphCommitMessage reads the full selected commit message", async () => {
@@ -1243,10 +1512,14 @@ test("getGraphCommitMessage reads the full selected commit message", async () =>
     },
   });
 
-  assert.equal(message, "Bug 123 - Selected message. r=#reviewers\n\nBody text.\n");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["log", "-1", "--format=%B", "abc123"],
-  ]);
+  assert.equal(
+    message,
+    "Bug 123 - Selected message. r=#reviewers\n\nBody text.\n",
+  );
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [["log", "-1", "--format=%B", "abc123"]],
+  );
 });
 
 test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", async () => {
@@ -1257,11 +1530,13 @@ test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", as
     graph: {
       label: "comm",
       path: "/repo/comm",
-      commits: [{
-        hash: "abc123",
-        refs: ["phab-D987654"],
-        subject: "Fix thing",
-      }],
+      commits: [
+        {
+          hash: "abc123",
+          refs: ["phab-D987654"],
+          subject: "Fix thing",
+        },
+      ],
     },
     hash: "abc123",
     runCommand: async (command) => {
@@ -1271,40 +1546,49 @@ test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", as
     getBug: async (id) => {
       bugCalls.push(id);
       return {
-        bugs: [{
-          id,
-          status: "ASSIGNED",
-          resolution: "---",
-          summary: "Fix thing",
-          assigned_to: "alice@example.com",
-          is_open: true,
-          keywords: [],
-        }],
+        bugs: [
+          {
+            id,
+            status: "ASSIGNED",
+            resolution: "---",
+            summary: "Fix thing",
+            assigned_to: "alice@example.com",
+            is_open: true,
+            keywords: [],
+          },
+        ],
       };
     },
     phab: async (request) => {
       phabCalls.push(request);
       return {
-        result: [{
-          id: 987654,
-          uri: "https://phabricator.services.mozilla.com/D987654",
-          status: "status-review",
-          statusName: "Needs Review",
-          title: "Bug 123456 - Fix thing",
-        }],
+        result: [
+          {
+            id: 987654,
+            uri: "https://phabricator.services.mozilla.com/D987654",
+            status: "status-review",
+            statusName: "Needs Review",
+            title: "Bug 123456 - Fix thing",
+          },
+        ],
       };
     },
   });
 
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["log", "-1", "--format=%B", "abc123"],
-    ["rev-parse", "--git-path", "tb-tools-try-runs.json"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["log", "-1", "--format=%B", "abc123"],
+      ["rev-parse", "--git-path", "tb-tools-try-runs.json"],
+    ],
+  );
   assert.deepEqual(bugCalls, ["123456"]);
-  assert.deepEqual(phabCalls, [{
-    route: "differential.query",
-    params: { ids: [987654] },
-  }]);
+  assert.deepEqual(phabCalls, [
+    {
+      route: "differential.query",
+      params: { ids: [987654] },
+    },
+  ]);
   assert.equal(result.bugId, "123456");
   assert.equal(result.phabRevision, "D987654");
   assert.deepEqual(result.bug, {
@@ -1335,11 +1619,13 @@ test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected 
     graph: {
       label: "comm",
       path: "/repo/comm",
-      commits: [{
-        hash: "abc123",
-        refs: ["phab-D987654"],
-        subject: "Bug 123456 - Fix thing",
-      }],
+      commits: [
+        {
+          hash: "abc123",
+          refs: ["phab-D987654"],
+          subject: "Bug 123456 - Fix thing",
+        },
+      ],
     },
     hash: "abc123",
     runCommand: async (command) => {
@@ -1347,14 +1633,16 @@ test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected 
       return "Bug 123456 - Fix thing. r=#reviewers\n";
     },
     getBug: async (id) => ({
-      bugs: [{
-        id,
-        status: "NEW",
-        resolution: "---",
-        summary: "Fix thing",
-        is_open: true,
-        keywords: marked ? ["checkin-needed-tb"] : [],
-      }],
+      bugs: [
+        {
+          id,
+          status: "NEW",
+          resolution: "---",
+          summary: "Fix thing",
+          is_open: true,
+          keywords: marked ? ["checkin-needed-tb"] : [],
+        },
+      ],
     }),
     updateBug: async (id, update) => {
       updates.push([id, update]);
@@ -1362,30 +1650,37 @@ test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected 
       return {};
     },
     phab: async () => ({
-      result: [{
-        id: 987654,
-        uri: "https://phabricator.services.mozilla.com/D987654",
-        status: "status-accepted",
-        statusName: "Accepted",
-        title: "Bug 123456 - Fix thing",
-      }],
+      result: [
+        {
+          id: 987654,
+          uri: "https://phabricator.services.mozilla.com/D987654",
+          status: "status-accepted",
+          statusName: "Accepted",
+          title: "Bug 123456 - Fix thing",
+        },
+      ],
     }),
   });
 
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["log", "-1", "--format=%B", "abc123"],
-    ["rev-parse", "--git-path", "tb-tools-try-runs.json"],
-    ["log", "-1", "--format=%B", "abc123"],
-    ["rev-parse", "--git-path", "tb-tools-try-runs.json"],
-  ]);
-  assert.deepEqual(updates, [[
-    "123456",
-    {
-      keywords: {
-        add: ["checkin-needed-tb"],
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["log", "-1", "--format=%B", "abc123"],
+      ["rev-parse", "--git-path", "tb-tools-try-runs.json"],
+      ["log", "-1", "--format=%B", "abc123"],
+      ["rev-parse", "--git-path", "tb-tools-try-runs.json"],
+    ],
+  );
+  assert.deepEqual(updates, [
+    [
+      "123456",
+      {
+        keywords: {
+          add: ["checkin-needed-tb"],
+        },
       },
-    },
-  ]]);
+    ],
+  ]);
   assert.equal(result.message, "Bug 123456 marked for checkin.");
   assert.equal(result.bug.hasCheckinNeeded, true);
   assert.deepEqual(result.bug.keywords, ["checkin-needed-tb"]);
@@ -1399,41 +1694,273 @@ test("markGraphBugForCheckin refuses patches that are not accepted", async () =>
       graph: {
         label: "comm",
         path: "/repo/comm",
-        commits: [{
-          hash: "abc123",
-          refs: ["phab-D987654"],
-          subject: "Bug 123456 - Fix thing",
-        }],
+        commits: [
+          {
+            hash: "abc123",
+            refs: ["phab-D987654"],
+            subject: "Bug 123456 - Fix thing",
+          },
+        ],
       },
       hash: "abc123",
       runCommand: async () => "Bug 123456 - Fix thing. r=#reviewers\n",
       getBug: async (id) => ({
-        bugs: [{
-          id,
-          status: "NEW",
-          resolution: "---",
-          summary: "Fix thing",
-          is_open: true,
-          keywords: [],
-        }],
+        bugs: [
+          {
+            id,
+            status: "NEW",
+            resolution: "---",
+            summary: "Fix thing",
+            is_open: true,
+            keywords: [],
+          },
+        ],
       }),
       updateBug: async (id, update) => {
         updates.push([id, update]);
       },
       phab: async () => ({
-        result: [{
-          id: 987654,
-          uri: "https://phabricator.services.mozilla.com/D987654",
-          status: "status-review",
-          statusName: "Needs Review",
-          title: "Bug 123456 - Fix thing",
-        }],
+        result: [
+          {
+            id: 987654,
+            uri: "https://phabricator.services.mozilla.com/D987654",
+            status: "status-review",
+            statusName: "Needs Review",
+            title: "Bug 123456 - Fix thing",
+          },
+        ],
       }),
     }),
-    /Only accepted Phabricator patches/
+    /Only accepted Phabricator patches/,
   );
 
   assert.deepEqual(updates, []);
+});
+
+test("buildGraphCommitMessage uses a Bug branch prefix and reviewer pills", () => {
+  assert.equal(
+    buildGraphCommitMessage({
+      branch: "Bug-1234567_2",
+      summary: "Fix calendar keyboard handling",
+      reviewers: [
+        "aleca!",
+        { value: "#thunderbird-front-end-reviewers", blocking: true },
+        "aleca",
+      ],
+    }),
+    "Bug 1234567 - Fix calendar keyboard handling. r=aleca!,#thunderbird-front-end-reviewers!",
+  );
+  assert.equal(
+    buildGraphCommitMessage({
+      branch: "topic",
+      bugId: "7654321",
+      summary: "Fix account setup",
+      reviewers: "#mail-reviewers",
+    }),
+    "Bug 7654321 - Fix account setup. r=#mail-reviewers",
+  );
+  assert.deepEqual(
+    normalizeGraphCommitReviewers([
+      "r=aleca",
+      " #mail-reviewers! ",
+      "#mail-reviewers",
+    ]),
+    ["aleca", "#mail-reviewers!"],
+  );
+  assert.deepEqual(
+    normalizeGraphCommitReviewers(["aleca!", "#calendar-reviewers!"]),
+    ["aleca!", "#calendar-reviewers!"],
+  );
+  assert.throws(
+    () => buildGraphCommitMessage({ branch: "topic", summary: "Fix thing" }),
+    /Bugzilla bug ID is required/,
+  );
+});
+
+test("searchGraphCommitReviewers skips short reviewer queries", async () => {
+  let calls = 0;
+  const reviewers = await searchGraphCommitReviewers({
+    query: "ma",
+    phab: async () => {
+      calls += 1;
+      return {};
+    },
+  });
+
+  assert.deepEqual(reviewers, []);
+  assert.equal(calls, 0);
+});
+
+test("searchGraphCommitReviewers searches users for plain reviewer queries", async () => {
+  const calls = [];
+  const reviewers = await searchGraphCommitReviewers({
+    query: "front!",
+    phab: async (request) => {
+      calls.push(request);
+
+      assert.equal(request.route, "user.search");
+      return {
+        result: {
+          data: [
+            {
+              phid: "PHID-USER-aleca",
+              fields: {
+                username: "frontuser",
+                realName: "Frontend Alice",
+              },
+            },
+          ],
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(
+    calls.map((call) => [call.route, call.params]),
+    [["user.search", { constraints: { query: "front" }, limit: 30 }]],
+  );
+  assert.deepEqual(reviewers, [
+    {
+      type: "user",
+      value: "frontuser",
+      label: "frontuser",
+      description: "Frontend Alice",
+      phid: "PHID-USER-aleca",
+    },
+  ]);
+});
+
+test("searchGraphCommitReviewers returns no suggestions when the user route is rate limited", async () => {
+  const calls = [];
+  const reviewers = await searchGraphCommitReviewers({
+    query: "mail",
+    phab: async (request) => {
+      calls.push(request.route);
+      throw new Error(`Phabricator ${request.route} failed (429): {}`);
+    },
+  });
+
+  assert.deepEqual(calls, ["user.search"]);
+  assert.deepEqual(reviewers, []);
+});
+
+test("searchGraphCommitReviewers skips user lookup for group queries", async () => {
+  const calls = [];
+  const reviewers = await searchGraphCommitReviewers({
+    query: "#mail!",
+    phab: async (request) => {
+      calls.push(request.route);
+
+      return {
+        result: {
+          data: [
+            {
+              phid: "PHID-PROJ-mail",
+              fields: {
+                slug: "mail-reviewers",
+                name: "Mail Reviewers",
+              },
+            },
+          ],
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(calls, ["project.search"]);
+  assert.deepEqual(
+    reviewers.map((reviewer) => reviewer.value),
+    ["#mail-reviewers"],
+  );
+});
+
+test("searchGraphCommitReviewers returns no suggestions when the group route is rate limited", async () => {
+  const calls = [];
+  const reviewers = await searchGraphCommitReviewers({
+    query: "#mail",
+    phab: async (request) => {
+      calls.push(request.route);
+      throw new Error(`Phabricator ${request.route} failed (429): {}`);
+    },
+  });
+
+  assert.deepEqual(calls, ["project.search"]);
+  assert.deepEqual(reviewers, []);
+});
+
+test("createGraphCommit stages changes and commits with generated message", async () => {
+  const calls = [];
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "Bug-1234567_2",
+  };
+  const result = await createGraphCommit({
+    graph,
+    options: {
+      summary: "Fix message list focus",
+      reviewers: ["aleca", "#mail-reviewers"],
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args.join(" ") === "branch --show-current") {
+        return "Bug-1234567_2\n";
+      }
+
+      if (
+        command.args.join(" ") ===
+        "commit -m Bug 1234567 - Fix message list focus. r=aleca,#mail-reviewers"
+      ) {
+        return "[Bug-1234567_2 def456] Bug 1234567 - Fix message list focus. r=aleca,#mail-reviewers\n";
+      }
+
+      if (command.args.join(" ") === "rev-parse HEAD") {
+        return "def4567890abcdef\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["branch", "--show-current"],
+      ["add", "-A"],
+      [
+        "commit",
+        "-m",
+        "Bug 1234567 - Fix message list focus. r=aleca,#mail-reviewers",
+      ],
+      ["rev-parse", "HEAD"],
+    ],
+  );
+  assert.equal(result.hash, "def4567890abcdef");
+  assert.equal(
+    result.commitMessage,
+    "Bug 1234567 - Fix message list focus. r=aleca,#mail-reviewers",
+  );
+  assert.equal(result.message, "comm created commit def4567890ab.");
+});
+
+test("getGraphCommitMetadata requires a bug input outside Bug branches", async () => {
+  const metadata = await getGraphCommitMetadata({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+    },
+    runCommand: async () => "topic\n",
+  });
+
+  assert.deepEqual(metadata, {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "topic",
+    bugId: "",
+    bugRequired: true,
+    prefix: "",
+  });
 });
 
 test("amendCurrentCommit stages shown changes and amends with an edited message", async () => {
@@ -1480,17 +2007,30 @@ test("amendCurrentCommit stages shown changes and amends with an edited message"
   assert.equal(result.branch, "topic");
   assert.equal(result.currentHash, "def456");
   assert.match(writes[0].file, /tb-tools-amend-[^.]+\.txt$/);
-  assert.equal(writes[0].content, "Bug 123 - Better message. r=#reviewers\n\nUpdated body.\n");
+  assert.equal(
+    writes[0].content,
+    "Bug 123 - Better message. r=#reviewers\n\nUpdated body.\n",
+  );
   assert.deepEqual(removes, [writes[0].file]);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["diff", "--patch", "--find-renames", "--no-ext-diff", "--no-color", "HEAD"],
-    ["ls-files", "--others", "--exclude-standard", "-z"],
-    ["add", "-A"],
-    ["commit", "--amend", "-F", writes[0].file],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-    ["log", "-1", "--format=%B", "def456"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      [
+        "diff",
+        "--patch",
+        "--find-renames",
+        "--no-ext-diff",
+        "--no-color",
+        "HEAD",
+      ],
+      ["ls-files", "--others", "--exclude-standard", "-z"],
+      ["add", "-A"],
+      ["commit", "--amend", "-F", writes[0].file],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      ["log", "-1", "--format=%B", "def456"],
+    ],
+  );
 });
 
 test("amendCurrentCommit can update only the commit message without staging dirty files", async () => {
@@ -1530,12 +2070,15 @@ test("amendCurrentCommit can update only the commit message without staging dirt
   assert.equal(result.rewrittenHash, "def456");
   assert.equal(writes[0].content, "Bug 123 - Message only. r=#reviewers\n");
   assert.deepEqual(removes, [writes[0].file]);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["commit", "--amend", "--only", "-F", writes[0].file],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-    ["log", "-1", "--format=%B", "def456"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["commit", "--amend", "--only", "-F", writes[0].file],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      ["log", "-1", "--format=%B", "def456"],
+    ],
+  );
 });
 
 test("amendCommitMessage rewrites a selected commit message and replays descendants", async () => {
@@ -1556,7 +2099,10 @@ test("amendCommitMessage rewrites a selected commit message and replays descenda
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "topic\n";
       }
 
@@ -1575,19 +2121,31 @@ test("amendCommitMessage rewrites a selected commit message and replays descenda
         return "";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("--points-at")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
         return "";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("--contains")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
         return "topic\n";
       }
 
-      if (command.args[0] === "rev-list" && command.args.includes("--parents")) {
+      if (
+        command.args[0] === "rev-list" &&
+        command.args.includes("--parents")
+      ) {
         return "abc123 parent000\n";
       }
 
-      if (command.args[0] === "rev-list" && command.args.includes("--ancestry-path")) {
+      if (
+        command.args[0] === "rev-list" &&
+        command.args.includes("--ancestry-path")
+      ) {
         return "def456\nfed789\n";
       }
 
@@ -1601,7 +2159,10 @@ test("amendCommitMessage rewrites a selected commit message and replays descenda
     removeMessage: async (file) => removes.push(file),
   });
 
-  assert.equal(result.message, "comm amended message for abc123 and replayed 2 descendant commits on branch topic.");
+  assert.equal(
+    result.message,
+    "comm amended message for abc123 and replayed 2 descendant commits on branch topic.",
+  );
   assert.equal(result.branch, "topic");
   assert.equal(result.currentHash, "newtip999");
   assert.equal(result.rewrittenHash, "newabc999");
@@ -1609,31 +2170,57 @@ test("amendCommitMessage rewrites a selected commit message and replays descenda
   assert.deepEqual(result.commits, ["abc123", "def456", "fed789"]);
   assert.equal(graph.branch, "topic");
   assert.match(writes[0].file, /tb-tools-amend-[^.]+\.txt$/);
-  assert.equal(writes[0].content, "Bug 123 - Reword selected commit. r=#reviewers\n");
+  assert.equal(
+    writes[0].content,
+    "Bug 123 - Reword selected commit. r=#reviewers\n",
+  );
   assert.deepEqual(removes, [writes[0].file]);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-    ["status", "--porcelain"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["rev-list", "--parents", "-n", "1", "abc123"],
-    ["rev-list", "--reverse", "--topo-order", "--ancestry-path", "abc123..topic"],
-    ["switch", "--detach", "parent000"],
-    ["cherry-pick", "--no-commit", "abc123"],
-    ["commit", "-C", "abc123"],
-    ["commit", "--amend", "--only", "-F", writes[0].file],
-    ["rev-parse", "HEAD"],
-    ["log", "-1", "--format=%B", "newabc999"],
-    ["cherry-pick", "--no-commit", "def456"],
-    ["commit", "-C", "def456"],
-    ["cherry-pick", "--no-commit", "fed789"],
-    ["commit", "-C", "fed789"],
-    ["rev-parse", "HEAD"],
-    ["branch", "-f", "topic", "newtip999"],
-    ["switch", "topic"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      ["status", "--porcelain"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      ["rev-list", "--parents", "-n", "1", "abc123"],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "--ancestry-path",
+        "abc123..topic",
+      ],
+      ["switch", "--detach", "parent000"],
+      ["cherry-pick", "--no-commit", "abc123"],
+      ["commit", "-C", "abc123"],
+      ["commit", "--amend", "--only", "-F", writes[0].file],
+      ["rev-parse", "HEAD"],
+      ["log", "-1", "--format=%B", "newabc999"],
+      ["cherry-pick", "--no-commit", "def456"],
+      ["commit", "-C", "def456"],
+      ["cherry-pick", "--no-commit", "fed789"],
+      ["commit", "-C", "fed789"],
+      ["rev-parse", "HEAD"],
+      ["branch", "-f", "topic", "newtip999"],
+      ["switch", "topic"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("amendCurrentCommit refuses when the shown working tree diff is stale", async () => {
@@ -1657,7 +2244,7 @@ test("amendCurrentCommit refuses when the shown working tree diff is stale", asy
         throw new Error("stale amend should not write a commit message");
       },
     }),
-    /Working tree changed since this diff was loaded/
+    /Working tree changed since this diff was loaded/,
   );
 });
 
@@ -1697,7 +2284,10 @@ test("getCheckoutGraphData collects git log data for a checkout", async () => {
   assert.equal(data.workingTreeCount, 0);
   assert.match(data.diffs.abc123.text, /diff --git/);
   assert.equal(commands[2].args.includes("--max-count=12"), true);
-  assert.equal(commands.some((command) => command.args[0] === "show"), true);
+  assert.equal(
+    commands.some((command) => command.args[0] === "show"),
+    true,
+  );
 });
 
 test("getCheckoutGraphMetadata collects checkout identity without commits", async () => {
@@ -1780,7 +2370,13 @@ test("getCheckoutCommitPage inserts one uncommitted item above HEAD and keeps la
   assert.equal(firstPage.nextOffset, 3);
   assert.equal(firstPage.workingTreeCount, 1);
   assert.equal(firstPage.hasMore, false);
-  assert.equal(firstCommands.some((command) => command.args[0] === "rev-parse" && command.args[1] === "HEAD"), true);
+  assert.equal(
+    firstCommands.some(
+      (command) =>
+        command.args[0] === "rev-parse" && command.args[1] === "HEAD",
+    ),
+    true,
+  );
 
   const nextCommands = [];
   await getCheckoutCommitPage({
@@ -1796,7 +2392,10 @@ test("getCheckoutCommitPage inserts one uncommitted item above HEAD and keeps la
   });
 
   assert.equal(nextCommands[0].args.includes("--skip=2"), true);
-  assert.equal(nextCommands.some((command) => command.args[0] === "diff"), false);
+  assert.equal(
+    nextCommands.some((command) => command.args[0] === "diff"),
+    false,
+  );
 });
 
 test("checkoutCommit checks out loaded commits only when the tree is clean", async () => {
@@ -1816,11 +2415,21 @@ test("checkoutCommit checks out loaded commits only when the tree is clean", asy
   });
 
   assert.equal(result.message, "comm checked out abc123 as detached HEAD.");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["switch", "--detach", "abc123"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      ["switch", "--detach", "abc123"],
+    ],
+  );
 });
 
 test("checkoutCommit switches to a local branch when the commit is a branch tip", async () => {
@@ -1847,11 +2456,21 @@ test("checkoutCommit switches to a local branch when the commit is a branch tip"
   assert.equal(result.message, "comm checked out branch main at abc123.");
   assert.equal(result.branch, "main");
   assert.equal(result.detached, false);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["switch", "main"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      ["switch", "main"],
+    ],
+  );
 });
 
 test("rebaseCommit rebases a selected local branch tip onto the current checkout", async () => {
@@ -1892,21 +2511,44 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
   assert.equal(result.rebasedCount, 1);
   assert.equal(result.currentHash, "rebased456");
   assert.equal(result.detached, false);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["rev-list", "--reverse", "--topo-order", "--ancestry-path", "abc123..topic"],
-    ["switch", "--detach", "base123"],
-    ["cherry-pick", "--no-commit", "abc123"],
-    ["commit", "-C", "abc123"],
-    ["rev-parse", "HEAD"],
-    ["branch", "-f", "topic", "rebased456"],
-    ["switch", "topic"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "--ancestry-path",
+        "abc123..topic",
+      ],
+      ["switch", "--detach", "base123"],
+      ["cherry-pick", "--no-commit", "abc123"],
+      ["commit", "-C", "abc123"],
+      ["rev-parse", "HEAD"],
+      ["branch", "-f", "topic", "rebased456"],
+      ["switch", "topic"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("rebaseCommit rebases a selected commit onto the current checkout without a branch tip", async () => {
@@ -1943,17 +2585,34 @@ test("rebaseCommit rebases a selected commit onto the current checkout without a
   assert.equal(result.rebasedCount, 1);
   assert.equal(result.currentHash, "rebased456");
   assert.equal(result.detached, true);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["switch", "--detach", "base123"],
-    ["cherry-pick", "--no-commit", "abc123"],
-    ["commit", "-C", "abc123"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      ["switch", "--detach", "base123"],
+      ["cherry-pick", "--no-commit", "abc123"],
+      ["commit", "-C", "abc123"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("rebaseCommit rebases a selected commit and descendants in order", async () => {
@@ -1973,11 +2632,17 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
         return "main\n";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("--points-at")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
         return "";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("--contains")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
         return "topic\n";
       }
 
@@ -1995,32 +2660,58 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
     },
   });
 
-  assert.equal(result.message, "comm rebased branch topic (3 commits) onto main.");
+  assert.equal(
+    result.message,
+    "comm rebased branch topic (3 commits) onto main.",
+  );
   assert.equal(result.branch, "topic");
   assert.equal(result.base, "base123");
   assert.deepEqual(result.commits, ["abc123", "def456", "ghi789"]);
   assert.equal(result.rebasedCount, 3);
   assert.equal(result.currentHash, "rebased999");
   assert.equal(result.detached, false);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["rev-list", "--reverse", "--topo-order", "--ancestry-path", "abc123..topic"],
-    ["switch", "--detach", "base123"],
-    ["cherry-pick", "--no-commit", "abc123"],
-    ["commit", "-C", "abc123"],
-    ["cherry-pick", "--no-commit", "def456"],
-    ["commit", "-C", "def456"],
-    ["cherry-pick", "--no-commit", "ghi789"],
-    ["commit", "-C", "ghi789"],
-    ["rev-parse", "HEAD"],
-    ["branch", "-f", "topic", "rebased999"],
-    ["switch", "topic"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "--ancestry-path",
+        "abc123..topic",
+      ],
+      ["switch", "--detach", "base123"],
+      ["cherry-pick", "--no-commit", "abc123"],
+      ["commit", "-C", "abc123"],
+      ["cherry-pick", "--no-commit", "def456"],
+      ["commit", "-C", "def456"],
+      ["cherry-pick", "--no-commit", "ghi789"],
+      ["commit", "-C", "ghi789"],
+      ["rev-parse", "HEAD"],
+      ["branch", "-f", "topic", "rebased999"],
+      ["switch", "topic"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("rebaseCommit refuses to rebase the current checkout onto itself", async () => {
@@ -2045,7 +2736,7 @@ test("rebaseCommit refuses to rebase the current checkout onto itself", async ()
         return "";
       },
     }),
-    /already checked out/
+    /already checked out/,
   );
 });
 
@@ -2072,11 +2763,17 @@ test("rebaseCommit refuses when the current checkout is inside the selected stac
           return "def456\n";
         }
 
-        if (command.args[0] === "for-each-ref" && command.args.includes("--points-at")) {
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--points-at")
+        ) {
           return "";
         }
 
-        if (command.args[0] === "for-each-ref" && command.args.includes("--contains")) {
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--contains")
+        ) {
           return "main\n";
         }
 
@@ -2087,7 +2784,7 @@ test("rebaseCommit refuses when the current checkout is inside the selected stac
         return "";
       },
     }),
-    /current checkout is inside the selected commit stack/
+    /current checkout is inside the selected commit stack/,
   );
 });
 
@@ -2119,13 +2816,16 @@ test("updateGraphCheckout switches to updated main for plain updates", async () 
   assert.equal(result.message, "comm updated main from origin/main.");
   assert.equal(result.branch, "main");
   assert.equal(result.currentHash, "updated123");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["fetch", "origin", "main"],
-    ["switch", "main"],
-    ["pull", "--ff-only", "origin", "main"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["fetch", "origin", "main"],
+      ["switch", "main"],
+      ["pull", "--ff-only", "origin", "main"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("updateGraphCheckout rebases local branch commits onto origin main", async () => {
@@ -2157,18 +2857,24 @@ test("updateGraphCheckout rebases local branch commits onto origin main", async 
     },
   });
 
-  assert.equal(result.message, "comm fetched origin/main and rebased 2 local commits.");
+  assert.equal(
+    result.message,
+    "comm fetched origin/main and rebased 2 local commits.",
+  );
   assert.equal(result.branch, "topic");
   assert.equal(result.rebasedCount, 2);
   assert.deepEqual(result.commits, ["root111", "child222"]);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["fetch", "origin", "main"],
-    ["branch", "--show-current"],
-    ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
-    ["rebase", "--update-refs", "origin/main", "topic"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["fetch", "origin", "main"],
+      ["branch", "--show-current"],
+      ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
+      ["rebase", "--update-refs", "origin/main", "topic"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("updateGraphCheckout rebases the containing branch for a detached checkout", async () => {
@@ -2211,24 +2917,36 @@ test("updateGraphCheckout rebases the containing branch for a detached checkout"
   assert.equal(result.branch, "topic");
   assert.equal(result.rebasedCount, 2);
   assert.deepEqual(result.commits, ["current123", "child222"]);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["fetch", "origin", "main"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "current123", "refs/heads"],
-    ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
-    ["rebase", "--update-refs", "origin/main", "topic"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["fetch", "origin", "main"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "current123",
+        "refs/heads",
+      ],
+      ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
+      ["rebase", "--update-refs", "origin/main", "topic"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("runGraphRepositoryUpdate reports dirty checkouts before changing anything", async () => {
   const calls = [];
-  const graphs = [{
-    label: "comm",
-    path: "/repo/comm",
-  }];
+  const graphs = [
+    {
+      label: "comm",
+      path: "/repo/comm",
+    },
+  ];
 
   await assert.rejects(
     runGraphRepositoryUpdate({
@@ -2241,27 +2959,32 @@ test("runGraphRepositoryUpdate reports dirty checkouts before changing anything"
     }),
     (error) => {
       assert.equal(error.statusCode, 409);
-      assert.deepEqual(error.dirty, [{
-        index: 0,
-        label: "comm",
-        path: "/repo/comm",
-        status: "M file.txt",
-      }]);
+      assert.deepEqual(error.dirty, [
+        {
+          index: 0,
+          label: "comm",
+          path: "/repo/comm",
+          status: "M file.txt",
+        },
+      ]);
       return /Uncommitted changes/.test(error.message);
-    }
+    },
   );
 
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [["status", "--porcelain"]],
+  );
 });
 
 test("runGraphRepositoryUpdate can shelf dirty changes before updating", async () => {
   const calls = [];
-  const graphs = [{
-    label: "comm",
-    path: "/repo/comm",
-  }];
+  const graphs = [
+    {
+      label: "comm",
+      path: "/repo/comm",
+    },
+  ];
   const result = await runGraphRepositoryUpdate({
     graphs,
     mode: "update",
@@ -2296,25 +3019,37 @@ test("runGraphRepositoryUpdate can shelf dirty changes before updating", async (
     label: "comm",
     path: "/repo/comm",
     stashRef: "stash@{0}",
-    message: "Saved working directory and index state On topic: tb-tools graph update: comm",
+    message:
+      "Saved working directory and index state On topic: tb-tools graph update: comm",
   });
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["stash", "push", "--include-untracked", "-m", "tb-tools graph update: comm"],
-    ["fetch", "origin", "main"],
-    ["switch", "main"],
-    ["pull", "--ff-only", "origin", "main"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      [
+        "stash",
+        "push",
+        "--include-untracked",
+        "-m",
+        "tb-tools graph update: comm",
+      ],
+      ["fetch", "origin", "main"],
+      ["switch", "main"],
+      ["pull", "--ff-only", "origin", "main"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("runGraphRepositoryUpdate can amend dirty changes before rebasing", async () => {
   const calls = [];
-  const graphs = [{
-    label: "comm",
-    path: "/repo/comm",
-  }];
+  const graphs = [
+    {
+      label: "comm",
+      path: "/repo/comm",
+    },
+  ];
   const result = await runGraphRepositoryUpdate({
     graphs,
     mode: "rebase",
@@ -2343,19 +3078,25 @@ test("runGraphRepositoryUpdate can amend dirty changes before rebasing", async (
   });
 
   assert.equal(result.dirtyAction, "amend");
-  assert.equal(result.dirtyResults[0].message, "comm amended uncommitted changes into the current commit.");
+  assert.equal(
+    result.dirtyResults[0].message,
+    "comm amended uncommitted changes into the current commit.",
+  );
   assert.equal(result.results[0].rebasedCount, 2);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["add", "-A"],
-    ["commit", "--amend", "--no-edit"],
-    ["fetch", "origin", "main"],
-    ["branch", "--show-current"],
-    ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
-    ["rebase", "--update-refs", "origin/main", "topic"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["add", "-A"],
+      ["commit", "--amend", "--no-edit"],
+      ["fetch", "origin", "main"],
+      ["branch", "--show-current"],
+      ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
+      ["rebase", "--update-refs", "origin/main", "topic"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("getGraphOriginMainStatus compares local origin main with remote origin main", async () => {
@@ -2386,10 +3127,13 @@ test("getGraphOriginMainStatus compares local origin main with remote origin mai
   assert.equal(result.upToDate, false);
   assert.equal(result.localHash, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
   assert.equal(result.remoteHash, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["rev-parse", "--verify", "refs/remotes/origin/main"],
-    ["ls-remote", "--heads", "origin", "main"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["rev-parse", "--verify", "refs/remotes/origin/main"],
+      ["ls-remote", "--heads", "origin", "main"],
+    ],
+  );
 });
 
 test("getGraphRustUpstreamStatus compares Firefox remote rust files to comm origin main checksums without changing checkouts", async () => {
@@ -2403,9 +3147,15 @@ test("getGraphRustUpstreamStatus compares Firefox remote rust files to comm orig
     "Cargo.lock": "remote lock\n",
   };
   const checksumData = {
-    mc_workspace_toml: createHash("sha512").update(remoteFiles["Cargo.toml"]).digest("hex"),
-    mc_gkrust_toml: createHash("sha512").update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"]).digest("hex"),
-    mc_hack_toml: createHash("sha512").update(remoteFiles["build/workspace-hack/Cargo.toml"]).digest("hex"),
+    mc_workspace_toml: createHash("sha512")
+      .update(remoteFiles["Cargo.toml"])
+      .digest("hex"),
+    mc_gkrust_toml: createHash("sha512")
+      .update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"])
+      .digest("hex"),
+    mc_hack_toml: createHash("sha512")
+      .update(remoteFiles["build/workspace-hack/Cargo.toml"])
+      .digest("hex"),
     mc_cargo_lock: createHash("sha512").update("old lock\n").digest("hex"),
   };
 
@@ -2436,7 +3186,10 @@ test("getGraphRustUpstreamStatus compares Firefox remote rust files to comm orig
         return "ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n";
       }
 
-      if (command.cwd === "/repo/firefox" && command.args.join(" ") === "remote get-url origin") {
+      if (
+        command.cwd === "/repo/firefox" &&
+        command.args.join(" ") === "remote get-url origin"
+      ) {
         return "git@example.com:firefox.git\n";
       }
 
@@ -2460,23 +3213,44 @@ test("getGraphRustUpstreamStatus compares Firefox remote rust files to comm orig
   assert.equal(result.label, "rust");
   assert.equal(result.state, "warning");
   assert.equal(result.upToDate, false);
-  assert.equal(result.commLocalHash, "cccccccccccccccccccccccccccccccccccccccc");
-  assert.equal(result.firefoxRemoteHash, "ffffffffffffffffffffffffffffffffffffffff");
-  assert.deepEqual(result.mismatches.map((item) => item.file), ["Cargo.lock"]);
+  assert.equal(
+    result.commLocalHash,
+    "cccccccccccccccccccccccccccccccccccccccc",
+  );
+  assert.equal(
+    result.firefoxRemoteHash,
+    "ffffffffffffffffffffffffffffffffffffffff",
+  );
+  assert.deepEqual(
+    result.mismatches.map((item) => item.file),
+    ["Cargo.lock"],
+  );
   assert.deepEqual(removed, [[tempDir, { recursive: true, force: true }]]);
-  assert.deepEqual(calls.map((call) => [call.cwd, call.args]), [
-    ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-    ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
-    ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
-    ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-    ["/repo/firefox", ["remote", "get-url", "origin"]],
-    [tempDir, ["init"]],
-    [tempDir, ["fetch", "--depth=1", "--no-tags", "git@example.com:firefox.git", "ffffffffffffffffffffffffffffffffffffffff"]],
-    [tempDir, ["show", "FETCH_HEAD:Cargo.toml"]],
-    [tempDir, ["show", "FETCH_HEAD:toolkit/library/rust/shared/Cargo.toml"]],
-    [tempDir, ["show", "FETCH_HEAD:build/workspace-hack/Cargo.toml"]],
-    [tempDir, ["show", "FETCH_HEAD:Cargo.lock"]],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => [call.cwd, call.args]),
+    [
+      ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+      ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
+      ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
+      ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+      ["/repo/firefox", ["remote", "get-url", "origin"]],
+      [tempDir, ["init"]],
+      [
+        tempDir,
+        [
+          "fetch",
+          "--depth=1",
+          "--no-tags",
+          "git@example.com:firefox.git",
+          "ffffffffffffffffffffffffffffffffffffffff",
+        ],
+      ],
+      [tempDir, ["show", "FETCH_HEAD:Cargo.toml"]],
+      [tempDir, ["show", "FETCH_HEAD:toolkit/library/rust/shared/Cargo.toml"]],
+      [tempDir, ["show", "FETCH_HEAD:build/workspace-hack/Cargo.toml"]],
+      [tempDir, ["show", "FETCH_HEAD:Cargo.lock"]],
+    ],
+  );
 });
 
 test("getGraphRustUpstreamStatus reads local Firefox origin main when it already matches remote", async () => {
@@ -2488,10 +3262,18 @@ test("getGraphRustUpstreamStatus reads local Firefox origin main when it already
     "Cargo.lock": "remote lock\n",
   };
   const checksumData = {
-    mc_workspace_toml: createHash("sha512").update(remoteFiles["Cargo.toml"]).digest("hex"),
-    mc_gkrust_toml: createHash("sha512").update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"]).digest("hex"),
-    mc_hack_toml: createHash("sha512").update(remoteFiles["build/workspace-hack/Cargo.toml"]).digest("hex"),
-    mc_cargo_lock: createHash("sha512").update(remoteFiles["Cargo.lock"]).digest("hex"),
+    mc_workspace_toml: createHash("sha512")
+      .update(remoteFiles["Cargo.toml"])
+      .digest("hex"),
+    mc_gkrust_toml: createHash("sha512")
+      .update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"])
+      .digest("hex"),
+    mc_hack_toml: createHash("sha512")
+      .update(remoteFiles["build/workspace-hack/Cargo.toml"])
+      .digest("hex"),
+    mc_cargo_lock: createHash("sha512")
+      .update(remoteFiles["Cargo.lock"])
+      .digest("hex"),
   };
 
   const result = await getGraphRustUpstreamStatus({
@@ -2500,7 +3282,9 @@ test("getGraphRustUpstreamStatus reads local Firefox origin main when it already
       { label: "firefox", path: "/repo/firefox" },
     ],
     makeTempDir: async () => {
-      throw new Error("Temp fetch should not run when local Firefox origin/main is current.");
+      throw new Error(
+        "Temp fetch should not run when local Firefox origin/main is current.",
+      );
     },
     runCommand: async (command) => {
       calls.push(command);
@@ -2522,7 +3306,9 @@ test("getGraphRustUpstreamStatus reads local Firefox origin main when it already
       }
 
       if (command.cwd === "/repo/firefox" && command.args[0] === "show") {
-        return remoteFiles[command.args[1].replace(/^refs\/remotes\/origin\/main:/, "")];
+        return remoteFiles[
+          command.args[1].replace(/^refs\/remotes\/origin\/main:/, "")
+        ];
       }
 
       throw new Error(`Unexpected command: ${JSON.stringify(command)}`);
@@ -2532,29 +3318,45 @@ test("getGraphRustUpstreamStatus reads local Firefox origin main when it already
   assert.equal(result.state, "current");
   assert.equal(result.upToDate, true);
   assert.deepEqual(result.mismatches, []);
-  assert.deepEqual(calls.map((call) => [call.cwd, call.args]), [
-    ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-    ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
-    ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
-    ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-    ["/repo/firefox", ["show", "refs/remotes/origin/main:Cargo.toml"]],
-    ["/repo/firefox", ["show", "refs/remotes/origin/main:toolkit/library/rust/shared/Cargo.toml"]],
-    ["/repo/firefox", ["show", "refs/remotes/origin/main:build/workspace-hack/Cargo.toml"]],
-    ["/repo/firefox", ["show", "refs/remotes/origin/main:Cargo.lock"]],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => [call.cwd, call.args]),
+    [
+      ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+      ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
+      ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
+      ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+      ["/repo/firefox", ["show", "refs/remotes/origin/main:Cargo.toml"]],
+      [
+        "/repo/firefox",
+        [
+          "show",
+          "refs/remotes/origin/main:toolkit/library/rust/shared/Cargo.toml",
+        ],
+      ],
+      [
+        "/repo/firefox",
+        ["show", "refs/remotes/origin/main:build/workspace-hack/Cargo.toml"],
+      ],
+      ["/repo/firefox", ["show", "refs/remotes/origin/main:Cargo.lock"]],
+    ],
+  );
 });
 
 test("unshelfGraphShelves pops requested graph shelves", async () => {
   const calls = [];
   const result = await unshelfGraphShelves({
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-    }],
-    shelves: [{
-      graphIndex: 0,
-      stashRef: "stash@{0}",
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+      },
+    ],
+    shelves: [
+      {
+        graphIndex: 0,
+        stashRef: "stash@{0}",
+      },
+    ],
     runCommand: async (command) => {
       calls.push(command);
       return "";
@@ -2562,9 +3364,10 @@ test("unshelfGraphShelves pops requested graph shelves", async () => {
   });
 
   assert.equal(result.message, "Unshelved 1 checkout.");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["stash", "pop", "stash@{0}"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [["stash", "pop", "stash@{0}"]],
+  );
 });
 
 test("pruneCommitBranches drops a commit from the current branch history", async () => {
@@ -2580,15 +3383,24 @@ test("pruneCommitBranches drops a commit from the current branch history", async
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "main\n";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("--points-at")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
         return "";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("--contains")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
         return "topic\nmain\n";
       }
 
@@ -2609,18 +3421,49 @@ test("pruneCommitBranches drops a commit from the current branch history", async
   assert.equal(result.parent, "parent123");
   assert.equal(result.currentHash, "rebased456");
   assert.equal(result.branch, "main");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
-    ["rev-list", "--parents", "-n", "1", "abc123"],
-    ["rebase", "--onto", "parent123", "abc123", "main"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--points-at",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--contains",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      ["rev-list", "--parents", "-n", "1", "abc123"],
+      ["rebase", "--onto", "parent123", "abc123", "main"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("pruneCommitBranches drops a branch-tip commit without deleting the branch", async () => {
@@ -2636,17 +3479,29 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
-        return calls.filter((call) => call.args[0] === "branch" && call.args[1] === "--show-current").length === 1
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
+        return calls.filter(
+          (call) =>
+            call.args[0] === "branch" && call.args[1] === "--show-current",
+        ).length === 1
           ? ""
           : "main\n";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("--points-at")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
         return "main\n";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("--contains")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
         return "main\n";
       }
 
@@ -2667,18 +3522,49 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
   assert.equal(result.parent, "parent123");
   assert.equal(result.currentHash, "parent123");
   assert.equal(result.branch, "main");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
-    ["rev-list", "--parents", "-n", "1", "abc123"],
-    ["rebase", "--onto", "parent123", "abc123", "main"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--points-at",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--contains",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      ["rev-list", "--parents", "-n", "1", "abc123"],
+      ["rebase", "--onto", "parent123", "abc123", "main"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("pruneCommitBranches drops a tb-tools checkpoint ref tip", async () => {
@@ -2694,15 +3580,24 @@ test("pruneCommitBranches drops a tb-tools checkpoint ref tip", async () => {
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("refs/heads")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("refs/heads")
+      ) {
         return "";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("refs/tb-tools")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("refs/tb-tools")
+      ) {
         return "refs/tb-tools/rust-checkpoint\n";
       }
 
@@ -2722,28 +3617,64 @@ test("pruneCommitBranches drops a tb-tools checkpoint ref tip", async () => {
     },
   });
 
-  assert.equal(result.message, "comm pruned abc123 from ref refs/tb-tools/rust-checkpoint.");
+  assert.equal(
+    result.message,
+    "comm pruned abc123 from ref refs/tb-tools/rust-checkpoint.",
+  );
   assert.deepEqual(result.branches, []);
-  assert.deepEqual(result.refs, [{ ref: "refs/tb-tools/rust-checkpoint", hash: "parent123" }]);
+  assert.deepEqual(result.refs, [
+    { ref: "refs/tb-tools/rust-checkpoint", hash: "parent123" },
+  ]);
   assert.equal(result.parent, "parent123");
   assert.equal(result.currentHash, "current789");
   assert.equal(result.branch, "(detached)");
   assert.equal(result.detached, true);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
-    ["rev-list", "--parents", "-n", "1", "abc123"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-    ["rev-parse", "--verify", "refs/tb-tools/rust-checkpoint"],
-    ["update-ref", "refs/tb-tools/rust-checkpoint", "parent123", "abc123"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--points-at",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--contains",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      ["rev-list", "--parents", "-n", "1", "abc123"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      ["rev-parse", "--verify", "refs/tb-tools/rust-checkpoint"],
+      ["update-ref", "refs/tb-tools/rust-checkpoint", "parent123", "abc123"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("pruneCommitBranches rewrites a tb-tools checkpoint ref stack", async () => {
@@ -2759,15 +3690,24 @@ test("pruneCommitBranches rewrites a tb-tools checkpoint ref stack", async () =>
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "main\n";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("refs/heads")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("refs/heads")
+      ) {
         return "";
       }
 
-      if (command.args[0] === "for-each-ref" && command.args.includes("refs/tb-tools")) {
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("refs/tb-tools")
+      ) {
         return command.args.includes("--points-at")
           ? ""
           : "refs/tb-tools/stack\n";
@@ -2791,32 +3731,68 @@ test("pruneCommitBranches rewrites a tb-tools checkpoint ref stack", async () =>
     },
   });
 
-  assert.equal(result.message, "comm pruned abc123 from ref refs/tb-tools/stack.");
+  assert.equal(
+    result.message,
+    "comm pruned abc123 from ref refs/tb-tools/stack.",
+  );
   assert.deepEqual(result.branches, []);
-  assert.deepEqual(result.refs, [{ ref: "refs/tb-tools/stack", hash: "rewritten456" }]);
+  assert.deepEqual(result.refs, [
+    { ref: "refs/tb-tools/stack", hash: "rewritten456" },
+  ]);
   assert.equal(result.parent, "parent123");
   assert.equal(result.currentHash, "current789");
   assert.equal(result.branch, "main");
   assert.equal(result.detached, false);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
-    ["rev-list", "--parents", "-n", "1", "abc123"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-    ["rev-parse", "--verify", "refs/tb-tools/stack"],
-    ["switch", "--detach", "tip789"],
-    ["rebase", "--onto", "parent123", "abc123", "HEAD"],
-    ["rev-parse", "HEAD"],
-    ["update-ref", "refs/tb-tools/stack", "rewritten456", "tip789"],
-    ["switch", "main"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--points-at",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--contains",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      ["rev-list", "--parents", "-n", "1", "abc123"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      ["rev-parse", "--verify", "refs/tb-tools/stack"],
+      ["switch", "--detach", "tip789"],
+      ["rebase", "--onto", "parent123", "abc123", "HEAD"],
+      ["rev-parse", "HEAD"],
+      ["update-ref", "refs/tb-tools/stack", "rewritten456", "tip789"],
+      ["switch", "main"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("pruneCommitBranches drops a commit from detached current history", async () => {
@@ -2832,7 +3808,10 @@ test("pruneCommitBranches drops a commit from detached current history", async (
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "";
       }
 
@@ -2860,20 +3839,51 @@ test("pruneCommitBranches drops a commit from detached current history", async (
   assert.equal(result.currentHash, "rebased456");
   assert.equal(result.branch, "(detached)");
   assert.equal(result.detached, true);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
-    ["rev-list", "--parents", "-n", "1", "abc123"],
-    ["rev-parse", "HEAD"],
-    ["merge-base", "--is-ancestor", "abc123", "HEAD"],
-    ["rebase", "--onto", "parent123", "abc123", "HEAD"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--points-at",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--contains",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      ["rev-list", "--parents", "-n", "1", "abc123"],
+      ["rev-parse", "HEAD"],
+      ["merge-base", "--is-ancestor", "abc123", "HEAD"],
+      ["rebase", "--onto", "parent123", "abc123", "HEAD"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("pruneCommitBranches drops a detached HEAD tip commit", async () => {
@@ -2889,7 +3899,10 @@ test("pruneCommitBranches drops a detached HEAD tip commit", async () => {
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "";
       }
 
@@ -2917,19 +3930,50 @@ test("pruneCommitBranches drops a detached HEAD tip commit", async () => {
   assert.equal(result.currentHash, "parent123");
   assert.equal(result.branch, "(detached)");
   assert.equal(result.detached, true);
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
-    ["rev-list", "--parents", "-n", "1", "abc123"],
-    ["rev-parse", "HEAD"],
-    ["switch", "--detach", "parent123"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--points-at",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--contains",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      ["rev-list", "--parents", "-n", "1", "abc123"],
+      ["rev-parse", "HEAD"],
+      ["switch", "--detach", "parent123"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("pruneCommitBranches rejects an unbranched commit outside the current checkout", async () => {
@@ -2946,7 +3990,10 @@ test("pruneCommitBranches rejects an unbranched commit outside the current check
       runCommand: async (command) => {
         calls.push(command);
 
-        if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        if (
+          command.args[0] === "branch" &&
+          command.args[1] === "--show-current"
+        ) {
           return "";
         }
 
@@ -2973,22 +4020,56 @@ test("pruneCommitBranches rejects an unbranched commit outside the current check
     }),
     (error) => {
       assert.equal(error.statusCode, 409);
-      assert.match(error.message, /No local branches or the current checkout contain abc123/);
+      assert.match(
+        error.message,
+        /No local branches or the current checkout contain abc123/,
+      );
       return true;
     },
   );
 
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["status", "--porcelain"],
-    ["branch", "--show-current"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", "abc123", "refs/heads"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--points-at", "abc123", "refs/tb-tools"],
-    ["for-each-ref", "--sort=refname", "--format=%(refname)", "--contains", "abc123", "refs/tb-tools"],
-    ["rev-list", "--parents", "-n", "1", "abc123"],
-    ["rev-parse", "HEAD"],
-    ["merge-base", "--is-ancestor", "abc123", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["branch", "--show-current"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--points-at",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--contains",
+        "abc123",
+        "refs/tb-tools",
+      ],
+      ["rev-list", "--parents", "-n", "1", "abc123"],
+      ["rev-parse", "HEAD"],
+      ["merge-base", "--is-ancestor", "abc123", "HEAD"],
+    ],
+  );
 });
 
 test("discardWorkingTreeChanges resets tracked changes and removes untracked files", async () => {
@@ -3005,7 +4086,10 @@ test("discardWorkingTreeChanges resets tracked changes and removes untracked fil
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "main\n";
       }
 
@@ -3020,23 +4104,28 @@ test("discardWorkingTreeChanges resets tracked changes and removes untracked fil
   assert.equal(result.message, "comm discarded uncommitted changes.");
   assert.equal(result.currentHash, "abc123");
   assert.equal(result.branch, "main");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["reset", "--hard", "HEAD"],
-    ["clean", "-fd"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["reset", "--hard", "HEAD"],
+      ["clean", "-fd"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("runGraphCommitAction prunes uncommitted changes by discarding the working tree", async () => {
   const calls = [];
   const result = await runGraphCommitAction({
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      knownHashes: new Set(["uncommitted-changes"]),
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        knownHashes: new Set(["uncommitted-changes"]),
+      },
+    ],
     graphIndex: 0,
     hash: "uncommitted-changes",
     action: "prune",
@@ -3056,12 +4145,15 @@ test("runGraphCommitAction prunes uncommitted changes by discarding the working 
   });
 
   assert.equal(result.message, "comm discarded uncommitted changes.");
-  assert.deepEqual(calls.map((call) => call.args), [
-    ["reset", "--hard", "HEAD"],
-    ["clean", "-fd"],
-    ["branch", "--show-current"],
-    ["rev-parse", "HEAD"],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["reset", "--hard", "HEAD"],
+      ["clean", "-fd"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
 });
 
 test("checkoutCommit refuses dirty working trees", async () => {
@@ -3075,7 +4167,7 @@ test("checkoutCommit refuses dirty working trees", async () => {
       hash: "abc123",
       runCommand: async () => " M file.txt\n",
     }),
-    /local changes/
+    /local changes/,
   );
 });
 
@@ -3093,13 +4185,15 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
             truncated: false,
           },
         },
-        commits: [{
-          hash: "abc123",
-          parents: [],
-          refs: ["HEAD", "main"],
-          author: { name: "Alice", email: "alice@example.com" },
-          subject: "Fix",
-        }],
+        commits: [
+          {
+            hash: "abc123",
+            parents: [],
+            refs: ["HEAD", "main"],
+            author: { name: "Alice", email: "alice@example.com" },
+            subject: "Fix",
+          },
+        ],
         workingTreeCount: 1,
       },
       {
@@ -3117,7 +4211,10 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /Thunderbird Desktop Console/);
   assert.match(html, /id="graph-config"/);
   assert.match(html, /<link rel="stylesheet" href="graph-client\/style\.css">/);
-  assert.match(html, /<script type="module" src="graph-client\/init\.js"><\/script>/);
+  assert.match(
+    html,
+    /<script type="module" src="graph-client\/init\.js"><\/script>/,
+  );
   assert.doesNotMatch(html, /<style>/);
   assert.doesNotMatch(html, /function renderGraph/);
   assert.doesNotMatch(html, /window\.[A-Z][A-Za-z]+JS/);
@@ -3137,12 +4234,21 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /data-action="checkout"/);
   assert.match(html, /data-action="rebase"/);
   assert.match(html, /data-action="prune"/);
-  assert.match(html, /class="amend-commit" type="button" hidden>Amend<\/button>/);
-  assert.match(html, /class="submit-commit" type="button" hidden>Submit<\/button>/);
+  assert.match(
+    html,
+    /class="amend-commit" type="button" hidden>Amend<\/button>/,
+  );
+  assert.match(
+    html,
+    /class="submit-commit" type="button" hidden>Submit<\/button>/,
+  );
   assert.match(html, /class="diff-message" hidden/);
   assert.match(html, /class="integration-status" hidden/);
   assert.match(html, /id="amend-dialog"/);
   assert.match(html, /class="amend-message"/);
+  assert.match(html, /id="commit-dialog"/);
+  assert.match(html, /class="commit-reviewer-input"/);
+  assert.match(html, /id="commit-reviewer-list" role="listbox" hidden/);
   assert.match(html, /id="submit-dialog"/);
   assert.match(html, /class="submit-prompt"/);
   assert.match(html, /class="submit-links" hidden/);
@@ -3150,11 +4256,20 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /id="try-dialog"/);
   assert.match(html, /class="try-selector"/);
   assert.match(html, /class="try-tasks-regex"/);
-  assert.match(html, /class="tab test-output-tab" type="button" hidden>Test Output<\/button>/);
+  assert.match(
+    html,
+    /class="tab test-output-tab" type="button" hidden>Test Output<\/button>/,
+  );
   assert.match(html, /class="test-output-panel" hidden/);
-  assert.match(html, /class="test-results-panel" aria-label="Parsed test results"/);
+  assert.match(
+    html,
+    /class="test-results-panel" aria-label="Parsed test results"/,
+  );
   assert.match(html, /class="test-results-state">Waiting for a test run\./);
-  assert.match(html, /class="test-rerun-all" type="button" hidden>Rerun All<\/button>/);
+  assert.match(
+    html,
+    /class="test-rerun-all" type="button" hidden>Rerun All<\/button>/,
+  );
   assert.match(html, /class="test-output-summary empty"/);
   assert.match(html, /class="test-output-failures empty"/);
   assert.match(html, /id="test-dialog"/);
@@ -3181,12 +4296,18 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(style, /\.command-status-bar\.busy \.command-status-dot/);
   assert.match(style, /\.command-elapsed \{/);
   assert.match(style, /\.command-status-close \{/);
-  assert.match(style, /\.mach-cancel\[hidden\], \.mach-output-toggle\[hidden\], \.command-status-close\[hidden\] \{ display: none; \}/);
+  assert.match(
+    style,
+    /\.mach-cancel\[hidden\], \.mach-output-toggle\[hidden\], \.command-status-close\[hidden\] \{ display: none; \}/,
+  );
   assert.match(style, /\.mach-output-panel \{/);
   assert.match(style, /\.mach-output-toggle\[hidden\]/);
   assert.match(style, /\.origin-main-status \{/);
   assert.match(style, /\.origin-main-badge\.current/);
-  assert.match(style, /\.origin-main-badge\.stale, \.origin-main-badge\.warning/);
+  assert.match(
+    style,
+    /\.origin-main-badge\.stale, \.origin-main-badge\.warning/,
+  );
   assert.match(style, /\.update-status\.error/);
   assert.match(style, /\.pane-resizer \{[^}]*cursor: col-resize/);
   assert.match(style, /\.pane-resizer:hover::before/);
@@ -3194,7 +4315,10 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(style, /\.graph svg \{ overflow: visible; \}/);
   assert.match(style, /\.lane-path \{ fill: none; stroke-linecap: round/);
   assert.match(style, /\.commit-dot \{ stroke: #ffffff/);
-  assert.match(style, /\.commit-hash, \.commit-message \{ dominant-baseline: central/);
+  assert.match(
+    style,
+    /\.commit-hash, \.commit-message \{ dominant-baseline: central/,
+  );
   assert.match(style, /\.commit-message \{ fill: #20242a; \}/);
   assert.match(style, /\.branch-label-bg \{ stroke-width: 1/);
   assert.match(style, /\.branch-label-text \{ dominant-baseline: central/);
@@ -3204,13 +4328,29 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(style, /\.commit-row\.active \.commit-row-hitbox/);
   assert.match(style, /\.commit-row\.working-tree \.commit-row-hitbox/);
   assert.match(style, /\.commit-row\.current \.commit-row-hitbox/);
-  assert.match(style, /@media \(prefers-color-scheme: dark\) \{[^]*\.commit-hash \{ fill: #9aa4b2; \}/);
-  assert.match(style, /@media \(prefers-color-scheme: dark\) \{[^]*\.commit-message \{ fill: #e6edf3; \}/);
+  assert.match(
+    style,
+    /@media \(prefers-color-scheme: dark\) \{[^]*\.commit-hash \{ fill: #9aa4b2; \}/,
+  );
+  assert.match(
+    style,
+    /@media \(prefers-color-scheme: dark\) \{[^]*\.commit-message \{ fill: #e6edf3; \}/,
+  );
   assert.match(style, /\.context-menu button\[data-action="prune"\]/);
   assert.match(style, /\.context-menu button\[hidden\] \{ display: none; \}/);
-  assert.match(style, /\.checkout-commit, \.amend-commit, \.submit-commit, \.load-more/);
+  assert.match(
+    style,
+    /\.checkout-commit, \.amend-commit, \.submit-commit, \.load-more/,
+  );
   assert.match(style, /\.amend-dialog \{/);
   assert.match(style, /\.amend-message \{/);
+  assert.match(style, /\.commit-dialog \{/);
+  assert.match(style, /\.commit-reviewer-picker \{/);
+  assert.match(style, /\.commit-reviewer-pill \{/);
+  assert.match(style, /\.commit-reviewer-pill\.blocking \{/);
+  assert.match(style, /\.commit-reviewer-blocking\[aria-pressed="true"\]/);
+  assert.match(style, /\.commit-reviewer-option\[aria-selected="true"\]/);
+  assert.match(style, /\.commit-reviewer-option\.blocking/);
   assert.match(style, /\.submit-dialog \{/);
   assert.match(style, /\.submit-links a/);
   assert.match(style, /\.submit-output \{/);
@@ -3228,7 +4368,10 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(style, /\.test-dialog \{/);
   assert.match(style, /\.diff-placeholder/);
   assert.match(style, /\.diff-message \{/);
-  assert.match(style, /\.diff-message a \{ color: #0969da; text-decoration: none; \}/);
+  assert.match(
+    style,
+    /\.diff-message a \{ color: #0969da; text-decoration: none; \}/,
+  );
   assert.match(style, /\.diff-message\[hidden\] \{ display: none; \}/);
   assert.match(style, /\.integration-status \{/);
   assert.match(style, /\.status-badge \{/);
@@ -3270,13 +4413,22 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function runCommitAction/);
   assert.match(client, /function openAmendDialog/);
   assert.match(client, /function submitAmendDialog/);
+  assert.match(client, /function openCommitDialog/);
+  assert.match(client, /function searchCommitReviewers/);
+  assert.match(client, /function submitCommitDialog/);
   assert.match(client, /function openSubmitDialog/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("submit"\)/);
   assert.match(client, /function renderSubmitSession/);
   assert.match(client, /function answerSubmitPrompt/);
   assert.match(client, /function confirmRemoteBuildRustWarning/);
-  assert.doesNotMatch(client, /function confirmRemoteBuildRustWarning[\s\S]*?refreshOriginMainStatus\(\{ force: true \}\)[\s\S]*?Remote builds may fail/);
-  assert.match(client, /Rust dependencies are out of sync with Firefox remote main/);
+  assert.doesNotMatch(
+    client,
+    /function confirmRemoteBuildRustWarning[\s\S]*?refreshOriginMainStatus\(\{ force: true \}\)[\s\S]*?Remote builds may fail/,
+  );
+  assert.match(
+    client,
+    /Rust dependencies are out of sync with Firefox remote main/,
+  );
   assert.match(client, /function scheduleOriginMainStatusRetry/);
   assert.match(client, /originMainStatusRetryTimer/);
   assert.match(client, /submitOutput\.textContent = session\.output \|\| ""/);
@@ -3323,8 +4475,14 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function setCommitMessage/);
   assert.match(client, /function getCommitMessageLinkUrl/);
   assert.match(client, /function getLinkedCommitMessageNodes/);
-  assert.match(client, /const BUGZILLA_BUG_URL = "https:\/\/bugzilla\.mozilla\.org\/show_bug\.cgi\?id="/);
-  assert.match(client, /const PHABRICATOR_REVISION_URL = "https:\/\/phabricator\.services\.mozilla\.com\/D"/);
+  assert.match(
+    client,
+    /const BUGZILLA_BUG_URL = "https:\/\/bugzilla\.mozilla\.org\/show_bug\.cgi\?id="/,
+  );
+  assert.match(
+    client,
+    /const PHABRICATOR_REVISION_URL = "https:\/\/phabricator\.services\.mozilla\.com\/D"/,
+  );
   assert.match(client, /const COMMIT_MESSAGE_LINK_PATTERN = /);
   assert.match(client, /document\.createTextNode/);
   assert.match(client, /document\.createElement\("a"\)/);
@@ -3335,48 +4493,102 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function formatCommitTitle/);
   assert.match(client, /Current staged, unstaged, and untracked changes/);
   assert.match(client, /if \(!INTERACTIVE\.enabled\)/);
-  assert.match(client, /current\.append\(createTryRunBadge\(runs\[0\], "Try"\)\)/);
+  assert.match(
+    client,
+    /current\.append\(createTryRunBadge\(runs\[0\], "Try"\)\)/,
+  );
   assert.match(client, /current\.append\(toggle\)/);
   assert.match(client, /group\.append\(current, history\)/);
-  assert.match(client, /renderCommitIntegrationStatus\(container, \{ tryRuns: commit\.tryRuns \|\| \[\] \}/);
+  assert.match(
+    client,
+    /renderCommitIntegrationStatus\(container, \{ tryRuns: commit\.tryRuns \|\| \[\] \}/,
+  );
   assert.match(client, /amendButton\.hidden = !INTERACTIVE\.enabled/);
   assert.match(client, /function startPaneResize/);
   assert.match(client, /function resizePaneFromKeyboard/);
   assert.match(client, /restoreGraphPaneWidth\(0\)/);
-  assert.match(client, /resizer\.addEventListener\("pointerdown", startPaneResize\)/);
+  assert.match(
+    client,
+    /resizer\.addEventListener\("pointerdown", startPaneResize\)/,
+  );
   assert.match(client, /function setDiffStats/);
   assert.match(client, /setDiffStats\(stats, result\)/);
   assert.match(client, /function isCurrentCommit/);
   assert.match(client, /const labelTranslate = getTranslate\(labelContainer\)/);
   assert.match(client, /graphStates\[index\]\.selectedHash = commit\.hash/);
-  assert.match(client, /const commits = placeWorkingTreeCommits\(graph\.commits \? \[\.\.\.graph\.commits\] : \[\]\)/);
+  assert.match(
+    client,
+    /const commits = placeWorkingTreeCommits\(graph\.commits \? \[\.\.\.graph\.commits\] : \[\]\)/,
+  );
   assert.match(client, /currentHash: getCurrentCommitHash\(commits\)/);
-  assert.match(client, /row\.classList\.toggle\("current", row\.dataset\.hash === currentHash\)/);
+  assert.match(
+    client,
+    /row\.classList\.toggle\("current", row\.dataset\.hash === currentHash\)/,
+  );
   assert.match(client, /graphStates\[graphIndex\]\.currentHash = hash/);
   assert.match(client, /\/api\/graph\/" \+ index \+ "\/snapshot/);
-  assert.match(client, /setInterval\(pollGraphUpdates, INTERACTIVE\.pollIntervalMs\)/);
-  assert.match(client, /\/api\/graph\/" \+ graphIndex \+ "\/message\/" \+ encodeURIComponent\(hash\)/);
-  assert.match(client, /\/api\/graph\/" \+ index \+ "\/message\/" \+ encodeURIComponent\(commit\.hash\)/);
-  assert.match(client, /\/api\/graph\/" \+ index \+ "\/integration\/" \+ encodeURIComponent\(commit\.hash\)/);
-  assert.match(client, /loadSelectedCommitMessage\(index, commit, commitMessage\)/);
-  assert.match(client, /loadSelectedCommitIntegrationStatus\(index, commit, integrationStatus\)/);
-  assert.match(client, /!result\.bug\.error && isAcceptedPhabricatorStatus\(result\.phabricator\)/);
+  assert.match(
+    client,
+    /setInterval\(pollGraphUpdates, INTERACTIVE\.pollIntervalMs\)/,
+  );
+  assert.match(
+    client,
+    /\/api\/graph\/" \+ graphIndex \+ "\/message\/" \+ encodeURIComponent\(hash\)/,
+  );
+  assert.match(
+    client,
+    /\/api\/graph\/" \+ index \+ "\/message\/" \+ encodeURIComponent\(commit\.hash\)/,
+  );
+  assert.match(
+    client,
+    /\/api\/graph\/" \+ index \+ "\/integration\/" \+ encodeURIComponent\(commit\.hash\)/,
+  );
+  assert.match(
+    client,
+    /loadSelectedCommitMessage\(index, commit, commitMessage\)/,
+  );
+  assert.match(
+    client,
+    /loadSelectedCommitIntegrationStatus\(index, commit, integrationStatus\)/,
+  );
+  assert.match(
+    client,
+    /!result\.bug\.error && isAcceptedPhabricatorStatus\(result\.phabricator\)/,
+  );
   assert.match(client, /\/api\/bugzilla\/checkin/);
   assert.match(client, /event\.target\.closest\("\.checkin-needed-button"\)/);
   assert.match(client, /\/api\/amend-message/);
-  assert.match(client, /amendButton\.textContent = isWorkingTreeCommit\(commit\) \? "Amend" : "Amend Message"/);
-  assert.match(client, /submitButton\.hidden = !INTERACTIVE\.enabled \|\| isWorkingTreeCommit\(commit\) \|\| !isCurrentCommit\(commit\)/);
+  assert.match(client, /\/api\/commit\/metadata/);
+  assert.match(client, /\/api\/commit\/reviewers/);
+  assert.match(client, /\/api\/commit/);
+  assert.match(
+    client,
+    /amendButton\.textContent = isWorkingTreeCommit\(commit\) \? "Amend" : "Amend Message"/,
+  );
+  assert.match(
+    client,
+    /submitButton\.hidden = !INTERACTIVE\.enabled \|\| isWorkingTreeCommit\(commit\) \|\| !isCurrentCommit\(commit\)/,
+  );
   assert.match(client, /hash: uiState\.amendDialogState\.hash/);
   assert.match(client, /expectedChangeId: uiState\.amendDialogState\.changeId/);
-  assert.match(client, /includeChanges: uiState\.amendDialogState\.includeChanges/);
-  assert.match(client, /selectCommitActionResult\(graphIndex, result\.rewrittenHash \|\| result\.currentHash, result\.message\)/);
+  assert.match(
+    client,
+    /includeChanges: uiState\.amendDialogState\.includeChanges/,
+  );
+  assert.match(
+    client,
+    /selectCommitActionResult\(graphIndex, result\.rewrittenHash \|\| result\.currentHash, result\.message\)/,
+  );
   assert.match(client, /\/api\/submit/);
   assert.match(client, /\/api\/try/);
   assert.match(client, /\/api\/update-graphs/);
   assert.match(client, /\/api\/unshelf-graphs/);
   assert.match(client, /\/api\/mach-action/);
   assert.match(client, /\/api\/origin-main-status/);
-  assert.match(client, /\/api\/submit\/" \+ encodeURIComponent\(uiState\.submitDialogState\.sessionId\)/);
+  assert.match(
+    client,
+    /\/api\/submit\/" \+ encodeURIComponent\(uiState\.submitDialogState\.sessionId\)/,
+  );
   assert.match(client, /button\.dataset\.answer === "true"/);
   assert.match(client, /scheduleGraphEnhancements\(index\)/);
   assert.match(client, /Branch tips will check out the branch/);
@@ -3385,9 +4597,15 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /button\.style\.display = hidden \? "none" : ""/);
   assert.match(client, /Uncommitted changes/);
   assert.match(client, /commitGroup\.addEventListener\("contextmenu"/);
-  assert.match(client, /runCommitAction\(button\.dataset\.action, actionState\)/);
+  assert.match(
+    client,
+    /runCommitAction\(button\.dataset\.action, actionState\)/,
+  );
   assert.doesNotMatch(client, /window\.[A-Z][A-Za-z]+JS/);
-  assert.match(client, /renderLaneGraph\(index, pruneLoadedParents\(state\.commits\)\)/);
+  assert.match(
+    client,
+    /renderLaneGraph\(index, pruneLoadedParents\(state\.commits\)\)/,
+  );
   assert.doesNotMatch(html, /class="update-actions"/);
   assert.doesNotMatch(html, /class="origin-main-status"/);
   assert.doesNotMatch(html, /class="graph-options"/);
@@ -3401,14 +4619,16 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
       pageSize: 25,
       token: "secret",
     },
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commitCount: 0,
-      commits: [],
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commitCount: 0,
+        commits: [],
+        diffs: {},
+      },
+    ],
   });
   const client = readGraphClientScripts();
   const style = readGraphClientStylesheet();
@@ -3416,30 +4636,73 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /id="graph-config"/);
   assert.match(html, /"pageSize":25/);
   assert.match(html, /<link rel="stylesheet" href="graph-client\/style\.css">/);
-  assert.match(html, /<script type="module" src="graph-client\/init\.js"><\/script>/);
+  assert.match(
+    html,
+    /<script type="module" src="graph-client\/init\.js"><\/script>/,
+  );
   assert.doesNotMatch(html, /<style>/);
   assert.doesNotMatch(html, /function renderGraph/);
   assert.match(client, /const INTERACTIVE = /);
   assert.match(html, /<title>Thunderbird Desktop Console<\/title>/);
   assert.match(html, /<h1>Thunderbird Desktop Console<\/h1>/);
-  assert.match(html, /<h1>Thunderbird Desktop Console<\/h1>\s*<div class="origin-main-status"/);
-  assert.match(html, /class="origin-main-badge checking">Thunderbird: checking<\/span>/);
-  assert.match(html, /class="origin-main-badge checking">Rust deps: checking<\/span>/);
-  assert.ok(html.indexOf('<div class="graph-options">') > html.indexOf('<div class="header-row">'));
-  assert.ok(html.indexOf('<div class="graph-options">') < html.indexOf('<div class="toolbar-row">'));
+  assert.match(
+    html,
+    /<h1>Thunderbird Desktop Console<\/h1>\s*<div class="origin-main-status"/,
+  );
+  assert.match(
+    html,
+    /class="origin-main-badge checking">Thunderbird: checking<\/span>/,
+  );
+  assert.match(
+    html,
+    /class="origin-main-badge checking">Rust deps: checking<\/span>/,
+  );
+  assert.ok(
+    html.indexOf('<div class="graph-options">') >
+      html.indexOf('<div class="header-row">'),
+  );
+  assert.ok(
+    html.indexOf('<div class="graph-options">') <
+      html.indexOf('<div class="toolbar-row">'),
+  );
   assert.match(html, /<div class="toolbar-row">\s*<nav class="tabs">/);
   assert.match(html, /class="update-actions"/);
   assert.match(html, /<\/nav>\s*<div class="update-actions" role="toolbar"/);
-  assert.ok(html.indexOf('<div class="update-actions"') > html.indexOf('<div class="toolbar-row">'));
+  assert.ok(
+    html.indexOf('<div class="update-actions"') >
+      html.indexOf('<div class="toolbar-row">'),
+  );
   assert.match(html, /data-mode="update">Update<\/button>/);
   assert.match(html, /data-mode="rebase">Update and Rebase<\/button>/);
-  assert.doesNotMatch(html, /class="mach-action" type="button" data-action="build">Build<\/button>/);
+  assert.doesNotMatch(
+    html,
+    /class="mach-action" type="button" data-action="build">Build<\/button>/,
+  );
   assert.match(html, /data-action="run">Run<\/button>/);
-  assert.match(html, /class="graph-menu-button" type="button" aria-label="More actions"/);
-  assert.match(html, /id="graph-options-menu" role="menu" aria-label="More actions" hidden/);
-  assert.match(html, /class="graph-menu-command" type="button" role="menuitem" data-menu-action="build">Build<\/button>/);
-  assert.match(html, /class="graph-menu-command graph-submenu-trigger"[^>]+data-menu-action="lint">Lint<\/button>/);
-  assert.match(html, /class="graph-submenu" role="menu" aria-label="Lint options"/);
+  assert.match(
+    html,
+    /class="graph-menu-button" type="button" aria-label="More actions"/,
+  );
+  assert.match(
+    html,
+    /id="graph-options-menu" role="menu" aria-label="More actions" hidden/,
+  );
+  assert.match(
+    html,
+    /class="graph-menu-command" type="button" role="menuitem" data-menu-action="build">Build<\/button>/,
+  );
+  assert.match(
+    html,
+    /class="graph-menu-command" type="button" role="menuitem" data-menu-action="commit">Commit<\/button>/,
+  );
+  assert.match(
+    html,
+    /class="graph-menu-command graph-submenu-trigger"[^>]+data-menu-action="lint">Lint<\/button>/,
+  );
+  assert.match(
+    html,
+    /class="graph-submenu" role="menu" aria-label="Lint options"/,
+  );
   assert.match(html, /data-menu-action="lint-all">All<\/button>/);
   assert.match(html, /data-menu-action="lint-outgoing">Outgoing<\/button>/);
   assert.doesNotMatch(html, /data-menu-action="lint-new"/);
@@ -3448,22 +4711,58 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /data-menu-action="test">Test<\/button>/);
   assert.match(html, /data-menu-action="try">Try<\/button>/);
   assert.match(html, /data-menu-action="land">Land Patches<\/button>/);
-  assert.match(html, /class="tab test-output-tab" type="button" hidden>Test Output<\/button>/);
+  assert.match(
+    html,
+    /class="tab test-output-tab" type="button" hidden>Test Output<\/button>/,
+  );
   assert.match(html, /class="test-output-panel" hidden/);
-  assert.match(html, /class="test-results-panel" aria-label="Parsed test results"/);
-  assert.match(html, /class="test-rerun-all" type="button" hidden>Rerun All<\/button>/);
-  assert.match(style, /\.graph-submenu \{ display: none; position: absolute; right: calc\(100% - 1px\); top: 0; \}/);
-  assert.match(html, /class="origin-main-status" role="status" aria-label="origin\/main freshness"/);
-  assert.match(html, /class="command-status-bar" role="region" aria-label="Command status" hidden/);
+  assert.match(
+    html,
+    /class="test-results-panel" aria-label="Parsed test results"/,
+  );
+  assert.match(
+    html,
+    /class="test-rerun-all" type="button" hidden>Rerun All<\/button>/,
+  );
+  assert.match(
+    style,
+    /\.graph-submenu \{ display: none; position: absolute; right: calc\(100% - 1px\); top: 0; \}/,
+  );
+  assert.match(
+    html,
+    /class="origin-main-status" role="status" aria-label="origin\/main freshness"/,
+  );
+  assert.match(
+    html,
+    /class="command-status-bar" role="region" aria-label="Command status" hidden/,
+  );
   assert.match(html, /class="command-status-primary"/);
   assert.match(html, /class="command-status-tools"/);
   assert.match(html, /class="update-status" role="status" hidden><\/span>/);
-  assert.match(html, /class="command-elapsed" aria-label="Elapsed time"><\/span>/);
-  assert.match(html, /class="mach-cancel" type="button" hidden>Cancel Build<\/button>/);
-  assert.match(html, /class="command-status-close" type="button" hidden aria-label="Dismiss command status">&times;<\/button>/);
-  assert.match(html, /class="mach-output-toggle" type="button" hidden aria-expanded="false">Output<\/button>/);
+  assert.match(
+    html,
+    /class="command-elapsed" aria-label="Elapsed time"><\/span>/,
+  );
+  assert.match(
+    html,
+    /class="mach-cancel" type="button" hidden>Cancel Build<\/button>/,
+  );
+  assert.match(
+    html,
+    /class="command-status-close" type="button" hidden aria-label="Dismiss command status">&times;<\/button>/,
+  );
+  assert.match(
+    html,
+    /class="mach-output-toggle" type="button" hidden aria-expanded="false">Output<\/button>/,
+  );
   assert.match(html, /class="mach-output-panel" hidden/);
   assert.match(html, /<dialog class="try-dialog" id="try-dialog">/);
+  assert.match(html, /<dialog class="commit-dialog" id="commit-dialog">/);
+  assert.match(html, /class="commit-field commit-bug-field" hidden/);
+  assert.match(
+    html,
+    /class="commit-reviewer-input"[\s\S]+aria-controls="commit-reviewer-list"/,
+  );
   assert.match(html, /<option value="fuzzy">fuzzy<\/option>/);
   assert.match(html, /Post try link to Phabricator/);
   assert.match(html, /<dialog class="test-dialog" id="test-dialog">/);
@@ -3479,15 +4778,35 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /class="patch-skip-dependencies"/);
   assert.doesNotMatch(html, /class="patch-yes"/);
   assert.match(html, /<dialog class="land-dialog" id="land-dialog">/);
-  assert.match(html, /class="land-lando-repo"[^>]+value="thunderbird-desktop-main"/);
-  assert.match(html, /class="land-start" type="button">Start Landing<\/button>/);
+  assert.match(
+    html,
+    /class="land-lando-repo"[^>]+value="thunderbird-desktop-main"/,
+  );
+  assert.match(
+    html,
+    /class="land-start" type="button">Start Landing<\/button>/,
+  );
   assert.doesNotMatch(style, /\.land-close:disabled/);
   assert.match(client, /\/api\/graph\/" \+ index \+ "\/commits/);
   assert.match(client, /openTestDialog\(\)/);
   assert.match(client, /cancelGraphTestSession\(\)/);
-  assert.match(client, /testOutputTab\.addEventListener\("click", showTestOutputTab\)/);
+  assert.match(
+    client,
+    /testOutputTab\.addEventListener\("click", showTestOutputTab\)/,
+  );
   assert.match(client, /document\.querySelectorAll\("\.tab\[data-index\]"\)/);
   assert.match(client, /\/api\/commit-action/);
+  assert.match(client, /openCommitDialog\(\)/);
+  assert.match(client, /submitCommitDialog/);
+  assert.match(client, /addCommitReviewerFromEvent/);
+  assert.match(client, /handleCommitReviewerPillEvent/);
+  assert.match(client, /function getReviewerResultVariants/);
+  assert.match(client, /\.flatMap\(getReviewerResultVariants\)/);
+  assert.match(client, /MIN_REVIEWER_QUERY_LENGTH = 3/);
+  assert.match(client, /REVIEWER_SEARCH_DEBOUNCE_MS = 300/);
+  assert.match(client, /result\.rateLimited/);
+  assert.match(client, /Start group searches with #/);
+  assert.match(client, /limit=20/);
   assert.match(client, /\/api\/update-graphs/);
   assert.match(client, /\/api\/unshelf-graphs/);
   assert.match(client, /\/api\/mach-action/);
@@ -3503,7 +4822,10 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /function openPatchDialog/);
   assert.match(client, /openPatchDialog\(\)/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("the try run"\)/);
-  assert.doesNotMatch(client, /confirmRemoteBuildRustWarning\("land patches"\)/);
+  assert.doesNotMatch(
+    client,
+    /confirmRemoteBuildRustWarning\("land patches"\)/,
+  );
   assert.match(client, /snapshotLimits: getSnapshotLimits\(\)/);
   assert.match(client, /await promptForPostUpdateMachAction\(\)/);
   assert.match(client, /await startGraphMachAction\("run"\)/);
@@ -3514,18 +4836,30 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /function cancelOrCloseLandDialog/);
   assert.match(client, /landClose\.disabled = false/);
   assert.match(client, /landClose\.textContent = busy \? "Cancel" : "Close"/);
-  assert.match(client, /\/api\/land\/" \+ encodeURIComponent\(sessionId\) \+ "\/cancel"/);
+  assert.match(
+    client,
+    /\/api\/land\/" \+ encodeURIComponent\(sessionId\) \+ "\/cancel"/,
+  );
   assert.match(client, /landClose\.addEventListener\("click", \(\) =>/);
   assert.match(client, /landClose\.dataset\.landAnswer/);
-  assert.match(client, /window\.clearTimeout\(uiState\.originMainStatusRetryTimer\)/);
-  assert.match(client, /snapshotLimit: getLoadedGitCommitLimit\(graphStates\[graphIndex\]\)/);
-  assert.match(client, /applyGraphSnapshot\(graphIndex, result\.snapshot, \{ force: true \}\)/);
+  assert.match(
+    client,
+    /window\.clearTimeout\(uiState\.originMainStatusRetryTimer\)/,
+  );
+  assert.match(
+    client,
+    /snapshotLimit: getLoadedGitCommitLimit\(graphStates\[graphIndex\]\)/,
+  );
+  assert.match(
+    client,
+    /applyGraphSnapshot\(graphIndex, result\.snapshot, \{ force: true \}\)/,
+  );
   assert.match(client, /\/api\/close/);
   assert.match(client, /\/api\/ping/);
   assert.match(client, /clientId/);
   assert.match(client, /function sendHeartbeat/);
   assert.match(client, /sendHeartbeat\(\)/);
-  assert.match(client, /window\.addEventListener\("pagehide"/);
+  assert.match(client, /window\.addEventListener\(\s*"pagehide"/);
   assert.doesNotMatch(client, /beforeunload/);
   assert.match(html, /checkout-commit/);
   assert.match(html, /amend-commit/);
@@ -3565,7 +4899,9 @@ test("graph command writes and opens a tabbed graph", async () => {
         "write",
         file,
         contents === "client asset" ||
-          (/comm/.test(contents) && /firefox/.test(contents) && /graph-client\/init\.js/.test(contents)),
+          (/comm/.test(contents) &&
+            /firefox/.test(contents) &&
+            /graph-client\/init\.js/.test(contents)),
       ]);
     },
     open: async (file) => calls.push(["open", file]),
@@ -3578,10 +4914,13 @@ test("graph command writes and opens a tabbed graph", async () => {
     ["mkdir", "/tmp", { recursive: true }],
     ["mkdir", "/tmp/graph-client", { recursive: true }],
   ]);
-  assert.deepEqual(calls.slice(2, -2), GRAPH_CLIENT_TEST_ASSETS.flatMap(({ source, output }) => [
-    ["readBundle", source, "utf8"],
-    ["write", `/tmp/${output}`, true],
-  ]));
+  assert.deepEqual(
+    calls.slice(2, -2),
+    GRAPH_CLIENT_TEST_ASSETS.flatMap(({ source, output }) => [
+      ["readBundle", source, "utf8"],
+      ["write", `/tmp/${output}`, true],
+    ]),
+  );
   assert.deepEqual(calls.slice(-2), [
     ["write", "/tmp/graph.html", true],
     ["open", "/tmp/graph.html"],
@@ -3638,7 +4977,9 @@ test("interactive graph server returns origin status before slow Rust dependency
     }
   });
 
-  const pendingResponse = await fetch(new URL("api/origin-main-status?token=secret", serverInfo.url));
+  const pendingResponse = await fetch(
+    new URL("api/origin-main-status?token=secret", serverInfo.url),
+  );
   const pendingStatus = await pendingResponse.json();
 
   assert.equal(pendingStatus.statuses[0].label, "comm");
@@ -3661,7 +5002,9 @@ test("interactive graph server returns origin status before slow Rust dependency
   await rustStatusPromise;
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  const completedResponse = await fetch(new URL("api/origin-main-status?token=secret", serverInfo.url));
+  const completedResponse = await fetch(
+    new URL("api/origin-main-status?token=secret", serverInfo.url),
+  );
   const completedStatus = await completedResponse.json();
 
   assert.equal(completedStatus.statuses[2].type, "rust-upstream");
@@ -3676,23 +5019,27 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     getBug: async (id) => ({
-      bugs: [{
-        id,
-        status: "NEW",
-        resolution: "---",
-        summary: "Fix the thing",
-        is_open: true,
-        keywords: checkinMarked ? ["checkin-needed-tb"] : [],
-      }],
+      bugs: [
+        {
+          id,
+          status: "NEW",
+          resolution: "---",
+          summary: "Fix the thing",
+          is_open: true,
+          keywords: checkinMarked ? ["checkin-needed-tb"] : [],
+        },
+      ],
     }),
     updateBug: async (id, update) => {
       bugUpdates.push([id, update]);
@@ -3700,13 +5047,15 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
       return {};
     },
     phab: async () => ({
-      result: [{
-        id: 987654,
-        uri: "https://phabricator.services.mozilla.com/D987654",
-        status: "status-accepted",
-        statusName: "Accepted",
-        title: "Bug 123456 - Fix the thing",
-      }],
+      result: [
+        {
+          id: 987654,
+          uri: "https://phabricator.services.mozilla.com/D987654",
+          status: "status-accepted",
+          statusName: "Accepted",
+          title: "Bug 123456 - Fix the thing",
+        },
+      ],
     }),
     getRustUpstreamStatus: async () => ({
       type: "rust-upstream",
@@ -3716,7 +5065,8 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
       commLocalHash: "cccccccccccccccccccccccccccccccccccccccc",
       firefoxRemoteHash: "ffffffffffffffffffffffffffffffffffffffff",
       mismatches: [{ file: "Cargo.lock" }],
-      message: "Rust dependencies are out of sync with Firefox remote main. Remote builds may fail.",
+      message:
+        "Rust dependencies are out of sync with Firefox remote main. Remote builds may fail.",
     }),
     runCommand: async (command) => {
       calls.push(command);
@@ -3737,7 +5087,10 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
         return "diff --git a/file.txt b/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
       }
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "main\n";
       }
 
@@ -3770,27 +5123,46 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   const pageResponse = await fetch(serverInfo.url);
   assert.equal(await pageResponse.text(), "<!doctype html><p>graph</p>");
 
-  const assetResponse = await fetch(new URL("assets/graph-client/init.js", serverInfo.url));
+  const assetResponse = await fetch(
+    new URL("assets/graph-client/init.js", serverInfo.url),
+  );
   assert.equal(assetResponse.ok, true);
-  assert.match(assetResponse.headers.get("content-type"), /application\/javascript/);
+  assert.match(
+    assetResponse.headers.get("content-type"),
+    /application\/javascript/,
+  );
   assert.match(await assetResponse.text(), /function renderGraph/);
 
-  const stylesheetResponse = await fetch(new URL("assets/graph-client/style.css", serverInfo.url));
+  const stylesheetResponse = await fetch(
+    new URL("assets/graph-client/style.css", serverInfo.url),
+  );
   assert.equal(stylesheetResponse.ok, true);
   assert.match(stylesheetResponse.headers.get("content-type"), /text\/css/);
-  assert.match((await stylesheetResponse.text()).replace(/\s+/g, " "), /\.diff-line \{ height: 24px/);
+  assert.match(
+    (await stylesheetResponse.text()).replace(/\s+/g, " "),
+    /\.diff-line \{ height: 24px/,
+  );
 
-  const commitsResponse = await fetch(new URL("api/graph/0/commits?offset=0&limit=1&token=secret", serverInfo.url));
+  const commitsResponse = await fetch(
+    new URL(
+      "api/graph/0/commits?offset=0&limit=1&token=secret",
+      serverInfo.url,
+    ),
+  );
   const commits = await commitsResponse.json();
   assert.equal(commits.commits[0].hash, "abc123");
 
-  const diffResponse = await fetch(new URL("api/graph/0/diff/abc123?token=secret", serverInfo.url));
+  const diffResponse = await fetch(
+    new URL("api/graph/0/diff/abc123?token=secret", serverInfo.url),
+  );
   const diff = await diffResponse.json();
   assert.match(diff.html, /pretty-file/);
   assert.equal(diff.insertions, 1);
   assert.equal(diff.deletions, 1);
 
-  const integrationResponse = await fetch(new URL("api/graph/0/integration/abc123?token=secret", serverInfo.url));
+  const integrationResponse = await fetch(
+    new URL("api/graph/0/integration/abc123?token=secret", serverInfo.url),
+  );
   const integration = await integrationResponse.json();
   assert.equal(integration.bug.status, "NEW");
   assert.equal(integration.bug.summary, "Fix the thing");
@@ -3798,29 +5170,36 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.equal(integration.phabricator.statusName, "Accepted");
   assert.equal(integration.phabricator.title, "Bug 123456 - Fix the thing");
 
-  const checkinResponse = await fetch(new URL("api/bugzilla/checkin", serverInfo.url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      token: "secret",
-      graphIndex: 0,
-      hash: "abc123",
-      bugId: "123456",
-    }),
-  });
+  const checkinResponse = await fetch(
+    new URL("api/bugzilla/checkin", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        graphIndex: 0,
+        hash: "abc123",
+        bugId: "123456",
+      }),
+    },
+  );
   const checkin = await checkinResponse.json();
   assert.equal(checkin.message, "Bug 123456 marked for checkin.");
   assert.equal(checkin.bug.hasCheckinNeeded, true);
-  assert.deepEqual(bugUpdates, [[
-    "123456",
-    {
-      keywords: {
-        add: ["checkin-needed-tb"],
+  assert.deepEqual(bugUpdates, [
+    [
+      "123456",
+      {
+        keywords: {
+          add: ["checkin-needed-tb"],
+        },
       },
-    },
-  ]]);
+    ],
+  ]);
 
-  const snapshotResponse = await fetch(new URL("api/graph/0/snapshot?limit=1&token=secret", serverInfo.url));
+  const snapshotResponse = await fetch(
+    new URL("api/graph/0/snapshot?limit=1&token=secret", serverInfo.url),
+  );
   const snapshot = await snapshotResponse.json();
   assert.equal(snapshot.branch, "main");
   assert.equal(snapshot.commitCount, 1);
@@ -3833,7 +5212,9 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   });
   assert.equal(pingResponse.ok, true);
 
-  const originMainStatusResponse = await fetch(new URL("api/origin-main-status?token=secret&force=1", serverInfo.url));
+  const originMainStatusResponse = await fetch(
+    new URL("api/origin-main-status?token=secret&force=1", serverInfo.url),
+  );
   const originMainStatus = await originMainStatusResponse.json();
   assert.equal(originMainStatus.statuses[0].label, "comm");
   assert.equal(originMainStatus.statuses[0].state, "current");
@@ -3842,35 +5223,57 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.equal(originMainStatus.statuses[1].state, "warning");
   assert.equal(originMainStatus.statuses[1].mismatches[0].file, "Cargo.lock");
 
-  const checkoutResponse = await fetch(new URL("api/checkout", serverInfo.url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "secret", graphIndex: 0, hash: "abc123" }),
-  });
+  const checkoutResponse = await fetch(
+    new URL("api/checkout", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret", graphIndex: 0, hash: "abc123" }),
+    },
+  );
   const checkout = await checkoutResponse.json();
   assert.equal(checkout.message, "comm checked out branch main at abc123.");
   assert.equal(checkout.snapshot.branch, "main");
   assert.equal(checkout.snapshot.commits[0].hash, "abc123");
 
-  const rebaseResponse = await fetch(new URL("api/commit-action", serverInfo.url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "secret", graphIndex: 0, hash: "abc123", action: "rebase", snapshotLimit: 1 }),
-  });
+  const rebaseResponse = await fetch(
+    new URL("api/commit-action", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        graphIndex: 0,
+        hash: "abc123",
+        action: "rebase",
+        snapshotLimit: 1,
+      }),
+    },
+  );
   const rebase = await rebaseResponse.json();
   assert.equal(rebase.message, "comm rebased branch main onto main.");
   assert.equal(rebase.currentHash, "def456");
   assert.equal(rebase.snapshot.branch, "main");
   assert.equal(rebase.snapshot.commits[0].hash, "abc123");
 
-  const updateResponse = await fetch(new URL("api/update-graphs", serverInfo.url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "secret", mode: "update", snapshotLimits: [1] }),
-  });
+  const updateResponse = await fetch(
+    new URL("api/update-graphs", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        mode: "update",
+        snapshotLimits: [1],
+      }),
+    },
+  );
   const update = await updateResponse.json();
   assert.equal(update.ok, true);
-  assert.equal(update.results[0].message, "comm updated main from origin/main.");
+  assert.equal(
+    update.results[0].message,
+    "comm updated main from origin/main.",
+  );
   assert.equal(update.snapshots[0].branch, "main");
   assert.equal(update.snapshots[0].commits[0].hash, "abc123");
 
@@ -3887,7 +5290,7 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
 
   const machSession = await waitForMachSession(
     new URL(`api/mach-action/${machStart.id}?token=secret`, serverInfo.url),
-    (item) => item.status === "complete"
+    (item) => item.status === "complete",
   );
   assert.equal(machSession.message, "Run finished.");
   assert.equal(machSession.phase, "");
@@ -3897,7 +5300,9 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.match(machSession.output, /\$ \.\.\/mach run/);
   assert.match(machSession.output, /run complete/);
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   const closeResponse = await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -3906,16 +5311,73 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.equal(closeResponse.ok, true);
   await closePromise;
 
-  assert.equal(calls.some((call) => call.args[0] === "switch" && call.args[1] === "main"), true);
-  assert.equal(calls.some((call) => call.args[0] === "fetch" && call.args[1] === "origin" && call.args[2] === "main"), true);
-  assert.equal(calls.some((call) => call.args[0] === "pull" && call.args[1] === "--ff-only"), true);
-  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.cwd === "/repo/comm" && call.args.join(" ") === "build"), true);
-  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.cwd === "/repo/comm" && call.args.join(" ") === "run"), true);
-  assert.equal(calls.some((call) => call.cmd === "osascript" || call.cmd === "pkill"), false);
-  assert.equal(calls.some((call) => call.args[0] === "switch" && call.args[1] === "--detach"), true);
-  assert.equal(calls.some((call) => call.args[0] === "cherry-pick" && call.args[1] === "--no-commit"), true);
-  assert.equal(calls.some((call) => call.args[0] === "commit" && call.args[1] === "-C"), true);
-  assert.equal(calls.some((call) => call.args[0] === "branch" && call.args[1] === "-f" && call.args[2] === "main"), true);
+  assert.equal(
+    calls.some((call) => call.args[0] === "switch" && call.args[1] === "main"),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.args[0] === "fetch" &&
+        call.args[1] === "origin" &&
+        call.args[2] === "main",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) => call.args[0] === "pull" && call.args[1] === "--ff-only",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd.endsWith("mach") &&
+        call.cwd === "/repo/comm" &&
+        call.args.join(" ") === "build",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd.endsWith("mach") &&
+        call.cwd === "/repo/comm" &&
+        call.args.join(" ") === "run",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some((call) => call.cmd === "osascript" || call.cmd === "pkill"),
+    false,
+  );
+  assert.equal(
+    calls.some(
+      (call) => call.args[0] === "switch" && call.args[1] === "--detach",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.args[0] === "cherry-pick" && call.args[1] === "--no-commit",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some((call) => call.args[0] === "commit" && call.args[1] === "-C"),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.args[0] === "branch" &&
+        call.args[1] === "-f" &&
+        call.args[2] === "main",
+    ),
+    true,
+  );
 });
 
 test("interactive graph server amends current commit with edited message and refreshes", async (t) => {
@@ -3925,14 +5387,16 @@ test("interactive graph server amends current commit with edited message and ref
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     runCommand: async (command) => {
       calls.push(command);
 
@@ -3963,7 +5427,10 @@ test("interactive graph server amends current commit with edited message and ref
         return "";
       }
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "main\n";
       }
 
@@ -3980,22 +5447,33 @@ test("interactive graph server amends current commit with edited message and ref
     }
   });
 
-  const messageResponse = await fetch(new URL("api/graph/0/message/uncommitted-changes?token=secret", serverInfo.url));
+  const messageResponse = await fetch(
+    new URL(
+      "api/graph/0/message/uncommitted-changes?token=secret",
+      serverInfo.url,
+    ),
+  );
   const currentMessage = await messageResponse.json();
-  assert.equal(currentMessage.message, "Bug 123 - Old message. r=#reviewers\n\nOld body.\n");
+  assert.equal(
+    currentMessage.message,
+    "Bug 123 - Old message. r=#reviewers\n\nOld body.\n",
+  );
 
-  const amendResponse = await fetch(new URL("api/amend-message", serverInfo.url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      token: "secret",
-      graphIndex: 0,
-      hash: "uncommitted-changes",
-      message: "Bug 123 - New message. r=#reviewers\n\nNew body.",
-      includeChanges: true,
-      snapshotLimit: 1,
-    }),
-  });
+  const amendResponse = await fetch(
+    new URL("api/amend-message", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        graphIndex: 0,
+        hash: "uncommitted-changes",
+        message: "Bug 123 - New message. r=#reviewers\n\nNew body.",
+        includeChanges: true,
+        snapshotLimit: 1,
+      }),
+    },
+  );
   const amend = await amendResponse.json();
 
   assert.equal(amend.ok, true);
@@ -4004,10 +5482,23 @@ test("interactive graph server amends current commit with edited message and ref
   assert.equal(amend.rewrittenHash, "def456");
   assert.equal(amend.snapshot.commits[0].hash, "def456");
   assert.equal(amend.snapshot.workingTreeCount, 0);
-  assert.equal(calls.some((call) => call.args[0] === "add" && call.args[1] === "-A"), true);
-  assert.equal(calls.some((call) => call.args[0] === "commit" && call.args[1] === "--amend" && call.args[2] === "-F"), true);
+  assert.equal(
+    calls.some((call) => call.args[0] === "add" && call.args[1] === "-A"),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.args[0] === "commit" &&
+        call.args[1] === "--amend" &&
+        call.args[2] === "-F",
+    ),
+    true,
+  );
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4022,14 +5513,16 @@ test("interactive graph server cancels an active build session", async (t) => {
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     runCommand: async (command) => {
       if (command.cmd.endsWith("mach") && command.args[0] === "build") {
         return new Promise((resolve) => {
@@ -4047,23 +5540,35 @@ test("interactive graph server cancels an active build session", async (t) => {
     }
   });
 
-  const startResponse = await fetch(new URL("api/mach-action", serverInfo.url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "secret", action: "build" }),
-  });
+  const startResponse = await fetch(
+    new URL("api/mach-action", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret", action: "build" }),
+    },
+  );
   const start = await startResponse.json();
   assert.equal(start.ok, true);
 
-  const statusUrl = new URL(`api/mach-action/${start.id}?token=secret`, serverInfo.url);
-  const running = await waitForMachSession(statusUrl, (item) => item.phase === "building");
+  const statusUrl = new URL(
+    `api/mach-action/${start.id}?token=secret`,
+    serverInfo.url,
+  );
+  const running = await waitForMachSession(
+    statusUrl,
+    (item) => item.phase === "building",
+  );
   assert.equal(running.canCancel, true);
 
-  const cancelResponse = await fetch(new URL(`api/mach-action/${start.id}/cancel`, serverInfo.url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "secret" }),
-  });
+  const cancelResponse = await fetch(
+    new URL(`api/mach-action/${start.id}/cancel`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret" }),
+    },
+  );
   const canceled = await cancelResponse.json();
   assert.equal(canceled.status, "canceled");
   assert.equal(canceled.message, "Build canceled.");
@@ -4072,7 +5577,9 @@ test("interactive graph server cancels an active build session", async (t) => {
   releaseBuild();
   await waitForMachSession(statusUrl, (item) => item.status === "canceled");
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4087,14 +5594,16 @@ test("interactive graph server starts lint sessions from menu modes", async (t) 
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     runCommand: async (command) => {
       calls.push(command);
 
@@ -4142,10 +5651,13 @@ test("interactive graph server starts lint sessions from menu modes", async (t) 
 
   const allSession = await waitForMachSession(
     new URL(`api/lint/${allStart.id}?token=secret`, serverInfo.url),
-    (item) => item.status === "complete"
+    (item) => item.status === "complete",
   );
   assert.equal(allSession.message, "Lint all complete.");
-  assert.match(allSession.output, /\$ \.\.\/mach commlint build calendar chat docs mail tools --fix/);
+  assert.match(
+    allSession.output,
+    /\$ \.\.\/mach commlint build calendar chat docs mail tools --fix/,
+  );
 
   const outgoingResponse = await fetch(new URL("api/lint", serverInfo.url), {
     method: "POST",
@@ -4158,14 +5670,35 @@ test("interactive graph server starts lint sessions from menu modes", async (t) 
 
   const outgoingSession = await waitForMachSession(
     new URL(`api/lint/${outgoingStart.id}?token=secret`, serverInfo.url),
-    (item) => item.status === "complete"
+    (item) => item.status === "complete",
   );
   assert.equal(outgoingSession.message, "Lint changed files complete.");
-  assert.match(outgoingSession.output, /\$ \.\.\/mach commlint mail\/current\.js mail\/unstaged\.js mail\/staged\.js mail\/new\.js --fix/);
-  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint build calendar chat docs mail tools --fix"), true);
-  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "commlint mail/current.js mail/unstaged.js mail/staged.js mail/new.js --fix"), true);
+  assert.match(
+    outgoingSession.output,
+    /\$ \.\.\/mach commlint mail\/current\.js mail\/unstaged\.js mail\/staged\.js mail\/new\.js --fix/,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd.endsWith("mach") &&
+        call.args.join(" ") ===
+          "commlint build calendar chat docs mail tools --fix",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd.endsWith("mach") &&
+        call.args.join(" ") ===
+          "commlint mail/current.js mail/unstaged.js mail/staged.js mail/new.js --fix",
+    ),
+    true,
+  );
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4188,19 +5721,23 @@ test("interactive graph server runs test sessions and reports failed files", asy
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     runCommand: async (command) => {
       calls.push(command);
 
       if (command.cmd.endsWith("mach")) {
-        if (command.args.includes("mail/components/accountcreation/test/browser")) {
+        if (
+          command.args.includes("mail/components/accountcreation/test/browser")
+        ) {
           const error = new Error("mach test failed");
 
           error.stdout = failureOutput;
@@ -4246,8 +5783,14 @@ test("interactive graph server runs test sessions and reports failed files", asy
   const start = await startResponse.json();
   assert.equal(start.ok, true);
 
-  const statusUrl = new URL(`api/test/${start.id}?token=secret`, serverInfo.url);
-  const failedSession = await waitForMachSession(statusUrl, (item) => item.status === "error");
+  const statusUrl = new URL(
+    `api/test/${start.id}?token=secret`,
+    serverInfo.url,
+  );
+  const failedSession = await waitForMachSession(
+    statusUrl,
+    (item) => item.status === "error",
+  );
 
   assert.deepEqual(failedSession.targets, [
     "mail/components/accountcreation/test/browser",
@@ -4258,17 +5801,36 @@ test("interactive graph server runs test sessions and reports failed files", asy
   assert.equal(failedSession.summary.passed, 7);
   assert.equal(failedSession.summary.failureCount, 1);
   assert.equal(failedSession.canRerunFailures, true);
-  assert.equal(failedSession.failures[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(
+    failedSession.failures[0].path,
+    "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+  );
   assert.equal(failedSession.failures[0].lineNumber, 42);
-  assert.equal(failedSession.failures[0].vscodeUrl, "vscode://file//repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js:42");
-  assert.equal(failedSession.failedFiles[0].path, "mail/test/browser/folder-display/browser_messagePaneVisibility.js");
+  assert.equal(
+    failedSession.failures[0].vscodeUrl,
+    "vscode://file//repo/comm/mail/test/browser/folder-display/browser_messagePaneVisibility.js:42",
+  );
+  assert.equal(
+    failedSession.failedFiles[0].path,
+    "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+  );
   assert.equal(failedSession.failedFiles[0].failureCount, 1);
-  assert.equal(failedSession.output.includes("\x1b[31mFAIL mail/test/browser/folder-display/browser_messagePaneVisibility.js"), true);
+  assert.equal(
+    failedSession.output.includes(
+      "\x1b[31mFAIL mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+    ),
+    true,
+  );
   assert.equal(failedSession.output.includes("(B"), false);
-  assert.equal(calls.some((call) => (
-    call.cmd.endsWith("mach") &&
-    call.args.join(" ") === "test --headless mail/components/accountcreation/test/browser mail/test/browser/folder-display/browser_messagePaneVisibility.js"
-  )), true);
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd.endsWith("mach") &&
+        call.args.join(" ") ===
+          "test --headless mail/components/accountcreation/test/browser mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+    ),
+    true,
+  );
 
   const rerunResponse = await fetch(new URL("api/test", serverInfo.url), {
     method: "POST",
@@ -4283,19 +5845,26 @@ test("interactive graph server runs test sessions and reports failed files", asy
   const rerunStart = await rerunResponse.json();
   const rerunSession = await waitForMachSession(
     new URL(`api/test/${rerunStart.id}?token=secret`, serverInfo.url),
-    (item) => item.status === "complete"
+    (item) => item.status === "complete",
   );
 
   assert.deepEqual(rerunSession.targets, [
     "mail/test/browser/folder-display/browser_messagePaneVisibility.js",
   ]);
   assert.equal(rerunSession.summary.status, "passed");
-  assert.equal(calls.some((call) => (
-    call.cmd.endsWith("mach") &&
-    call.args.join(" ") === "test mail/test/browser/folder-display/browser_messagePaneVisibility.js"
-  )), true);
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd.endsWith("mach") &&
+        call.args.join(" ") ===
+          "test mail/test/browser/folder-display/browser_messagePaneVisibility.js",
+    ),
+    true,
+  );
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4319,21 +5888,24 @@ test("interactive graph server creates new patch branches and assigns bugs", asy
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "topic",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }, {
-      label: "firefox",
-      path: "/repo/firefox",
-      branch: "central-work",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "topic",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+      {
+        label: "firefox",
+        path: "/repo/firefox",
+        branch: "central-work",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     appConfig: {
       bugzilla: {
         user: "dev@example.com",
@@ -4365,7 +5937,10 @@ test("interactive graph server creates new patch branches and assigns bugs", asy
         return "";
       }
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return `${branches.get(command.cwd) || "main"}\n`;
       }
 
@@ -4416,26 +5991,44 @@ test("interactive graph server creates new patch branches and assigns bugs", asy
 
   const session = await waitForMachSession(
     new URL(`api/new-patch/${start.id}?token=secret`, serverInfo.url),
-    (item) => item.status === "complete"
+    (item) => item.status === "complete",
   );
   assert.equal(session.branch, "Bug-1234567_3");
   assert.equal(session.message, "Created Bug-1234567_3.");
   assert.equal(session.snapshots[0].branch, "Bug-1234567_3");
   assert.equal(session.snapshots[1].branch, "main");
-  assert.deepEqual(bugUpdates, [[
-    "1234567",
-    {
-      assigned_to: "dev@example.com",
-      status: "ASSIGNED",
-    },
-  ]]);
+  assert.deepEqual(bugUpdates, [
+    [
+      "1234567",
+      {
+        assigned_to: "dev@example.com",
+        status: "ASSIGNED",
+      },
+    ],
+  ]);
   assert.match(session.output, /Updating checkouts from origin\/main/);
   assert.match(session.output, /Created branch Bug-1234567_3\./);
   assert.match(session.output, /Assigning bug 1234567 to dev@example\.com\./);
-  assert.equal(calls.some((call) => call.cwd === "/repo/comm" && call.args.join(" ") === "switch -c Bug-1234567_3"), true);
-  assert.equal(calls.some((call) => call.cwd === "/repo/firefox" && call.args.join(" ") === "pull --ff-only origin main"), true);
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cwd === "/repo/comm" &&
+        call.args.join(" ") === "switch -c Bug-1234567_3",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cwd === "/repo/firefox" &&
+        call.args.join(" ") === "pull --ff-only origin main",
+    ),
+    true,
+  );
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4451,14 +6044,16 @@ test("interactive graph server pulls patches through browser prompts", async (t)
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     runCommand: async (command) => {
       calls.push(command);
 
@@ -4470,7 +6065,10 @@ test("interactive graph server pulls patches through browser prompts", async (t)
         throw error;
       }
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return `${branch}\n`;
       }
 
@@ -4537,33 +6135,75 @@ test("interactive graph server pulls patches through browser prompts", async (t)
   assert.equal(start.ok, true);
   assert.equal(start.revision, "D123456");
 
-  const statusUrl = new URL(`api/patch/${start.id}?token=secret`, serverInfo.url);
-  let session = await waitForMachSession(statusUrl, (item) => item.status === "prompt");
-  assert.equal(session.prompt.message, "Patch failed. Roll back to checkpoint? [y/n]:");
-  assert.match(session.output, /\$ moz-phab patch D123456 --apply-to here --diff-id 42 --name Bug-1234567 --no-commit --include-abandoned --safe-mode --force-vcs/);
+  const statusUrl = new URL(
+    `api/patch/${start.id}?token=secret`,
+    serverInfo.url,
+  );
+  let session = await waitForMachSession(
+    statusUrl,
+    (item) => item.status === "prompt",
+  );
+  assert.equal(
+    session.prompt.message,
+    "Patch failed. Roll back to checkpoint? [y/n]:",
+  );
+  assert.match(
+    session.output,
+    /\$ moz-phab patch D123456 --apply-to here --diff-id 42 --name Bug-1234567 --no-commit --include-abandoned --safe-mode --force-vcs/,
+  );
   assert.doesNotMatch(session.output, /--yes/);
-  assert.equal(calls.some((call) => call.cmd === "git" && call.args.join(" ") === "switch -c Bug-1234567"), true);
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd === "git" && call.args.join(" ") === "switch -c Bug-1234567",
+    ),
+    true,
+  );
 
-  const answerResponse = await fetch(new URL(`api/patch/${start.id}/answer`, serverInfo.url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      token: "secret",
-      promptId: session.prompt.id,
-      answer: true,
-    }),
-  });
+  const answerResponse = await fetch(
+    new URL(`api/patch/${start.id}/answer`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        promptId: session.prompt.id,
+        answer: true,
+      }),
+    },
+  );
   session = await answerResponse.json();
   assert.equal(session.status, "running");
 
-  session = await waitForMachSession(statusUrl, (item) => item.status === "error");
+  session = await waitForMachSession(
+    statusUrl,
+    (item) => item.status === "error",
+  );
   assert.equal(session.message, "patch failed");
   assert.match(session.output, /Rolled back to abc123abc123\./);
-  assert.equal(session.snapshot.commits[0].hash, "abc123abc123abc123abc123abc123abc123abcd");
-  assert.equal(calls.some((call) => call.cmd === "git" && call.args.join(" ") === "reset --hard abc123abc123abc123abc123abc123abc123abcd"), true);
-  assert.equal(calls.some((call) => call.cmd === "git" && call.args.join(" ") === "clean -fd"), true);
+  assert.equal(
+    session.snapshot.commits[0].hash,
+    "abc123abc123abc123abc123abc123abc123abcd",
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd === "git" &&
+        call.args.join(" ") ===
+          "reset --hard abc123abc123abc123abc123abc123abc123abcd",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) => call.cmd === "git" && call.args.join(" ") === "clean -fd",
+    ),
+    true,
+  );
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4580,14 +6220,16 @@ test("interactive graph server starts a try session and refreshes try links", as
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     runCommand: async (command) => {
       calls.push(command);
 
@@ -4595,7 +6237,10 @@ test("interactive graph server starts a try session and refreshes try links", as
         return "Created try push: https://treeherder.mozilla.org/jobs?repo=try&revision=server\n";
       }
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "main\n";
       }
 
@@ -4653,14 +6298,32 @@ test("interactive graph server starts a try session and refreshes try links", as
 
   const session = await waitForMachSession(
     new URL(`api/try/${start.id}?token=secret`, serverInfo.url),
-    (item) => item.status === "complete"
+    (item) => item.status === "complete",
   );
-  assert.equal(session.tryRun.url, "https://treeherder.mozilla.org/jobs?repo=try&revision=server");
-  assert.equal(session.snapshot.commits[0].tryRuns[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=server");
-  assert.match(session.output, /\$ \.\.\/mach try auto --tasks-regex browser --artifact/);
-  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.args.join(" ") === "try auto --tasks-regex browser --artifact"), true);
+  assert.equal(
+    session.tryRun.url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=server",
+  );
+  assert.equal(
+    session.snapshot.commits[0].tryRuns[0].url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=server",
+  );
+  assert.match(
+    session.output,
+    /\$ \.\.\/mach try auto --tasks-regex browser --artifact/,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd.endsWith("mach") &&
+        call.args.join(" ") === "try auto --tasks-regex browser --artifact",
+    ),
+    true,
+  );
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4676,36 +6339,44 @@ test("interactive graph server lands patches through browser prompts", async (t)
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
-    getBugs: async () => [{
-      id: "123456",
-      summary: "Fix the landing flow",
-      target_milestone: "128 Branch",
-    }],
-    getAttachments: async () => [{
-      content_type: "text/x-phabricator-request",
-      file_name: "D987654.diff",
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    getBugs: async () => [
+      {
+        id: "123456",
+        summary: "Fix the landing flow",
+        target_milestone: "128 Branch",
+      },
+    ],
+    getAttachments: async () => [
+      {
+        content_type: "text/x-phabricator-request",
+        file_name: "D987654.diff",
+      },
+    ],
     phab: async ({ route }) => {
       if (route === "differential.query") {
         return {
-          result: [{
-            id: 987654,
-            phid: "PHID-DREV-landing",
-            uri: "https://phabricator.services.mozilla.com/D987654",
-            statusName: "Accepted",
-            title: "Bug 123456 - Fix the landing flow. r=#reviewers",
-            reviewers: {
-              "PHID-USER-reviewer": true,
+          result: [
+            {
+              id: 987654,
+              phid: "PHID-DREV-landing",
+              uri: "https://phabricator.services.mozilla.com/D987654",
+              statusName: "Accepted",
+              title: "Bug 123456 - Fix the landing flow. r=#reviewers",
+              reviewers: {
+                "PHID-USER-reviewer": true,
+              },
             },
-          }],
+          ],
         };
       }
 
@@ -4716,11 +6387,13 @@ test("interactive graph server lands patches through browser prompts", async (t)
               {
                 type: "comment",
                 dateCreated: 1700000000,
-                comments: [{
-                  content: {
-                    raw: "Treeherder https://treeherder.mozilla.org/jobs?repo=try&revision=landing",
+                comments: [
+                  {
+                    content: {
+                      raw: "Treeherder https://treeherder.mozilla.org/jobs?repo=try&revision=landing",
+                    },
                   },
-                }],
+                ],
               },
               {
                 type: "update",
@@ -4734,9 +6407,11 @@ test("interactive graph server lands patches through browser prompts", async (t)
 
       if (route === "user.query") {
         return {
-          result: [{
-            userName: "alice",
-          }],
+          result: [
+            {
+              userName: "alice",
+            },
+          ],
         };
       }
 
@@ -4757,11 +6432,19 @@ test("interactive graph server lands patches through browser prompts", async (t)
         return "";
       }
 
-      if (command.args[0] === "fetch" || command.args[0] === "switch" || command.args[0] === "pull" || command.args[0] === "update-ref") {
+      if (
+        command.args[0] === "fetch" ||
+        command.args[0] === "switch" ||
+        command.args[0] === "pull" ||
+        command.args[0] === "update-ref"
+      ) {
         return "";
       }
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "main\n";
       }
 
@@ -4799,15 +6482,18 @@ test("interactive graph server lands patches through browser prompts", async (t)
   });
 
   async function answer(session, value) {
-    const response = await fetch(new URL(`api/land/${session.id}/answer`, serverInfo.url), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        token: "secret",
-        promptId: session.prompt.id,
-        answer: value,
-      }),
-    });
+    const response = await fetch(
+      new URL(`api/land/${session.id}/answer`, serverInfo.url),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          token: "secret",
+          promptId: session.prompt.id,
+          answer: value,
+        }),
+      },
+    );
 
     return response.json();
   }
@@ -4827,49 +6513,108 @@ test("interactive graph server lands patches through browser prompts", async (t)
   assert.equal(start.ok, true);
   assert.equal(start.status, "running");
 
-  const statusUrl = new URL(`api/land/${start.id}?token=secret`, serverInfo.url);
-  let session = await waitForLandSession(statusUrl, (item) => item.prompt?.kind === "patch-select");
-  const patchChoice = session.prompt.choices.find((choice) => choice.id === "patch:123456:987654");
+  const statusUrl = new URL(
+    `api/land/${start.id}?token=secret`,
+    serverInfo.url,
+  );
+  let session = await waitForLandSession(
+    statusUrl,
+    (item) => item.prompt?.kind === "patch-select",
+  );
+  const patchChoice = session.prompt.choices.find(
+    (choice) => choice.id === "patch:123456:987654",
+  );
 
   assert.equal(Boolean(patchChoice), true);
   assert.equal(patchChoice.mergeAnswer, "merge:123456:987654");
-  assert.equal(patchChoice.links[0].url, "https://bugzilla.mozilla.org/show_bug.cgi?id=123456");
-  assert.equal(patchChoice.links[1].url, "https://phabricator.services.mozilla.com/D987654");
+  assert.equal(
+    patchChoice.links[0].url,
+    "https://bugzilla.mozilla.org/show_bug.cgi?id=123456",
+  );
+  assert.equal(
+    patchChoice.links[1].url,
+    "https://phabricator.services.mozilla.com/D987654",
+  );
   assert.equal(patchChoice.tryStatus.state, "stale");
-  assert.equal(patchChoice.tryStatus.latestTryRun.url, "https://treeherder.mozilla.org/jobs?repo=try&revision=landing");
-  assert.equal(session.prompt.actions.some((action) => action.id === "continue"), true);
-  assert.equal(session.prompt.actions.some((action) => action.id === "abort"), true);
-  assert.equal(session.prompt.choices.some((choice) => choice.id === "continue"), false);
-  assert.equal(session.prompt.choices.some((choice) => choice.id === "abort"), false);
+  assert.equal(
+    patchChoice.tryStatus.latestTryRun.url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=landing",
+  );
+  assert.equal(
+    session.prompt.actions.some((action) => action.id === "continue"),
+    true,
+  );
+  assert.equal(
+    session.prompt.actions.some((action) => action.id === "abort"),
+    true,
+  );
+  assert.equal(
+    session.prompt.choices.some((choice) => choice.id === "continue"),
+    false,
+  );
+  assert.equal(
+    session.prompt.choices.some((choice) => choice.id === "abort"),
+    false,
+  );
 
   session = await answer(session, "merge:123456:987654");
-  session = await waitForLandSession(statusUrl, (item) => item.prompt?.message === "Do you want to run lint?");
-  assert.equal(calls.some((call) => call.cmd === "moz-phab" && call.args.join(" ") === "patch D987654 --skip-dependencies --apply-to here"), true);
-  assert.equal(calls.some((call) => (
-    call.args[0] === "commit" &&
-    call.args[1] === "--amend" &&
-    call.args.some((arg) => String(arg).includes("Bug 123456 - Fix the landing flow. r=alice"))
-  )), true);
+  session = await waitForLandSession(
+    statusUrl,
+    (item) => item.prompt?.message === "Do you want to run lint?",
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd === "moz-phab" &&
+        call.args.join(" ") ===
+          "patch D987654 --skip-dependencies --apply-to here",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.args[0] === "commit" &&
+        call.args[1] === "--amend" &&
+        call.args.some((arg) =>
+          String(arg).includes("Bug 123456 - Fix the landing flow. r=alice"),
+        ),
+    ),
+    true,
+  );
 
   session = await answer(session, false);
-  session = await waitForLandSession(statusUrl, (item) => item.prompt?.message === "Do you want to run build?");
+  session = await waitForLandSession(
+    statusUrl,
+    (item) => item.prompt?.message === "Do you want to run build?",
+  );
   session = await answer(session, false);
-  session = await waitForLandSession(statusUrl, (item) => item.prompt?.kind === "approval");
+  session = await waitForLandSession(
+    statusUrl,
+    (item) => item.prompt?.kind === "approval",
+  );
   assert.match(session.prompt.detail, /def456 Bug 123456/);
 
   session = await answer(session, "approve");
-  session = await waitForLandSession(statusUrl, (item) => item.status === "complete");
+  session = await waitForLandSession(
+    statusUrl,
+    (item) => item.status === "complete",
+  );
   assert.equal(session.message, "Landing complete.");
   assert.equal(session.links[0].url, "https://lando.mozilla.org/D987654");
   assert.equal(session.snapshots[0].commits[0].hash, "def456");
-  assert.deepEqual(pushes, [{
-    landoRepo: "test-lando",
-    relbranch: undefined,
-    localRepo: "/repo/comm",
-    yes: true,
-  }]);
+  assert.deepEqual(pushes, [
+    {
+      landoRepo: "test-lando",
+      relbranch: undefined,
+      localRepo: "/repo/comm",
+      yes: true,
+    },
+  ]);
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4883,25 +6628,35 @@ test("interactive graph server cancels landing sessions waiting on browser promp
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     getBugs: async () => [],
     runCommand: async (command) => {
       if (command.args[0] === "status") {
         return "";
       }
 
-      if (command.args[0] === "fetch" || command.args[0] === "switch" || command.args[0] === "pull" || command.args[0] === "update-ref") {
+      if (
+        command.args[0] === "fetch" ||
+        command.args[0] === "switch" ||
+        command.args[0] === "pull" ||
+        command.args[0] === "update-ref"
+      ) {
         return "";
       }
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "main\n";
       }
 
@@ -4927,19 +6682,27 @@ test("interactive graph server cancels landing sessions waiting on browser promp
     }),
   });
   const start = await startResponse.json();
-  const statusUrl = new URL(`api/land/${start.id}?token=secret`, serverInfo.url);
+  const statusUrl = new URL(
+    `api/land/${start.id}?token=secret`,
+    serverInfo.url,
+  );
   const waiting = await waitForLandSession(
     statusUrl,
-    (item) => item.prompt?.message === "No bugs are marked for checkin. Bump build/dummy instead?"
+    (item) =>
+      item.prompt?.message ===
+      "No bugs are marked for checkin. Bump build/dummy instead?",
   );
 
   assert.equal(waiting.status, "prompt");
 
-  const cancelResponse = await fetch(new URL(`api/land/${start.id}/cancel`, serverInfo.url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "secret" }),
-  });
+  const cancelResponse = await fetch(
+    new URL(`api/land/${start.id}/cancel`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret" }),
+    },
+  );
   const canceled = await cancelResponse.json();
 
   assert.equal(canceled.status, "canceled");
@@ -4947,16 +6710,276 @@ test("interactive graph server cancels landing sessions waiting on browser promp
   assert.equal(canceled.prompt, null);
   assert.match(canceled.output, /Landing canceled\./);
 
-  const afterCancel = await waitForLandSession(statusUrl, (item) => item.status === "canceled");
+  const afterCancel = await waitForLandSession(
+    statusUrl,
+    (item) => item.status === "canceled",
+  );
   assert.equal(afterCancel.status, "canceled");
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ token: "secret" }),
   });
   await closePromise;
+});
+
+test("interactive graph server cools down rate-limited reviewer search routes", async (t) => {
+  const phabCalls = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "Bug-1234567",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    phab: async (request) => {
+      phabCalls.push([request.route, request.params.constraints.query]);
+
+      if (request.route === "user.search") {
+        throw new Error("Phabricator user.search failed (429): {}");
+      }
+
+      return {
+        result: {
+          data: [
+            {
+              phid: `PHID-PROJ-${request.params.constraints.query}`,
+              fields: {
+                slug: `${request.params.constraints.query}-reviewers`,
+                name: `${request.params.constraints.query} Reviewers`,
+              },
+            },
+          ],
+        },
+      };
+    },
+  });
+
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const firstResponse = await fetch(
+    new URL("api/commit/reviewers?query=mail&token=secret", serverInfo.url),
+  );
+  const first = await firstResponse.json();
+  const secondResponse = await fetch(
+    new URL("api/commit/reviewers?query=calendar&token=secret", serverInfo.url),
+  );
+  const second = await secondResponse.json();
+  const groupUrl = new URL("api/commit/reviewers", serverInfo.url);
+  groupUrl.searchParams.set("query", "#mail");
+  groupUrl.searchParams.set("token", "secret");
+  const groupResponse = await fetch(groupUrl);
+  const group = await groupResponse.json();
+
+  assert.equal(firstResponse.ok, true);
+  assert.equal(secondResponse.ok, true);
+  assert.equal(groupResponse.ok, true);
+  assert.equal(first.rateLimited, true);
+  assert.equal(second.rateLimited, true);
+  assert.equal(group.rateLimited, false);
+  assert.equal(first.rateLimitedRoute, "user.search");
+  assert.equal(second.rateLimitedRoute, "user.search");
+  assert.equal(first.retryAfterMs > 0, true);
+  assert.deepEqual(
+    first.reviewers.map((reviewer) => reviewer.value),
+    [],
+  );
+  assert.deepEqual(
+    second.reviewers.map((reviewer) => reviewer.value),
+    [],
+  );
+  assert.deepEqual(
+    group.reviewers.map((reviewer) => reviewer.value),
+    ["#mail-reviewers"],
+  );
+  assert.deepEqual(phabCalls, [
+    ["user.search", "mail"],
+    ["project.search", "mail"],
+  ]);
+});
+
+test("interactive graph server creates commits with Phabricator reviewer suggestions", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-commit-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const calls = [];
+  const phabCalls = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "Bug-1234567",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    phab: async (request) => {
+      phabCalls.push(request);
+
+      if (request.route === "user.search") {
+        return {
+          result: {
+            data: [
+              {
+                phid: "PHID-USER-aleca",
+                fields: {
+                  username: "aleca",
+                  realName: "Alice Example",
+                },
+              },
+            ],
+          },
+        };
+      }
+
+      assert.equal(request.route, "project.search");
+      return {
+        result: {
+          data: [
+            {
+              phid: "PHID-PROJ-mail",
+              fields: {
+                slug: "mail-reviewers",
+                name: "Mail Reviewers",
+              },
+            },
+          ],
+        },
+      };
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
+        return "Bug-1234567\n";
+      }
+
+      if (command.args[0] === "add") {
+        return "";
+      }
+
+      if (command.args[0] === "commit") {
+        assert.deepEqual(command.args, [
+          "commit",
+          "-m",
+          "Bug 1234567 - Fix folder keyboard flow. r=aleca!,#mail-reviewers",
+        ]);
+        return "[Bug-1234567 def456] Bug 1234567 - Fix folder keyboard flow. r=aleca!,#mail-reviewers\n";
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+        return storePath;
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "def4567890abcdef\n";
+      }
+
+      if (command.args[0] === "log") {
+        return "\x1edef4567890abcdef\x1f\x1fHEAD -> Bug-1234567\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 1234567 - Fix folder keyboard flow\n";
+      }
+
+      if (command.args[0] === "diff" || command.args[0] === "ls-files") {
+        return "";
+      }
+
+      return "";
+    },
+  });
+  t.after(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const metadataResponse = await fetch(
+    new URL("api/commit/metadata?token=secret", serverInfo.url),
+  );
+  const metadata = await metadataResponse.json();
+
+  assert.equal(metadata.ok, true);
+  assert.equal(metadata.metadata.bugRequired, false);
+  assert.equal(metadata.metadata.bugId, "1234567");
+
+  const userReviewerResponse = await fetch(
+    new URL("api/commit/reviewers?query=alec&token=secret", serverInfo.url),
+  );
+  const userReviewers = await userReviewerResponse.json();
+  const groupReviewerUrl = new URL("api/commit/reviewers", serverInfo.url);
+  groupReviewerUrl.searchParams.set("query", "#mail");
+  groupReviewerUrl.searchParams.set("token", "secret");
+  const groupReviewerResponse = await fetch(groupReviewerUrl);
+  const groupReviewers = await groupReviewerResponse.json();
+
+  assert.equal(userReviewerResponse.ok, true);
+  assert.equal(groupReviewerResponse.ok, true);
+  assert.equal(userReviewers.rateLimited, false);
+  assert.equal(groupReviewers.rateLimited, false);
+  assert.deepEqual(
+    userReviewers.reviewers.map((reviewer) => reviewer.value),
+    ["aleca"],
+  );
+  assert.deepEqual(
+    groupReviewers.reviewers.map((reviewer) => reviewer.value),
+    ["#mail-reviewers"],
+  );
+  assert.deepEqual(
+    phabCalls.map((call) => [call.route, call.params.constraints]),
+    [
+      ["user.search", { query: "alec" }],
+      ["project.search", { query: "mail" }],
+    ],
+  );
+
+  const commitResponse = await fetch(new URL("api/commit", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      options: {
+        summary: "Fix folder keyboard flow",
+        reviewers: [{ value: "aleca", blocking: true }, "#mail-reviewers"],
+      },
+      snapshotLimits: [1],
+    }),
+  });
+  const commit = await commitResponse.json();
+
+  assert.equal(commit.ok, true);
+  assert.equal(commit.hash, "def4567890abcdef");
+  assert.equal(
+    commit.commitMessage,
+    "Bug 1234567 - Fix folder keyboard flow. r=aleca!,#mail-reviewers",
+  );
+  assert.equal(commit.snapshots[0].branch, "Bug-1234567");
+  assert.equal(commit.snapshots[0].commits[0].hash, "def4567890abcdef");
+  assert.deepEqual(
+    calls.filter((call) => call.args[0] === "add").map((call) => call.args),
+    [["add", "-A"]],
+  );
 });
 
 test("interactive graph server submits current commit through browser prompts", async (t) => {
@@ -4968,14 +6991,16 @@ test("interactive graph server submits current commit through browser prompts", 
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     postComment: async (comment) => {
       comments.push(comment);
     },
@@ -4994,7 +7019,10 @@ test("interactive graph server submits current commit through browser prompts", 
         return "";
       }
 
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
         return "main\n";
       }
 
@@ -5035,25 +7063,46 @@ test("interactive graph server submits current commit through browser prompts", 
   const startResponse = await fetch(new URL("api/submit", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "secret", graphIndex: 0, hash: "abc123", snapshotLimit: 1 }),
+    body: JSON.stringify({
+      token: "secret",
+      graphIndex: 0,
+      hash: "abc123",
+      snapshotLimit: 1,
+    }),
   });
   const start = await startResponse.json();
   assert.equal(start.ok, true);
 
-  const sessionUrl = new URL(`api/submit/${start.id}?token=secret`, serverInfo.url);
-  let session = await waitForSubmitSession(sessionUrl, (item) => item.status === "prompt");
+  const sessionUrl = new URL(
+    `api/submit/${start.id}?token=secret`,
+    serverInfo.url,
+  );
+  let session = await waitForSubmitSession(
+    sessionUrl,
+    (item) => item.status === "prompt",
+  );
   assert.equal(session.prompt.message, "Do you want to run lint? [y/n]:");
 
   for (const answer of [false, false, true, true]) {
-    const answerResponse = await fetch(new URL(`api/submit/${start.id}/answer`, serverInfo.url), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: "secret", promptId: session.prompt.id, answer }),
-    });
+    const answerResponse = await fetch(
+      new URL(`api/submit/${start.id}/answer`, serverInfo.url),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          token: "secret",
+          promptId: session.prompt.id,
+          answer,
+        }),
+      },
+    );
     assert.equal(answerResponse.ok, true);
     session = await waitForSubmitSession(
       sessionUrl,
-      (item) => item.status === "prompt" || item.status === "complete" || item.status === "error"
+      (item) =>
+        item.status === "prompt" ||
+        item.status === "complete" ||
+        item.status === "error",
     );
 
     if (session.status === "complete") {
@@ -5065,9 +7114,15 @@ test("interactive graph server submits current commit through browser prompts", 
 
   assert.equal(session.status, "complete");
   assert.match(session.output, /\$ moz-phab submit/);
-  assert.match(session.output, /Submitted https:\/\/phabricator\.services\.mozilla\.com\/D123456/);
+  assert.match(
+    session.output,
+    /Submitted https:\/\/phabricator\.services\.mozilla\.com\/D123456/,
+  );
   assert.match(session.output, /\$ \.\.\/mach try auto --artifact/);
-  assert.match(session.output, /Created try push: https:\/\/treeherder\.mozilla\.org\/jobs\?repo=try&revision=abc/);
+  assert.match(
+    session.output,
+    /Created try push: https:\/\/treeherder\.mozilla\.org\/jobs\?repo=try&revision=abc/,
+  );
   assert.deepEqual(session.links, [
     {
       label: "D123456",
@@ -5080,16 +7135,37 @@ test("interactive graph server submits current commit through browser prompts", 
   ]);
   assert.equal(session.snapshot.branch, "main");
   assert.equal(session.snapshot.commits[0].hash, "abc123");
-  assert.equal(session.snapshot.commits[0].tryRuns[0].url, "https://treeherder.mozilla.org/jobs?repo=try&revision=abc");
-  assert.deepEqual(comments, [{
-    message: "try: https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
-    resolve: true,
-    id: "123456",
-  }]);
-  assert.equal(calls.some((call) => call.cmd === "moz-phab" && call.cwd === "/repo/comm" && call.capture), true);
-  assert.equal(calls.some((call) => call.cmd.endsWith("mach") && call.cwd === "/repo/comm" && call.args.join(" ") === "try auto --artifact"), true);
+  assert.equal(
+    session.snapshot.commits[0].tryRuns[0].url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
+  );
+  assert.deepEqual(comments, [
+    {
+      message: "try: https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
+      resolve: true,
+      id: "123456",
+    },
+  ]);
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd === "moz-phab" && call.cwd === "/repo/comm" && call.capture,
+    ),
+    true,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd.endsWith("mach") &&
+        call.cwd === "/repo/comm" &&
+        call.args.join(" ") === "try auto --artifact",
+    ),
+    true,
+  );
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   await fetch(new URL("api/close", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -5104,14 +7180,16 @@ test("interactive graph server closes when page heartbeats stop", async (t) => {
     token: "secret",
     heartbeatIntervalMs: 10,
     heartbeatTimeoutMs: 30,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     runCommand: async () => "",
   });
   t.after(() => {
@@ -5125,7 +7203,10 @@ test("interactive graph server closes when page heartbeats stop", async (t) => {
 
   await new Promise((resolve) => serverInfo.server.once("close", resolve));
   assert.equal(serverInfo.server.listening, false);
-  assert.equal(serverInfo.server.closeReason, "browser heartbeat timed out after 1 second");
+  assert.equal(
+    serverInfo.server.closeReason,
+    "browser heartbeat timed out after 1 second",
+  );
 });
 
 test("interactive graph server survives refreshes and multiple browser clients", async (t) => {
@@ -5135,14 +7216,16 @@ test("interactive graph server survives refreshes and multiple browser clients",
     heartbeatIntervalMs: 10,
     heartbeatTimeoutMs: 500,
     clientDisconnectGraceMs: 80,
-    graphs: [{
-      label: "comm",
-      path: "/repo/comm",
-      branch: "main",
-      commits: [],
-      commitCount: 0,
-      diffs: {},
-    }],
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
     runCommand: async () => "",
   });
   t.after(() => {
@@ -5182,12 +7265,17 @@ test("interactive graph server survives refreshes and multiple browser clients",
 
   assert.deepEqual(await close("tab-two"), { ok: true, remainingClients: 0 });
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual(await ping("tab-three"), { ok: true, clientId: "tab-three" });
+  assert.deepEqual(await ping("tab-three"), {
+    ok: true,
+    clientId: "tab-three",
+  });
 
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.equal(serverInfo.server.listening, true);
 
-  const closePromise = new Promise((resolve) => serverInfo.server.once("close", resolve));
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
   assert.deepEqual(await close("tab-three"), { ok: true, remainingClients: 0 });
   await closePromise;
 
@@ -5208,7 +7296,9 @@ test("waitForInteractiveServerClose routes signals through the interactive shutd
     queueMicrotask(() => server.emit("close"));
   };
   server.close = () => {
-    throw new Error("waitForInteractiveServerClose should use server.shutdown when available");
+    throw new Error(
+      "waitForInteractiveServerClose should use server.shutdown when available",
+    );
   };
 
   const wait = waitForInteractiveServerClose(server, signals);
