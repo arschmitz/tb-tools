@@ -19,6 +19,12 @@ import {
 } from "./actions.mjs";
 
 const BUGZILLA_BUG_URL = "https://bugzilla.mozilla.org/show_bug.cgi?id=";
+const RUST_UPDATE_AUTHOR_PHID = "PHID-USER-3zyedh2kyrzsg5v6bc4p";
+const RUST_UPDATE_BUG_ID = "1878375";
+const RUST_PATCH_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+const LANDING_PATCH_DISCOVERY_EXCLUDED_BUG_IDS = new Set([
+  RUST_UPDATE_BUG_ID,
+]);
 const REBASE_COMMENT = "Conflicts found while landing. Please Rebase.";
 const TREEHERDER_JOBS_URL_PATTERN = /https?:\/\/treeherder\.mozilla\.org\/jobs[^\s<>"']*/gi;
 const CHANGE_TRANSACTION_TYPES = new Set([
@@ -28,6 +34,7 @@ const CHANGE_TRANSACTION_TYPES = new Set([
   "revision.update",
   "update",
 ]);
+let rustPatchQueryCooldownUntil = 0;
 
 function stripAnsi(value = "") {
   const escapeCharacter = String.fromCharCode(27);
@@ -60,6 +67,24 @@ function createLandingCanceledError() {
 
 function cleanTreeherderUrl(url = "") {
   return String(url).replace(/[),.;]+$/g, "");
+}
+
+function isPhabricatorRateLimitError(error) {
+  return (
+    error?.status === 429 ||
+    error?.statusCode === 429 ||
+    /\b429\b|rate.?limit/i.test(error?.message || "")
+  );
+}
+
+function getCooldownSeconds(cooldownUntil) {
+  return Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
+}
+
+function normalizeRevisionId(value = "") {
+  const match = String(value).trim().match(/^D?([0-9]+)$/i);
+
+  return match ? match[1] : "";
 }
 
 export function getTreeherderUrlsFromText(value = "") {
@@ -517,13 +542,24 @@ async function getLandingBugs({
   getBugs = defaultGetBugs,
   getAttachments = defaultGetAttachments,
   phab = defaultPhab,
+  excludedBugIds = LANDING_PATCH_DISCOVERY_EXCLUDED_BUG_IDS,
 }) {
   setLandingRunning(session, "Fetching bugs marked for checkin...");
   appendLandingOutput(session, "Fetching bugs marked for checkin...\n");
 
   const bugs = await getBugs();
+  const excludedIds = new Set(Array.from(excludedBugIds).map(String));
 
   for (const bug of bugs) {
+    if (excludedIds.has(String(bug.id))) {
+      appendLandingOutput(
+        session,
+        `Skipping bug ${bug.id}; rust update patches are handled by the rust dependency preflight.\n`,
+      );
+      bug.patches = [];
+      continue;
+    }
+
     const attachments = await getAttachments(bug.id);
     const phabIds = getPhabricatorIdsFromAttachments(attachments);
     const patches = phabIds.length
@@ -559,6 +595,7 @@ async function getLandingBugs({
 async function createLandingCheckpoint({
   graph,
   session,
+  ref = "refs/tb-tools/landing-start",
   runCommand = run,
 }) {
   const [branch, commit] = await Promise.all([
@@ -578,7 +615,7 @@ async function createLandingCheckpoint({
   const checkpoint = {
     branch: branch.trim(),
     commit: commit.trim(),
-    ref: "refs/tb-tools/landing-start",
+    ref,
   };
 
   await runLandingGit({
@@ -589,6 +626,162 @@ async function createLandingCheckpoint({
   });
 
   return checkpoint;
+}
+
+async function checkLandingRustDependencies(session) {
+  setLandingRunning(session, "Checking Rust dependencies...");
+  appendLandingOutput(session, "Checking Rust dependencies...\n");
+
+  try {
+    await runGraphMach({
+      graph: session.graph,
+      args: ["tb-rust", "check-upstream"],
+      session,
+      runCommand: session.runCommand,
+    });
+    appendLandingOutput(session, "Rust dependencies are up to date.\n");
+    return true;
+  } catch (error) {
+    appendLandingOutput(session, `Rust dependency check failed: ${error?.message || error}\n`);
+    return false;
+  }
+}
+
+async function getLandingRustUpdatePatch(session) {
+  setLandingRunning(session, "Looking for rust update patches...");
+  appendLandingOutput(session, "Looking for rust update patches...\n");
+
+  if (rustPatchQueryCooldownUntil > Date.now()) {
+    appendLandingOutput(
+      session,
+      `Skipping automatic rust patch lookup because Phabricator recently rate limited it. Try again in about ${getCooldownSeconds(rustPatchQueryCooldownUntil)} seconds.\n`,
+    );
+    return null;
+  }
+
+  let response;
+
+  try {
+    response = await session.phab({
+      route: "differential.query",
+      params: {
+        authors: [RUST_UPDATE_AUTHOR_PHID],
+        status: "status-open",
+      },
+    });
+  } catch (error) {
+    if (!isPhabricatorRateLimitError(error)) {
+      throw error;
+    }
+
+    rustPatchQueryCooldownUntil = Date.now() + RUST_PATCH_RATE_LIMIT_COOLDOWN_MS;
+    appendLandingOutput(
+      session,
+      `Automatic rust patch lookup was rate limited by Phabricator. Try again in about ${getCooldownSeconds(rustPatchQueryCooldownUntil)} seconds.\n`,
+    );
+    return null;
+  }
+
+  return (response.result || [])[0] || null;
+}
+
+async function getManualLandingRustUpdatePatch(session) {
+  const revision = normalizeRevisionId(await askLandingInput(
+    session,
+    "Enter a rust update Phabricator revision to apply, or leave blank to abort.",
+  ));
+
+  if (!revision) {
+    return null;
+  }
+
+  return { id: revision };
+}
+
+async function refreshLandingCommGraph(session, message) {
+  setLandingRunning(session, message);
+  appendLandingOutput(session, `${message}\n`);
+
+  const updateResult = await runGraphRepositoryUpdate({
+    graphs: [session.graph],
+    mode: GRAPH_UPDATE_MODE_UPDATE,
+    runCommand: session.runCommand,
+  });
+
+  appendLandingOutput(session, `${updateResult.message}\n`);
+}
+
+async function applyLandingRustUpdatePatch(session, patch) {
+  setLandingRunning(session, `Applying rust update patch D${patch.id}...`);
+  appendLandingOutput(session, `Applying rust update patch D${patch.id}...\n`);
+
+  await runLandingCommand({
+    command: {
+      cmd: "moz-phab",
+      args: ["patch", `D${patch.id}`, "--skip-dependencies", "--apply-to", "here"],
+      cwd: session.graph.path,
+      capture: true,
+      silent: true,
+    },
+    session,
+    runCommand: session.runCommand,
+  });
+  appendLandingOutput(session, `Applied rust update patch D${patch.id}.\n`);
+}
+
+async function runLandingRustPreflight(session) {
+  if (await checkLandingRustDependencies(session)) {
+    return;
+  }
+
+  await refreshLandingCommGraph(
+    session,
+    "Refreshing comm before checking rust update patches...",
+  );
+
+  if (await checkLandingRustDependencies(session)) {
+    return;
+  }
+
+  const patch = await getLandingRustUpdatePatch(session);
+  const selectedPatch = patch || await getManualLandingRustUpdatePatch(session);
+
+  if (!selectedPatch) {
+    throw new Error("Rust updates required and not found.");
+  }
+
+  await refreshLandingCommGraph(
+    session,
+    "Refreshing comm before applying rust update patch...",
+  );
+
+  if (await checkLandingRustDependencies(session)) {
+    return;
+  }
+
+  const rustCheckpoint = await createLandingCheckpoint({
+    graph: session.graph,
+    session,
+    ref: "refs/tb-tools/rust-checkpoint",
+    runCommand: session.runCommand,
+  });
+
+  try {
+    await applyLandingRustUpdatePatch(session, selectedPatch);
+
+    if (!await checkLandingRustDependencies(session)) {
+      throw new Error(`Rust update patch D${selectedPatch.id} did not resolve rust dependencies.`);
+    }
+  } catch (error) {
+    await restoreLandingCheckpoint({
+      graph: session.graph,
+      checkpoint: rustCheckpoint,
+      session,
+      clean: true,
+      runCommand: session.runCommand,
+    });
+    throw error;
+  }
 }
 
 async function restoreLandingCheckpoint({
@@ -1088,6 +1281,7 @@ async function runGraphLandingFlow(session) {
   });
 
   appendLandingOutput(session, `${updateResult.message}\n`);
+  await runLandingRustPreflight(session);
   session.checkpoint = await createLandingCheckpoint({
     graph: session.graph,
     session,

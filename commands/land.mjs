@@ -15,6 +15,13 @@ import lint from "./lint.mjs";
 import fs from "fs";
 import path from "path";
 const landed = [];
+const LANDING_PATCH_DISCOVERY_EXCLUDED_BUG_IDS = new Set([
+  "1878375",
+]);
+
+function isLandingPatchDiscoveryExcludedBug(bug) {
+  return LANDING_PATCH_DISCOVERY_EXCLUDED_BUG_IDS.has(String(bug.id));
+}
 
 export default async function (options = {}) {
   await ensureWorkingTreeClean();
@@ -28,6 +35,8 @@ export default async function (options = {}) {
   let bugs;
   try {
     bugs = await getBugs();
+    bugs = bugs.filter((bug) => !isLandingPatchDiscoveryExcludedBug(bug));
+
     if (!bugs.length) {
       spinner.succeed();
       const shouldBump = readlineSync.keyInYN("No bugs marked for checkin. Bump dummy file? [y/n/c]:", { guide: false });

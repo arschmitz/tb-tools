@@ -7327,6 +7327,604 @@ test("interactive graph server lands patches through browser prompts", async (t)
   await closePromise;
 });
 
+test("interactive graph landing applies rust update patches before fetching checkin bugs", async (t) => {
+  const events = [];
+  let rustChecks = 0;
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    getBugs: async () => {
+      events.push("get-bugs");
+      return [];
+    },
+    phab: async ({ route, params }) => {
+      if (
+        route === "differential.query" &&
+        Array.isArray(params?.authors)
+      ) {
+        events.push("rust-query");
+        assert.deepEqual(params, {
+          authors: ["PHID-USER-3zyedh2kyrzsg5v6bc4p"],
+          status: "status-open",
+        });
+        return {
+          result: [
+            {
+              id: 111111,
+              uri: "https://phabricator.services.mozilla.com/D111111",
+              title: "No bug - Update vendored Rust dependencies",
+            },
+          ],
+        };
+      }
+
+      return { result: [] };
+    },
+    runCommand: async (command) => {
+      if (command.cmd.endsWith("mach")) {
+        assert.deepEqual(command.args, ["tb-rust", "check-upstream"]);
+        rustChecks++;
+        events.push(`rust-check-${rustChecks}`);
+
+        if (rustChecks < 4) {
+          const error = new Error("rust out of date");
+
+          error.stderr = "Rust dependencies are out of date\n";
+          throw error;
+        }
+
+        return "Rust dependencies match upstream\n";
+      }
+
+      if (command.cmd === "moz-phab") {
+        events.push("rust-patch");
+        assert.equal(
+          command.args.join(" "),
+          "patch D111111 --skip-dependencies --apply-to here",
+        );
+        return "patched D111111\n";
+      }
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (
+        command.args[0] === "fetch" ||
+        command.args[0] === "switch" ||
+        command.args[0] === "pull" ||
+        command.args[0] === "update-ref"
+      ) {
+        return "";
+      }
+
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123abc123abc123abc123abc123abc123abcd\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/land", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      snapshotLimits: [1],
+    }),
+  });
+  const start = await startResponse.json();
+  const statusUrl = new URL(
+    `api/land/${start.id}?token=secret`,
+    serverInfo.url,
+  );
+  let session = await waitForLandSession(
+    statusUrl,
+    (item) =>
+      item.prompt?.message ===
+      "No bugs are marked for checkin. Bump build/dummy instead?",
+  );
+
+  assert.deepEqual(events, [
+    "rust-check-1",
+    "rust-check-2",
+    "rust-query",
+    "rust-check-3",
+    "rust-patch",
+    "rust-check-4",
+    "get-bugs",
+  ]);
+  assert.match(session.output, /Applying rust update patch D111111/);
+
+  const answerResponse = await fetch(
+    new URL(`api/land/${session.id}/answer`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        promptId: session.prompt.id,
+        answer: false,
+      }),
+    },
+  );
+  session = await answerResponse.json();
+  session = await waitForLandSession(
+    statusUrl,
+    (item) => item.status === "complete",
+  );
+  assert.equal(session.message, "No bugs marked for checkin.");
+
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph landing never loads patches from the rust update bug", async (t) => {
+  const events = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    getBugs: async () => {
+      events.push("get-bugs");
+      return [
+        {
+          id: "1878375",
+          summary: "Synchronize vendored Rust libraries",
+          target_milestone: "---",
+        },
+      ];
+    },
+    getAttachments: async (bugId) => {
+      events.push(`attachments-${bugId}`);
+      assert.notEqual(
+        String(bugId),
+        "1878375",
+        "Bug 1878375 has too many patches and must never be expanded.",
+      );
+      return [];
+    },
+    phab: async () => {
+      assert.fail("The rust update bug should not load Phabricator patches.");
+    },
+    runCommand: async (command) => {
+      if (command.cmd.endsWith("mach")) {
+        assert.deepEqual(command.args, ["tb-rust", "check-upstream"]);
+        events.push("rust-check");
+        return "Rust dependencies match upstream\n";
+      }
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (
+        command.args[0] === "fetch" ||
+        command.args[0] === "switch" ||
+        command.args[0] === "pull" ||
+        command.args[0] === "update-ref"
+      ) {
+        return "";
+      }
+
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123abc123abc123abc123abc123abc123abcd\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/land", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      snapshotLimits: [1],
+    }),
+  });
+  const start = await startResponse.json();
+  const statusUrl = new URL(
+    `api/land/${start.id}?token=secret`,
+    serverInfo.url,
+  );
+  let session = await waitForLandSession(
+    statusUrl,
+    (item) =>
+      item.prompt?.message ===
+      "No bugs are marked for checkin. Bump build/dummy instead?",
+  );
+
+  assert.deepEqual(events, ["rust-check", "get-bugs"]);
+  assert.match(
+    session.output,
+    /Skipping bug 1878375; rust update patches are handled by the rust dependency preflight\./,
+  );
+
+  const answerResponse = await fetch(
+    new URL(`api/land/${session.id}/answer`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        promptId: session.prompt.id,
+        answer: false,
+      }),
+    },
+  );
+  session = await answerResponse.json();
+  session = await waitForLandSession(
+    statusUrl,
+    (item) => item.status === "complete",
+  );
+  assert.equal(session.message, "No bugs marked for checkin.");
+
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph landing rechecks rust after refreshing comm before querying Phabricator", async (t) => {
+  const events = [];
+  let rustChecks = 0;
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    getBugs: async () => {
+      events.push("get-bugs");
+      return [];
+    },
+    phab: async () => {
+      assert.fail("Phabricator rust patch lookup should not run after comm refresh fixes rust.");
+    },
+    runCommand: async (command) => {
+      if (command.cmd.endsWith("mach")) {
+        assert.deepEqual(command.args, ["tb-rust", "check-upstream"]);
+        rustChecks++;
+        events.push(`rust-check-${rustChecks}`);
+
+        if (rustChecks === 1) {
+          const error = new Error("rust out of date");
+
+          error.stderr = "Rust dependencies are out of date\n";
+          throw error;
+        }
+
+        return "Rust dependencies match upstream\n";
+      }
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (
+        command.args[0] === "fetch" ||
+        command.args[0] === "switch" ||
+        command.args[0] === "pull" ||
+        command.args[0] === "update-ref"
+      ) {
+        return "";
+      }
+
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123abc123abc123abc123abc123abc123abcd\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/land", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      snapshotLimits: [1],
+    }),
+  });
+  const start = await startResponse.json();
+  const statusUrl = new URL(
+    `api/land/${start.id}?token=secret`,
+    serverInfo.url,
+  );
+  let session = await waitForLandSession(
+    statusUrl,
+    (item) =>
+      item.prompt?.message ===
+      "No bugs are marked for checkin. Bump build/dummy instead?",
+  );
+
+  assert.deepEqual(events, ["rust-check-1", "rust-check-2", "get-bugs"]);
+
+  const answerResponse = await fetch(
+    new URL(`api/land/${session.id}/answer`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        promptId: session.prompt.id,
+        answer: false,
+      }),
+    },
+  );
+  session = await answerResponse.json();
+  session = await waitForLandSession(
+    statusUrl,
+    (item) => item.status === "complete",
+  );
+  assert.equal(session.message, "No bugs marked for checkin.");
+
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph landing falls back to a manual rust patch after Phabricator rate limits", async (t) => {
+  const events = [];
+  let rustChecks = 0;
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    getBugs: async () => {
+      events.push("get-bugs");
+      return [];
+    },
+    phab: async ({ route, params }) => {
+      if (
+        route === "differential.query" &&
+        Array.isArray(params?.authors)
+      ) {
+        events.push("rust-query");
+        const error = new Error("Phabricator differential.query failed (429): {}");
+
+        error.statusCode = 429;
+        throw error;
+      }
+
+      return { result: [] };
+    },
+    runCommand: async (command) => {
+      if (command.cmd.endsWith("mach")) {
+        assert.deepEqual(command.args, ["tb-rust", "check-upstream"]);
+        rustChecks++;
+        events.push(`rust-check-${rustChecks}`);
+
+        if (rustChecks < 4) {
+          const error = new Error("rust out of date");
+
+          error.stderr = "Rust dependencies are out of date\n";
+          throw error;
+        }
+
+        return "Rust dependencies match upstream\n";
+      }
+
+      if (command.cmd === "moz-phab") {
+        events.push("manual-rust-patch");
+        assert.equal(
+          command.args.join(" "),
+          "patch D222222 --skip-dependencies --apply-to here",
+        );
+        return "patched D222222\n";
+      }
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (
+        command.args[0] === "fetch" ||
+        command.args[0] === "switch" ||
+        command.args[0] === "pull" ||
+        command.args[0] === "update-ref"
+      ) {
+        return "";
+      }
+
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "abc123abc123abc123abc123abc123abc123abcd\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/land", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      snapshotLimits: [1],
+    }),
+  });
+  const start = await startResponse.json();
+  const statusUrl = new URL(
+    `api/land/${start.id}?token=secret`,
+    serverInfo.url,
+  );
+  let session = await waitForLandSession(
+    statusUrl,
+    (item) =>
+      item.prompt?.message ===
+      "Enter a rust update Phabricator revision to apply, or leave blank to abort.",
+  );
+
+  assert.deepEqual(events, ["rust-check-1", "rust-check-2", "rust-query"]);
+  assert.match(session.output, /Automatic rust patch lookup was rate limited/);
+
+  const patchResponse = await fetch(
+    new URL(`api/land/${session.id}/answer`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        promptId: session.prompt.id,
+        answer: "D222222",
+      }),
+    },
+  );
+  session = await patchResponse.json();
+  session = await waitForLandSession(
+    statusUrl,
+    (item) =>
+      item.prompt?.message ===
+      "No bugs are marked for checkin. Bump build/dummy instead?",
+  );
+
+  assert.deepEqual(events, [
+    "rust-check-1",
+    "rust-check-2",
+    "rust-query",
+    "rust-check-3",
+    "manual-rust-patch",
+    "rust-check-4",
+    "get-bugs",
+  ]);
+
+  const answerResponse = await fetch(
+    new URL(`api/land/${session.id}/answer`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        promptId: session.prompt.id,
+        answer: false,
+      }),
+    },
+  );
+  session = await answerResponse.json();
+  session = await waitForLandSession(
+    statusUrl,
+    (item) => item.status === "complete",
+  );
+  assert.equal(session.message, "No bugs marked for checkin.");
+
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
 test("interactive graph server cancels landing sessions waiting on browser prompts", async (t) => {
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
