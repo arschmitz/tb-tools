@@ -72,7 +72,7 @@ test("buildDiffHtml renders the shared diff view", () => {
   assert.match(html, /class="stat-deletions">-1<\/span>/);
   assert.match(html, /class="diff-table"/);
   assert.match(html, /<span class="hljs-keyword">const<\/span>/);
-  assert.match(html, /\.diff-line \{ height: 24px/);
+  assert.match(html.replace(/\s+/g, " "), /\.diff-line \{ height: 24px/);
 });
 
 test("diff command writes and opens a rendered git diff", async () => {

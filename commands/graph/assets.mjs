@@ -1,15 +1,31 @@
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { GRAPH_CLIENT_SCRIPTS } from "./constants.mjs";
+import {
+  GRAPH_CLIENT_SCRIPTS,
+  GRAPH_CLIENT_STYLESHEETS,
+} from "./constants.mjs";
 
-export function getGraphClientScriptPath(script) {
+export function getGraphClientAssetPath(asset) {
   return path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     "client",
-    script.source
+    asset.source
   );
+}
+
+export function getGraphClientScriptPath(script) {
+  return getGraphClientAssetPath(script);
+}
+
+export function getGraphClientStylesheetPath(stylesheet = GRAPH_CLIENT_STYLESHEETS[0]) {
+  return getGraphClientAssetPath(stylesheet);
+}
+
+export function getGraphHtmlStyles({ readStyle = readFileSync } = {}) {
+  return readStyle(getGraphClientStylesheetPath(), "utf8");
 }
 
 export function getGraphOutputPath(output) {
@@ -24,8 +40,8 @@ export async function writeGraphClientAssets({
 }) {
   const madeDirs = new Set();
 
-  for (const script of GRAPH_CLIENT_SCRIPTS) {
-    const targetPath = path.join(path.dirname(outputPath), script.output);
+  for (const asset of [...GRAPH_CLIENT_STYLESHEETS, ...GRAPH_CLIENT_SCRIPTS]) {
+    const targetPath = path.join(path.dirname(outputPath), asset.output);
     const targetDir = path.dirname(targetPath);
 
     if (!madeDirs.has(targetDir)) {
@@ -34,7 +50,7 @@ export async function writeGraphClientAssets({
     }
     await write(
       targetPath,
-      await readBundle(getGraphClientScriptPath(script), "utf8")
+      await readBundle(getGraphClientAssetPath(asset), "utf8")
     );
   }
 }

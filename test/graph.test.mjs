@@ -70,6 +70,7 @@ import {
 import { buildGraphHtml } from "../commands/graph/templates.mjs";
 
 const GRAPH_CLIENT_TEST_ASSETS = [
+  { source: "style.css", output: "graph-client/style.css" },
   { source: "config.js", output: "graph-client/config.js" },
   { source: "commit-model.js", output: "graph-client/commit-model.js" },
   { source: "dom.js", output: "graph-client/dom.js" },
@@ -87,8 +88,13 @@ const GRAPH_CLIENT_TEST_ASSETS = [
 
 function readGraphClientScripts() {
   return GRAPH_CLIENT_TEST_ASSETS
+    .filter(({ source }) => source.endsWith(".js"))
     .map(({ source }) => readFileSync(path.join(process.cwd(), "commands/graph/client", source), "utf8"))
     .join("\n");
+}
+
+function readGraphClientStylesheet() {
+  return readFileSync(path.join(process.cwd(), "commands/graph/client/style.css"), "utf8").replace(/\s+/g, " ");
 }
 
 async function waitForSubmitSession(url, predicate) {
@@ -3106,10 +3112,13 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
     ],
   });
   const client = readGraphClientScripts();
+  const style = readGraphClientStylesheet();
 
   assert.match(html, /Thunderbird Desktop Console/);
   assert.match(html, /id="graph-config"/);
+  assert.match(html, /<link rel="stylesheet" href="graph-client\/style\.css">/);
   assert.match(html, /<script type="module" src="graph-client\/init\.js"><\/script>/);
+  assert.doesNotMatch(html, /<style>/);
   assert.doesNotMatch(html, /function renderGraph/);
   assert.doesNotMatch(html, /window\.[A-Z][A-Za-z]+JS/);
   assert.match(html, /1 uncommitted change set/);
@@ -3158,85 +3167,88 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /aria-orientation="vertical"/);
   assert.match(html, /aria-controls="graph-0 diff-0"/);
   assert.match(html, /class="diff-stats" hidden aria-label=""/);
-  assert.match(html, /\.workspace \{ --graph-pane-width: 54%; display: grid/);
-  assert.match(html, /\.title-row \{/);
-  assert.match(html, /\.toolbar-row \{/);
-  assert.match(html, /\.update-actions \{/);
-  assert.match(html, /\.graph-options-menu \{/);
-  assert.match(html, /\.graph-submenu \{/);
-  assert.match(html, /\.command-status-bar \{/);
-  assert.match(html, /\.command-status-bar\[hidden\] \{ display: none; \}/);
-  assert.match(html, /\.command-status-primary \{/);
-  assert.match(html, /\.command-status-tools \{/);
-  assert.match(html, /body\.has-command-status main/);
-  assert.match(html, /\.command-status-bar\.busy \.command-status-dot/);
-  assert.match(html, /\.command-elapsed \{/);
-  assert.match(html, /\.command-status-close \{/);
-  assert.match(html, /\.mach-cancel\[hidden\], \.mach-output-toggle\[hidden\], \.command-status-close\[hidden\] \{ display: none; \}/);
-  assert.match(html, /\.mach-output-panel \{/);
-  assert.match(html, /\.mach-output-toggle\[hidden\]/);
-  assert.match(html, /\.origin-main-status \{/);
-  assert.match(html, /\.origin-main-badge\.current/);
-  assert.match(html, /\.origin-main-badge\.stale, \.origin-main-badge\.warning/);
-  assert.match(html, /\.update-status\.error/);
-  assert.match(html, /\.pane-resizer \{[^}]*cursor: col-resize/);
-  assert.match(html, /\.pane-resizer:hover::before/);
-  assert.match(html, /body\.is-resizing-panes/);
-  assert.match(html, /\.graph svg \{ overflow: visible; \}/);
-  assert.match(html, /\.lane-path \{ fill: none; stroke-linecap: round/);
-  assert.match(html, /\.commit-dot \{ stroke: #ffffff/);
-  assert.match(html, /\.commit-hash, \.commit-message \{ dominant-baseline: central/);
-  assert.match(html, /\.branch-label-bg \{ stroke-width: 1/);
-  assert.match(html, /\.branch-label-text \{ dominant-baseline: central/);
-  assert.doesNotMatch(html, /\.commit-try-link/);
-  assert.doesNotMatch(html, /\.commit-try-bg/);
-  assert.match(html, /\.commit-row, \.commit-row \* \{ cursor: pointer; \}/);
-  assert.match(html, /\.commit-row\.active \.commit-row-hitbox/);
-  assert.match(html, /\.commit-row\.working-tree \.commit-row-hitbox/);
-  assert.match(html, /\.commit-row\.current \.commit-row-hitbox/);
-  assert.match(html, /\.context-menu button\[data-action="prune"\]/);
-  assert.match(html, /\.context-menu button\[hidden\] \{ display: none; \}/);
-  assert.match(html, /\.checkout-commit, \.amend-commit, \.submit-commit, \.load-more/);
-  assert.match(html, /\.amend-dialog \{/);
-  assert.match(html, /\.amend-message \{/);
-  assert.match(html, /\.submit-dialog \{/);
-  assert.match(html, /\.submit-links a/);
-  assert.match(html, /\.submit-output \{/);
-  assert.match(html, /\.try-dialog \{/);
-  assert.match(html, /\.try-grid \{/);
-  assert.match(html, /\.test-output-panel \{/);
-  assert.match(html, /\.test-results-panel \{/);
-  assert.match(html, /\.test-summary-card\.passed/);
-  assert.match(html, /\.test-failed-file-list \{/);
-  assert.match(html, /\.test-failed-file \{/);
-  assert.match(html, /\.test-failure \{/);
-  assert.match(html, /\.test-rerun-all/);
-  assert.match(html, /\.test-output-log \{/);
-  assert.match(html, /\.ansi-red \{/);
-  assert.match(html, /\.test-dialog \{/);
-  assert.match(html, /\.diff-placeholder/);
-  assert.match(html, /\.diff-message \{/);
-  assert.match(html, /\.diff-message a \{ color: #0969da; text-decoration: none; \}/);
-  assert.match(html, /\.diff-message\[hidden\] \{ display: none; \}/);
-  assert.match(html, /\.integration-status \{/);
-  assert.match(html, /\.status-badge \{/);
-  assert.match(html, /\.status-badge\.try/);
-  assert.match(html, /\.try-run-current \{/);
-  assert.match(html, /\.try-run-toggle/);
-  assert.match(html, /\.try-run-history\[hidden\]/);
-  assert.match(html, /\.status-badge\.open/);
-  assert.match(html, /\.status-badge\.error/);
-  assert.match(html, /\.checkin-needed-button/);
-  assert.match(html, /\.diff-table \{ border-collapse: collapse/);
-  assert.match(html, /\.diff-line \{ height: 24px/);
-  assert.match(html, /\.diff-line\.delete \.old-line/);
-  assert.match(html, /\.diff-line\.insert \.line-code/);
-  assert.match(html, /\.file-stats/);
-  assert.match(html, /\.diff-stats/);
-  assert.match(html, /\.line-marker/);
-  assert.match(html, /\.line-number/);
-  assert.match(html, /\.line-content \.hljs-keyword/);
-  assert.match(html, /\.line-content \.hljs-string/);
+  assert.match(style, /\.workspace \{ --graph-pane-width: 54%; display: grid/);
+  assert.match(style, /\.title-row \{/);
+  assert.match(style, /\.toolbar-row \{/);
+  assert.match(style, /\.update-actions \{/);
+  assert.match(style, /\.graph-options-menu \{/);
+  assert.match(style, /\.graph-submenu \{/);
+  assert.match(style, /\.command-status-bar \{/);
+  assert.match(style, /\.command-status-bar\[hidden\] \{ display: none; \}/);
+  assert.match(style, /\.command-status-primary \{/);
+  assert.match(style, /\.command-status-tools \{/);
+  assert.match(style, /body\.has-command-status main/);
+  assert.match(style, /\.command-status-bar\.busy \.command-status-dot/);
+  assert.match(style, /\.command-elapsed \{/);
+  assert.match(style, /\.command-status-close \{/);
+  assert.match(style, /\.mach-cancel\[hidden\], \.mach-output-toggle\[hidden\], \.command-status-close\[hidden\] \{ display: none; \}/);
+  assert.match(style, /\.mach-output-panel \{/);
+  assert.match(style, /\.mach-output-toggle\[hidden\]/);
+  assert.match(style, /\.origin-main-status \{/);
+  assert.match(style, /\.origin-main-badge\.current/);
+  assert.match(style, /\.origin-main-badge\.stale, \.origin-main-badge\.warning/);
+  assert.match(style, /\.update-status\.error/);
+  assert.match(style, /\.pane-resizer \{[^}]*cursor: col-resize/);
+  assert.match(style, /\.pane-resizer:hover::before/);
+  assert.match(style, /body\.is-resizing-panes/);
+  assert.match(style, /\.graph svg \{ overflow: visible; \}/);
+  assert.match(style, /\.lane-path \{ fill: none; stroke-linecap: round/);
+  assert.match(style, /\.commit-dot \{ stroke: #ffffff/);
+  assert.match(style, /\.commit-hash, \.commit-message \{ dominant-baseline: central/);
+  assert.match(style, /\.commit-message \{ fill: #20242a; \}/);
+  assert.match(style, /\.branch-label-bg \{ stroke-width: 1/);
+  assert.match(style, /\.branch-label-text \{ dominant-baseline: central/);
+  assert.doesNotMatch(style, /\.commit-try-link/);
+  assert.doesNotMatch(style, /\.commit-try-bg/);
+  assert.match(style, /\.commit-row, \.commit-row \* \{ cursor: pointer; \}/);
+  assert.match(style, /\.commit-row\.active \.commit-row-hitbox/);
+  assert.match(style, /\.commit-row\.working-tree \.commit-row-hitbox/);
+  assert.match(style, /\.commit-row\.current \.commit-row-hitbox/);
+  assert.match(style, /@media \(prefers-color-scheme: dark\) \{[^]*\.commit-hash \{ fill: #9aa4b2; \}/);
+  assert.match(style, /@media \(prefers-color-scheme: dark\) \{[^]*\.commit-message \{ fill: #e6edf3; \}/);
+  assert.match(style, /\.context-menu button\[data-action="prune"\]/);
+  assert.match(style, /\.context-menu button\[hidden\] \{ display: none; \}/);
+  assert.match(style, /\.checkout-commit, \.amend-commit, \.submit-commit, \.load-more/);
+  assert.match(style, /\.amend-dialog \{/);
+  assert.match(style, /\.amend-message \{/);
+  assert.match(style, /\.submit-dialog \{/);
+  assert.match(style, /\.submit-links a/);
+  assert.match(style, /\.submit-output \{/);
+  assert.match(style, /\.try-dialog \{/);
+  assert.match(style, /\.try-grid \{/);
+  assert.match(style, /\.test-output-panel \{/);
+  assert.match(style, /\.test-results-panel \{/);
+  assert.match(style, /\.test-summary-card\.passed/);
+  assert.match(style, /\.test-failed-file-list \{/);
+  assert.match(style, /\.test-failed-file \{/);
+  assert.match(style, /\.test-failure \{/);
+  assert.match(style, /\.test-rerun-all/);
+  assert.match(style, /\.test-output-log \{/);
+  assert.match(style, /\.ansi-red \{/);
+  assert.match(style, /\.test-dialog \{/);
+  assert.match(style, /\.diff-placeholder/);
+  assert.match(style, /\.diff-message \{/);
+  assert.match(style, /\.diff-message a \{ color: #0969da; text-decoration: none; \}/);
+  assert.match(style, /\.diff-message\[hidden\] \{ display: none; \}/);
+  assert.match(style, /\.integration-status \{/);
+  assert.match(style, /\.status-badge \{/);
+  assert.match(style, /\.status-badge\.try/);
+  assert.match(style, /\.try-run-current \{/);
+  assert.match(style, /\.try-run-toggle/);
+  assert.match(style, /\.try-run-history\[hidden\]/);
+  assert.match(style, /\.status-badge\.open/);
+  assert.match(style, /\.status-badge\.error/);
+  assert.match(style, /\.checkin-needed-button/);
+  assert.match(style, /\.diff-table \{ border-collapse: collapse/);
+  assert.match(style, /\.diff-line \{ height: 24px/);
+  assert.match(style, /\.diff-line\.delete \.old-line/);
+  assert.match(style, /\.diff-line\.insert \.line-code/);
+  assert.match(style, /\.file-stats/);
+  assert.match(style, /\.diff-stats/);
+  assert.match(style, /\.line-marker/);
+  assert.match(style, /\.line-number/);
+  assert.match(style, /\.line-content \.hljs-keyword/);
+  assert.match(style, /\.line-content \.hljs-string/);
   assert.match(client, /const COMMIT_DOT_RADIUS = 10/);
   assert.match(client, /const LANE_SPACING = 20/);
   assert.match(client, /const COMMIT_HASH_WIDTH = 116/);
@@ -3399,10 +3411,13 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
     }],
   });
   const client = readGraphClientScripts();
+  const style = readGraphClientStylesheet();
 
   assert.match(html, /id="graph-config"/);
   assert.match(html, /"pageSize":25/);
+  assert.match(html, /<link rel="stylesheet" href="graph-client\/style\.css">/);
   assert.match(html, /<script type="module" src="graph-client\/init\.js"><\/script>/);
+  assert.doesNotMatch(html, /<style>/);
   assert.doesNotMatch(html, /function renderGraph/);
   assert.match(client, /const INTERACTIVE = /);
   assert.match(html, /<title>Thunderbird Desktop Console<\/title>/);
@@ -3437,7 +3452,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /class="test-output-panel" hidden/);
   assert.match(html, /class="test-results-panel" aria-label="Parsed test results"/);
   assert.match(html, /class="test-rerun-all" type="button" hidden>Rerun All<\/button>/);
-  assert.match(html, /\.graph-submenu \{ display: none; position: absolute; right: calc\(100% - 1px\); top: 0; \}/);
+  assert.match(style, /\.graph-submenu \{ display: none; position: absolute; right: calc\(100% - 1px\); top: 0; \}/);
   assert.match(html, /class="origin-main-status" role="status" aria-label="origin\/main freshness"/);
   assert.match(html, /class="command-status-bar" role="region" aria-label="Command status" hidden/);
   assert.match(html, /class="command-status-primary"/);
@@ -3466,7 +3481,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /<dialog class="land-dialog" id="land-dialog">/);
   assert.match(html, /class="land-lando-repo"[^>]+value="thunderbird-desktop-main"/);
   assert.match(html, /class="land-start" type="button">Start Landing<\/button>/);
-  assert.doesNotMatch(html, /\.land-close:disabled/);
+  assert.doesNotMatch(style, /\.land-close:disabled/);
   assert.match(client, /\/api\/graph\/" \+ index \+ "\/commits/);
   assert.match(client, /openTestDialog\(\)/);
   assert.match(client, /cancelGraphTestSession\(\)/);
@@ -3759,6 +3774,11 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.equal(assetResponse.ok, true);
   assert.match(assetResponse.headers.get("content-type"), /application\/javascript/);
   assert.match(await assetResponse.text(), /function renderGraph/);
+
+  const stylesheetResponse = await fetch(new URL("assets/graph-client/style.css", serverInfo.url));
+  assert.equal(stylesheetResponse.ok, true);
+  assert.match(stylesheetResponse.headers.get("content-type"), /text\/css/);
+  assert.match((await stylesheetResponse.text()).replace(/\s+/g, " "), /\.diff-line \{ height: 24px/);
 
   const commitsResponse = await fetch(new URL("api/graph/0/commits?offset=0&limit=1&token=secret", serverInfo.url));
   const commits = await commitsResponse.json();

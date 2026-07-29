@@ -17,8 +17,12 @@ import {
   DEFAULT_MAX_DIFF_BYTES,
   DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS,
   GRAPH_CLIENT_SCRIPTS,
+  GRAPH_CLIENT_STYLESHEETS,
 } from "./constants.mjs";
-import { getGraphClientScriptPath } from "./assets.mjs";
+import {
+  getGraphClientScriptPath,
+  getGraphClientStylesheetPath,
+} from "./assets.mjs";
 import {
   getCheckoutCommitPage,
   getCommitDiff,
@@ -432,6 +436,20 @@ export async function startInteractiveGraphServer({
           200,
           await readFile(getGraphClientScriptPath(clientScript), "utf8"),
           "application/javascript; charset=utf-8"
+        );
+        return;
+      }
+
+      const clientStylesheet = GRAPH_CLIENT_STYLESHEETS.find((stylesheet) => (
+        url.pathname === `/assets/${stylesheet.output}`
+      ));
+      if (request.method === "GET" && clientStylesheet) {
+        noteBrowserActivity();
+        sendText(
+          response,
+          200,
+          await readFile(getGraphClientStylesheetPath(clientStylesheet), "utf8"),
+          "text/css; charset=utf-8"
         );
         return;
       }

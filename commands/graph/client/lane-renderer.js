@@ -473,7 +473,7 @@ export function addLaneCommitRow({ svg, index, row, messageX, width }) {
     y,
   });
   const branchRefs = getCommitBranchRefs(commit);
-  let subjectX = messageX + COMMIT_HASH_WIDTH;
+  let subjectX = messageX + COMMIT_HASH_WIDTH + COMMIT_SUBJECT_GAP;
   const message = createSvgElement("text", {
     class: "commit-message",
     x: subjectX,

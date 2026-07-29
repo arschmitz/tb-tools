@@ -9,7 +9,7 @@ import {
   formatPrettyDiffHtml,
   getDiffChangeCounts,
 } from "./graph/diff-renderer.mjs";
-import { getGraphHtmlStyles } from "./graph/templates.mjs";
+import { getGraphHtmlStyles } from "./graph/assets.mjs";
 import { run } from "../lib/utils.mjs";
 
 export function getPrettyDiffCommand({

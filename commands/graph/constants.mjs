@@ -17,6 +17,9 @@ export const GRAPH_MACH_ACTION_BUILD_RUN = "build-run";
 export const GRAPH_TRY_STORE_FILE = "tb-tools-try-runs.json";
 export const GRAPH_TRY_STORE_VERSION = 1;
 export const GRAPH_WORKING_TREE_TRY_PREFIX = "working:";
+export const GRAPH_CLIENT_STYLESHEETS = [
+  { output: "graph-client/style.css", source: "style.css" },
+];
 export const GRAPH_CLIENT_SCRIPTS = [
   { output: "graph-client/config.js", source: "config.js" },
   { output: "graph-client/commit-model.js", source: "commit-model.js" },

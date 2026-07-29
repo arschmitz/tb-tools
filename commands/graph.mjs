@@ -3,7 +3,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import openUrl from "open";
 import { run } from "../lib/utils.mjs";
-import { DEFAULT_MAX_DIFF_BYTES, GRAPH_CLIENT_SCRIPTS } from "./graph/constants.mjs";
+import {
+  DEFAULT_MAX_DIFF_BYTES,
+  GRAPH_CLIENT_SCRIPTS,
+  GRAPH_CLIENT_STYLESHEETS,
+} from "./graph/constants.mjs";
 import { getCheckoutGraphData, getCheckoutGraphMetadata } from "./graph/data.mjs";
 import { getGraphOutputPath, writeGraphClientAssets } from "./graph/assets.mjs";
 import { startInteractiveGraphServer, waitForInteractiveServerClose } from "./graph/server.mjs";
@@ -85,6 +89,9 @@ export function createGraphCommand({
         pageSize: commitPageSize,
         token,
       },
+      stylesheetHref: isInteractive
+        ? `/assets/${GRAPH_CLIENT_STYLESHEETS[0].output}`
+        : GRAPH_CLIENT_STYLESHEETS[0].output,
       scriptSrcs: GRAPH_CLIENT_SCRIPTS.map((script) => (
         isInteractive ? `/assets/${script.output}` : script.output
       )),
