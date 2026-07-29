@@ -25,6 +25,13 @@ import {
   setUpdateStatus,
 } from "./command-sessions.js";
 
+const LAND_TRY_STATUS_CONCURRENCY = 2;
+const landTryStatusQueue = [];
+const queuedLandTryStatusKeys = new Set();
+const loadedLandTryStatusKeys = new Set();
+let activeLandTryStatusRequests = 0;
+let landTryStatusObserver = null;
+
 export function setLandDialogBusy(busy) {
   const prompt = uiState.activeLandSession?.prompt;
   const footerActions = prompt?.kind === "patch-select" && Array.isArray(prompt.actions);
@@ -101,9 +108,18 @@ function createLandLinkPill(linkInfo) {
 function createLandPatchTryStatus(choice) {
   const wrapper = document.createElement("div");
   const tryStatus = choice.tryStatus || {};
-  const latestTryRun = tryStatus.latestTryRun;
 
   wrapper.className = "land-patch-try";
+  wrapper.dataset.landTryStatus = "";
+  renderLandPatchTryStatus(wrapper, tryStatus);
+  return wrapper;
+}
+
+function renderLandPatchTryStatus(wrapper, tryStatus = {}) {
+  const latestTryRun = tryStatus.latestTryRun;
+
+  wrapper.replaceChildren();
+  wrapper.dataset.landTryStatus = tryStatus.state || "";
 
   if (latestTryRun?.url) {
     const tryLink = createLandLinkPill({
@@ -127,9 +143,19 @@ function createLandPatchTryStatus(choice) {
     current.className = "land-patch-current";
     current.textContent = "Treeherder try run found";
     wrapper.append(current);
-  }
+  } else if (tryStatus.state === "loading") {
+    const loading = document.createElement("span");
 
-  return wrapper;
+    loading.className = "land-patch-current loading";
+    loading.textContent = "Checking Treeherder try status...";
+    wrapper.append(loading);
+  } else if (tryStatus.state === "pending") {
+    const pending = document.createElement("span");
+
+    pending.className = "land-patch-current pending";
+    pending.textContent = "Treeherder try status pending";
+    wrapper.append(pending);
+  }
 }
 
 function createLandPatchCard(choice) {
@@ -142,6 +168,8 @@ function createLandPatchCard(choice) {
   const mergeButton = document.createElement("button");
 
   card.className = "land-patch-card " + (choice.statusKind || "");
+  card.dataset.landBugId = choice.bugId || "";
+  card.dataset.landPatchId = choice.patchId || "";
   content.className = "land-patch-content";
   header.className = "land-patch-header";
   title.className = "land-patch-title";
@@ -162,6 +190,123 @@ function createLandPatchCard(choice) {
   content.append(header, links, createLandPatchTryStatus(choice));
   card.append(content, mergeButton);
   return card;
+}
+
+function getLandTryStatusKey(card) {
+  return [
+    uiState.landDialogState?.sessionId || "",
+    card.dataset.landBugId || "",
+    card.dataset.landPatchId || "",
+  ].join(":");
+}
+
+function queueLandPatchTryStatus(card) {
+  const key = getLandTryStatusKey(card);
+
+  if (
+    !uiState.landDialogState?.sessionId ||
+    !card.dataset.landBugId ||
+    !card.dataset.landPatchId ||
+    queuedLandTryStatusKeys.has(key) ||
+    loadedLandTryStatusKeys.has(key)
+  ) {
+    return;
+  }
+
+  queuedLandTryStatusKeys.add(key);
+  landTryStatusQueue.push({ card, key });
+  drainLandPatchTryStatusQueue();
+}
+
+function drainLandPatchTryStatusQueue() {
+  while (
+    activeLandTryStatusRequests < LAND_TRY_STATUS_CONCURRENCY &&
+    landTryStatusQueue.length
+  ) {
+    const item = landTryStatusQueue.shift();
+
+    if (!item.card.isConnected) {
+      queuedLandTryStatusKeys.delete(item.key);
+      continue;
+    }
+
+    activeLandTryStatusRequests++;
+    loadLandPatchTryStatus(item.card, item.key).finally(() => {
+      activeLandTryStatusRequests--;
+      drainLandPatchTryStatusQueue();
+    });
+  }
+}
+
+async function loadLandPatchTryStatus(card, key) {
+  const status = card.querySelector(".land-patch-try");
+
+  if (status) {
+    renderLandPatchTryStatus(status, { state: "loading" });
+  }
+
+  try {
+    const response = await fetch(
+      "/api/land/" + encodeURIComponent(uiState.landDialogState.sessionId) +
+        "/patch/" + encodeURIComponent(card.dataset.landBugId) +
+        "/" + encodeURIComponent(card.dataset.landPatchId) +
+        "/try-status?token=" + encodeURIComponent(INTERACTIVE.token)
+    );
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || response.statusText);
+    }
+
+    loadedLandTryStatusKeys.add(key);
+    if (status && card.isConnected) {
+      renderLandPatchTryStatus(status, result.tryStatus || {});
+    }
+  } catch (error) {
+    if (status && card.isConnected) {
+      renderLandPatchTryStatus(status, {
+        state: "unknown",
+        latestTryRun: null,
+        warning: error && error.message ? error.message : String(error),
+      });
+    }
+  } finally {
+    queuedLandTryStatusKeys.delete(key);
+  }
+}
+
+function observeLandPatchTryStatuses() {
+  if (landTryStatusObserver) {
+    landTryStatusObserver.disconnect();
+    landTryStatusObserver = null;
+  }
+
+  const cards = Array.from(landChoiceList.querySelectorAll(".land-patch-card"));
+
+  if (!cards.length) {
+    return;
+  }
+
+  if (!("IntersectionObserver" in window)) {
+    cards.forEach(queueLandPatchTryStatus);
+    return;
+  }
+
+  landTryStatusObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) {
+        continue;
+      }
+
+      landTryStatusObserver.unobserve(entry.target);
+      queueLandPatchTryStatus(entry.target);
+    }
+  }, {
+    root: landChoiceList,
+    rootMargin: "160px",
+  });
+
+  cards.forEach((card) => landTryStatusObserver.observe(card));
 }
 
 export function createLandChoiceButton(choice) {
@@ -204,6 +349,10 @@ export function renderLandPrompt(prompt, links = []) {
   landDetail.textContent = prompt.detail || "";
   landChoiceList.classList.toggle("patch-card-list", prompt.kind === "patch-select");
   setLandLinks(prompt.links || []);
+  if (prompt.kind !== "patch-select" && landTryStatusObserver) {
+    landTryStatusObserver.disconnect();
+    landTryStatusObserver = null;
+  }
 
   if (prompt.type === "input") {
     landChoiceList.replaceChildren();
@@ -239,6 +388,10 @@ export function renderLandPrompt(prompt, links = []) {
 
     return element;
   }));
+
+  if (prompt.kind === "patch-select") {
+    observeLandPatchTryStatuses();
+  }
 }
 
 export function getLandSessionStatusText(session) {
@@ -325,6 +478,13 @@ export function openLandDialog() {
 
   uiState.landDialogState = null;
   uiState.activeLandSession = null;
+  queuedLandTryStatusKeys.clear();
+  loadedLandTryStatusKeys.clear();
+  landTryStatusQueue.length = 0;
+  if (landTryStatusObserver) {
+    landTryStatusObserver.disconnect();
+    landTryStatusObserver = null;
+  }
   landStatus.classList.remove("error");
   landStatus.textContent = "Ready to land patches marked for checkin.";
   landPrompt.hidden = true;

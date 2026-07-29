@@ -4,7 +4,7 @@ import path from "node:path";
 import { getAttachments as defaultGetAttachments, getBugs as defaultGetBugs, updateBug as defaultUpdateBug } from "../../lib/bugzilla.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
 import { DEFAULT_LANDO_REPO, pushCommits as defaultPushCommits } from "../../lib/lando.mjs";
-import defaultPhab, { comment as defaultComment } from "../../lib/phab.mjs";
+import defaultPhab, { comment as defaultComment, isPhabricatorRateLimitError } from "../../lib/phab.mjs";
 import { run } from "../../lib/utils.mjs";
 import {
   CHECKIN_NEEDED_KEYWORD,
@@ -21,6 +21,7 @@ import {
 const BUGZILLA_BUG_URL = "https://bugzilla.mozilla.org/show_bug.cgi?id=";
 const RUST_UPDATE_AUTHOR_PHID = "PHID-USER-3zyedh2kyrzsg5v6bc4p";
 const RUST_UPDATE_BUG_ID = "1878375";
+const LANDING_PHABRICATOR_QUERY_BATCH_SIZE = 100;
 const RUST_PATCH_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 const LANDING_PATCH_DISCOVERY_EXCLUDED_BUG_IDS = new Set([
   RUST_UPDATE_BUG_ID,
@@ -67,14 +68,6 @@ function createLandingCanceledError() {
 
 function cleanTreeherderUrl(url = "") {
   return String(url).replace(/[),.;]+$/g, "");
-}
-
-function isPhabricatorRateLimitError(error) {
-  return (
-    error?.status === 429 ||
-    error?.statusCode === 429 ||
-    /\b429\b|rate.?limit/i.test(error?.message || "")
-  );
 }
 
 function getCooldownSeconds(cooldownUntil) {
@@ -311,6 +304,14 @@ async function loadLandingPatchTryStatus({
   }
 }
 
+function getPendingLandingPatchTryStatus() {
+  return {
+    state: "pending",
+    latestTryRun: null,
+    warning: "",
+  };
+}
+
 function throwIfLandingCanceled(session) {
   if (session.cancelRequested) {
     throw createLandingCanceledError();
@@ -525,6 +526,66 @@ function getPhabricatorIdsFromAttachments(attachments) {
   }, []);
 }
 
+function getUniqueValues(values) {
+  return Array.from(new Set(values.map(String).filter(Boolean)));
+}
+
+function chunkValues(values, size) {
+  const chunks = [];
+
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+async function getLandingPatchesById(phabIds, phab) {
+  const patchesById = new Map();
+
+  for (const ids of chunkValues(
+    getUniqueValues(phabIds),
+    LANDING_PHABRICATOR_QUERY_BATCH_SIZE,
+  )) {
+    const response = await phab({
+      route: "differential.query",
+      params: { ids },
+    });
+
+    for (const patch of response.result || []) {
+      patchesById.set(String(patch.id), patch);
+    }
+  }
+
+  return patchesById;
+}
+
+async function getLandingReviewersByPhid(patches, phab) {
+  const reviewerPhids = getUniqueValues(patches.flatMap((patch) =>
+    Object.keys(patch.reviewers || {})
+  ));
+  const reviewersByPhid = new Map();
+
+  for (const phids of chunkValues(
+    reviewerPhids,
+    LANDING_PHABRICATOR_QUERY_BATCH_SIZE,
+  )) {
+    const response = await phab({
+      route: "user.query",
+      params: { phids },
+    });
+
+    for (const [index, reviewer] of (response.result || []).entries()) {
+      reviewersByPhid.set(
+        reviewer.phid || phids[index],
+        reviewer.userName,
+      );
+    }
+  }
+
+  return reviewersByPhid;
+}
+
 function getVisibleBugPatches(bug) {
   return (bug.patches || []).filter((patch) => patch.statusName !== "Closed");
 }
@@ -549,42 +610,60 @@ async function getLandingBugs({
 
   const bugs = await getBugs();
   const excludedIds = new Set(Array.from(excludedBugIds).map(String));
+  const bugPhabricatorIds = new Map();
+  const allPhabricatorIds = [];
 
   for (const bug of bugs) {
+    bug.patches = [];
+
     if (excludedIds.has(String(bug.id))) {
       appendLandingOutput(
         session,
         `Skipping bug ${bug.id}; rust update patches are handled by the rust dependency preflight.\n`,
       );
-      bug.patches = [];
       continue;
     }
 
     const attachments = await getAttachments(bug.id);
     const phabIds = getPhabricatorIdsFromAttachments(attachments);
-    const patches = phabIds.length
-      ? (await phab({
-        route: "differential.query",
-        params: { ids: phabIds },
-      })).result || []
-      : [];
 
-    bug.patches = [];
+    bugPhabricatorIds.set(bug, phabIds);
+    allPhabricatorIds.push(...phabIds);
+  }
 
-    for (const patch of patches) {
-      const reviewerPhids = Object.keys(patch.reviewers || {});
-      const reviewers = reviewerPhids.length
-        ? (await phab({
-          route: "user.query",
-          params: { phids: reviewerPhids },
-        })).result.map((reviewer) => reviewer.userName)
-        : [];
+  const patchesById = await getLandingPatchesById(allPhabricatorIds, phab);
+  const allPatches = [];
+
+  for (const [bug, phabIds] of bugPhabricatorIds) {
+    for (const phabId of phabIds) {
+      const patch = patchesById.get(String(phabId));
+
+      if (patch) {
+        patch.bugId = bug.id;
+        allPatches.push(patch);
+      }
+    }
+  }
+
+  const reviewersByPhid = await getLandingReviewersByPhid(allPatches, phab);
+
+  for (const [bug, phabIds] of bugPhabricatorIds) {
+    for (const phabId of phabIds) {
+      const patch = patchesById.get(String(phabId));
+
+      if (!patch) {
+        continue;
+      }
+
+      const reviewers = Object.keys(patch.reviewers || {})
+        .map((phid) => reviewersByPhid.get(phid))
+        .filter(Boolean);
 
       bug.patches.push({
         ...patch,
         bugId: bug.id,
         reviewers,
-        landingTryStatus: await loadLandingPatchTryStatus({ patch, phab }),
+        landingTryStatus: null,
       });
     }
   }
@@ -841,6 +920,59 @@ function findLandingPatch(session, answer) {
   return { bug, patch };
 }
 
+export async function loadGraphLandingPatchTryStatus(session, {
+  bugId,
+  patchId,
+} = {}) {
+  const { patch } = findLandingPatch(
+    session,
+    `patch:${bugId || ""}:${patchId || ""}`,
+  );
+
+  if (!patch) {
+    const error = new Error("Unknown landing patch.");
+
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (!session.landingTryStatusPromises) {
+    session.landingTryStatusPromises = new Map();
+  }
+
+  const key = `${bugId}:${patchId}`;
+  const existingPromise = session.landingTryStatusPromises.get(key);
+
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  if (
+    patch.landingTryStatus &&
+    !["pending", "loading"].includes(patch.landingTryStatus.state)
+  ) {
+    return patch.landingTryStatus;
+  }
+
+  patch.landingTryStatus = {
+    state: "loading",
+    latestTryRun: null,
+    warning: "",
+  };
+  const promise = loadLandingPatchTryStatus({
+    patch,
+    phab: session.phab,
+  }).then((tryStatus) => {
+    patch.landingTryStatus = tryStatus;
+    return tryStatus;
+  }).finally(() => {
+    session.landingTryStatusPromises.delete(key);
+  });
+
+  session.landingTryStatusPromises.set(key, promise);
+  return promise;
+}
+
 function removeLandingPatch(session, bug, patch, result) {
   if (result === "landed") {
     bug.hasLandedPatch = true;
@@ -907,7 +1039,7 @@ function getPatchSelectChoices(session) {
         statusName: patch.statusName || "",
         reviewers: patch.reviewers || [],
         links: getPatchLinks(bug, patch),
-        tryStatus: patch.landingTryStatus || null,
+        tryStatus: patch.landingTryStatus || getPendingLandingPatchTryStatus(),
       });
     }
   }
@@ -1391,6 +1523,7 @@ export function createGraphLandSession({
     checkpoint: null,
     bumpOnly: false,
     cancelRequested: false,
+    landingTryStatusPromises: new Map(),
   };
 
   session.answer = (promptId, answer) => {

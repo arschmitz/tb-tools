@@ -2198,6 +2198,15 @@ body.is-resizing-panes {
   color: #59616d;
   font-size: 12px;
 }
+.land-patch-current.loading,
+.land-patch-current.pending {
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 999px;
+  color: #59616d;
+  line-height: 1.2;
+  padding: 4px 8px;
+}
 .land-patch-merge {
   align-self: center;
   background: #1f5f9f;
@@ -3444,6 +3453,12 @@ body.is-resizing-panes {
   }
   .land-patch-meta,
   .land-patch-current {
+    color: #acb4c0;
+  }
+  .land-patch-current.loading,
+  .land-patch-current.pending {
+    background: #161b22;
+    border-color: #424b59;
     color: #acb4c0;
   }
   .land-patch-link {

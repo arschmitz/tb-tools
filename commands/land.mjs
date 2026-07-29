@@ -15,12 +15,73 @@ import lint from "./lint.mjs";
 import fs from "fs";
 import path from "path";
 const landed = [];
+const LANDING_PHABRICATOR_QUERY_BATCH_SIZE = 100;
 const LANDING_PATCH_DISCOVERY_EXCLUDED_BUG_IDS = new Set([
   "1878375",
 ]);
 
 function isLandingPatchDiscoveryExcludedBug(bug) {
   return LANDING_PATCH_DISCOVERY_EXCLUDED_BUG_IDS.has(String(bug.id));
+}
+
+function getUniqueValues(values) {
+  return Array.from(new Set(values.map(String).filter(Boolean)));
+}
+
+function chunkValues(values, size) {
+  const chunks = [];
+
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+async function getPatchesById(phabIds) {
+  const patchesById = new Map();
+
+  for (const ids of chunkValues(
+    getUniqueValues(phabIds),
+    LANDING_PHABRICATOR_QUERY_BATCH_SIZE,
+  )) {
+    const response = await phab({
+      route: "differential.query",
+      params: { ids },
+    });
+
+    for (const patch of response.result || []) {
+      patchesById.set(String(patch.id), patch);
+    }
+  }
+
+  return patchesById;
+}
+
+async function getReviewersByPhid(patches) {
+  const reviewerPhids = getUniqueValues(patches.flatMap((patch) =>
+    Object.keys(patch.reviewers || {})
+  ));
+  const reviewersByPhid = new Map();
+
+  for (const phids of chunkValues(
+    reviewerPhids,
+    LANDING_PHABRICATOR_QUERY_BATCH_SIZE,
+  )) {
+    const response = await phab({
+      route: "user.query",
+      params: { phids },
+    });
+
+    for (const [index, reviewer] of (response.result || []).entries()) {
+      reviewersByPhid.set(
+        reviewer.phid || phids[index],
+        reviewer.userName,
+      );
+    }
+  }
+
+  return reviewersByPhid;
 }
 
 export default async function (options = {}) {
@@ -46,6 +107,10 @@ export default async function (options = {}) {
 
       return;
     }
+
+    const bugPhabricatorIds = new Map();
+    const allPhabricatorIds = [];
+
     for(const bug of bugs) {
       const attachments = await getAttachments(bug.id);
 
@@ -60,15 +125,43 @@ export default async function (options = {}) {
         return collection;
       }, []);
 
-      bug.patches = new Set((await phab({ route: "differential.query", params: { ids: phabIds }})).result);
-      for(const patch of Array.from(bug.patches)) {
-        const response = await phab({ route: "user.query", params: {
-          phids: Object.keys(patch.reviewers),
-        }});
+      bugPhabricatorIds.set(bug, phabIds);
+      allPhabricatorIds.push(...phabIds);
+    }
 
-        const names = response.result.map((reviewer) => reviewer.userName);
+    const patchesById = await getPatchesById(allPhabricatorIds);
+    const allPatches = [];
+
+    for (const [bug, phabIds] of bugPhabricatorIds) {
+      bug.patches = new Set();
+
+      for (const phabId of phabIds) {
+        const patch = patchesById.get(String(phabId));
+
+        if (patch) {
+          patch.bugId = bug.id;
+          allPatches.push(patch);
+        }
+      }
+    }
+
+    const reviewersByPhid = await getReviewersByPhid(allPatches);
+
+    for (const [bug, phabIds] of bugPhabricatorIds) {
+      for (const phabId of phabIds) {
+        const patch = patchesById.get(String(phabId));
+
+        if (!patch) {
+          continue;
+        }
+
+        const names = Object.keys(patch.reviewers || {})
+          .map((phid) => reviewersByPhid.get(phid))
+          .filter(Boolean);
+
         patch.bugId = bug.id;
         patch.reviewers = names;
+        bug.patches.add(patch);
       }
     }
     spinner.succeed();

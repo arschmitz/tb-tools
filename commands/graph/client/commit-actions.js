@@ -137,7 +137,7 @@ function getRebaseModeLabel(mode = "") {
   }
 
   if (mode === "children") {
-    return "selected commit plus one child";
+    return "selected commit plus child stack";
   }
 
   if (mode === "stack") {

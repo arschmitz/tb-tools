@@ -61,6 +61,7 @@ import {
 } from "./actions.mjs";
 import {
   createGraphLandSession,
+  loadGraphLandingPatchTryStatus,
   serializeGraphLandSession,
 } from "./landing.mjs";
 import {
@@ -1152,6 +1153,43 @@ export async function startInteractiveGraphServer({
           ok: true,
           ...serializeGraphLandSession(session),
         });
+        return;
+      }
+
+      const landPatchTryStatusMatch = url.pathname.match(
+        /^\/api\/land\/([^/]+)\/patch\/([^/]+)\/([^/]+)\/try-status$/,
+      );
+      if (request.method === "GET" && landPatchTryStatusMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        noteBrowserActivity();
+        const session = landSessions.get(
+          decodeURIComponent(landPatchTryStatusMatch[1]),
+        );
+
+        if (!session) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown landing session.",
+          });
+          return;
+        }
+
+        try {
+          const tryStatus = await loadGraphLandingPatchTryStatus(session, {
+            bugId: decodeURIComponent(landPatchTryStatusMatch[2]),
+            patchId: decodeURIComponent(landPatchTryStatusMatch[3]),
+          });
+
+          sendJson(response, 200, {
+            ok: true,
+            tryStatus,
+          });
+        } catch (error) {
+          sendJson(response, error?.statusCode || 500, {
+            ok: false,
+            error: error?.message || String(error),
+          });
+        }
         return;
       }
 

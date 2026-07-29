@@ -2604,6 +2604,12 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
         "--ancestry-path",
         "abc123..topic",
       ],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "origin/main..abc123",
+      ],
       ["merge-base", "--is-ancestor", "abc123", "origin/main"],
       ["switch", "--detach", "base123"],
       ["cherry-pick", "--no-commit", "abc123"],
@@ -2675,6 +2681,12 @@ test("rebaseCommit rebases a selected commit onto the current checkout without a
         "--contains",
         "abc123",
         "refs/heads",
+      ],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "origin/main..abc123",
       ],
       ["merge-base", "--is-ancestor", "abc123", "origin/main"],
       ["switch", "--detach", "base123"],
@@ -2773,6 +2785,12 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
         "--ancestry-path",
         "abc123..topic",
       ],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "origin/main..abc123",
+      ],
       ["merge-base", "--is-ancestor", "abc123", "origin/main"],
       ["merge-base", "--is-ancestor", "def456", "origin/main"],
       ["merge-base", "--is-ancestor", "ghi789", "origin/main"],
@@ -2805,6 +2823,94 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
       ["branch", "-f", "topic", "rebased999"],
       ["switch", "topic"],
       ["rev-parse", "HEAD"],
+    ],
+  );
+});
+
+test("rebaseCommit descendants mode replays a selected tip from the stack base", async () => {
+  const calls = [];
+  const rewrittenHashes = ["base000", "new111", "new222", "new333", "new333"];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["c333"]),
+    },
+    hash: "c333",
+    preferredBranch: "Bug-102",
+    rebaseMode: "descendants",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+        return {
+          a111: "Bug-100\n",
+          b222: "Bug-101\n",
+          c333: "Bug-102\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-102\n";
+      }
+
+      if (
+        command.args[0] === "rev-list" &&
+        command.args.at(-1) === "origin/main..c333"
+      ) {
+        return "a111\nb222\nc333\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return {
+          "c333..Bug-102": "",
+        }[command.args.at(-1)] || "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.mode, "descendants");
+  assert.equal(result.branch, "Bug-102");
+  assert.deepEqual(result.commits, ["a111", "b222", "c333"]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-100", originalHash: "a111", hash: "new111" },
+    { branch: "Bug-101", originalHash: "b222", hash: "new222" },
+    { branch: "Bug-102", originalHash: "c333", hash: "new333" },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    [
+      ["cherry-pick", "--no-commit", "a111"],
+      ["cherry-pick", "--no-commit", "b222"],
+      ["cherry-pick", "--no-commit", "c333"],
     ],
   );
 });
@@ -2989,9 +3095,9 @@ test("rebaseCommit uses the selected branch hint for equal length stacks", async
   );
 });
 
-test("rebaseCommit follows the selected shorter branch stack", async () => {
+test("rebaseCommit ignores a shorter per-commit branch hint", async () => {
   const calls = [];
-  const rewrittenHashes = ["base000", "new111", "new222", "new222"];
+  const rewrittenHashes = ["base000", "new111", "new222", "new333", "new333"];
   const result = await rebaseCommit({
     graph: {
       label: "comm",
@@ -3051,8 +3157,13 @@ test("rebaseCommit follows the selected shorter branch stack", async () => {
     },
   });
 
-  assert.equal(result.branch, "Bug-101");
-  assert.deepEqual(result.commits, ["a111", "b222"]);
+  assert.equal(result.branch, "Bug-102");
+  assert.deepEqual(result.commits, ["a111", "b222", "c333"]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-100", originalHash: "a111", hash: "new111" },
+    { branch: "Bug-101", originalHash: "b222", hash: "new222" },
+    { branch: "Bug-102", originalHash: "c333", hash: "new333" },
+  ]);
   assert.deepEqual(
     calls
       .filter((call) => call.args[0] === "cherry-pick")
@@ -3060,6 +3171,7 @@ test("rebaseCommit follows the selected shorter branch stack", async () => {
     [
       ["cherry-pick", "--no-commit", "a111"],
       ["cherry-pick", "--no-commit", "b222"],
+      ["cherry-pick", "--no-commit", "c333"],
     ],
   );
 });
@@ -3134,9 +3246,9 @@ test("rebaseCommit selected mode ignores ambiguous descendant stacks", async () 
   );
 });
 
-test("rebaseCommit children mode replays only the selected stack child", async () => {
+test("rebaseCommit children mode preserves the selected stack path", async () => {
   const calls = [];
-  const rewrittenHashes = ["base000", "new111", "new222", "new222"];
+  const rewrittenHashes = ["base000", "new111", "new222", "new333", "new333"];
   const result = await rebaseCommit({
     graph: {
       label: "comm",
@@ -3198,11 +3310,12 @@ test("rebaseCommit children mode replays only the selected stack child", async (
   });
 
   assert.equal(result.mode, "children");
-  assert.equal(result.branch, "Bug-101");
-  assert.deepEqual(result.commits, ["a111", "b222"]);
+  assert.equal(result.branch, "Bug-102");
+  assert.deepEqual(result.commits, ["a111", "b222", "c333"]);
   assert.deepEqual(result.branchUpdates, [
     { branch: "Bug-100", originalHash: "a111", hash: "new111" },
     { branch: "Bug-101", originalHash: "b222", hash: "new222" },
+    { branch: "Bug-102", originalHash: "c333", hash: "new333" },
   ]);
   assert.deepEqual(
     calls
@@ -3211,6 +3324,295 @@ test("rebaseCommit children mode replays only the selected stack child", async (
     [
       ["cherry-pick", "--no-commit", "a111"],
       ["cherry-pick", "--no-commit", "b222"],
+      ["cherry-pick", "--no-commit", "c333"],
+    ],
+  );
+});
+
+test("rebaseCommit children mode preserves a branch-per-commit Thunderbird stack", async () => {
+  const calls = [];
+  const commits = Array.from({ length: 9 }, (_, index) =>
+    "c" + String(index + 1).padStart(3, "0"),
+  );
+  const branchByCommit = new Map(
+    commits.map((commit, index) => [commit, `Bug-${101 + index}`]),
+  );
+  const rewrittenByCommit = new Map(
+    commits.map((commit, index) => [
+      commit,
+      "new" + String(index + 1).padStart(3, "0"),
+    ]),
+  );
+  const rewrittenHashes = [
+    "base000",
+    ...commits.map((commit) => rewrittenByCommit.get(commit)),
+    rewrittenByCommit.get(commits.at(-1)),
+  ];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set([commits[0]]),
+    },
+    hash: commits[0],
+    preferredBranch: branchByCommit.get(commits[0]),
+    rebaseMode: "children",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+
+        return branchByCommit.has(hash) ? branchByCommit.get(hash) + "\n" : "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return Array.from(branchByCommit.values()).join("\n") + "\n";
+      }
+
+      if (
+        command.args[0] === "rev-list" &&
+        command.args.at(-1) === `origin/main..${commits[0]}`
+      ) {
+        return commits[0] + "\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        const range = command.args.at(-1);
+        const branch = range.slice(range.indexOf("..") + 2);
+        const targetIndex = Array.from(branchByCommit.values()).indexOf(branch);
+
+        return targetIndex === -1
+          ? ""
+          : commits.slice(1, targetIndex + 1).join("\n") + "\n";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.mode, "children");
+  assert.equal(result.branch, branchByCommit.get(commits.at(-1)));
+  assert.deepEqual(result.commits, commits);
+  assert.deepEqual(
+    result.branchUpdates,
+    commits.map((commit) => ({
+      branch: branchByCommit.get(commit),
+      originalHash: commit,
+      hash: rewrittenByCommit.get(commit),
+    })),
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    commits.map((commit) => ["cherry-pick", "--no-commit", commit]),
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "branch" && call.args[1] === "-f")
+      .map((call) => call.args),
+    commits.map((commit) => [
+      "branch",
+      "-f",
+      branchByCommit.get(commit),
+      rewrittenByCommit.get(commit),
+    ]),
+  );
+});
+
+test("rebaseCommit skips an empty cherry-pick and keeps rebasing descendants", async () => {
+  const calls = [];
+  const rewrittenHashes = ["base000", "new111", "new111", "new333", "new333"];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      knownHashes: new Set(["a111"]),
+    },
+    hash: "a111",
+    rebaseMode: "children",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+        return {
+          a111: "Bug-100\n",
+          b222: "Bug-101\n",
+          c333: "Bug-102\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-100\nBug-101\nBug-102\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return {
+          "origin/main..a111": "a111\n",
+          "a111..Bug-100": "",
+          "a111..Bug-101": "b222\n",
+          "a111..Bug-102": "b222\nc333\n",
+        }[command.args.at(-1)] || "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "cherry-pick" && command.args[2] === "b222") {
+        const error = new Error("The previous cherry-pick is now empty.");
+        error.stderr = "The previous cherry-pick is now empty.";
+        throw error;
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.rebasedCount, 2);
+  assert.deepEqual(result.skippedMainCommits, ["b222"]);
+  assert.deepEqual(result.rewrittenCommits, [
+    { originalHash: "a111", hash: "new111" },
+    { originalHash: "c333", hash: "new333" },
+  ]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-100", originalHash: "a111", hash: "new111" },
+    { branch: "Bug-101", originalHash: "b222", hash: "new111" },
+    { branch: "Bug-102", originalHash: "c333", hash: "new333" },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    [
+      ["cherry-pick", "--no-commit", "a111"],
+      ["cherry-pick", "--no-commit", "b222"],
+      ["cherry-pick", "--abort"],
+      ["cherry-pick", "--no-commit", "c333"],
+    ],
+  );
+});
+
+test("rebaseCommit restores the original checkout after a replay failure", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    rebaseCommit({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        knownHashes: new Set(["a111"]),
+      },
+      hash: "a111",
+      rebaseMode: "children",
+      runCommand: async (command) => {
+        calls.push(command);
+
+        if (command.args[0] === "status") {
+          return "";
+        }
+
+        if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+          return "main\n";
+        }
+
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--points-at")
+        ) {
+          return "Bug-100\n";
+        }
+
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--contains")
+        ) {
+          return "Bug-100\n";
+        }
+
+        if (command.args[0] === "rev-list") {
+          return command.args.at(-1) === "origin/main..a111" ? "a111\n" : "";
+        }
+
+        if (command.args[0] === "merge-base") {
+          throw new Error("not on main");
+        }
+
+        if (command.args[0] === "rev-parse") {
+          return "base000\n";
+        }
+
+        if (command.args[0] === "cherry-pick" && command.args[1] === "--no-commit") {
+          const error = new Error("CONFLICT");
+          error.stderr = "CONFLICT (content): Merge conflict";
+          throw error;
+        }
+
+        return "";
+      },
+    }),
+    /CONFLICT/,
+  );
+
+  assert.deepEqual(
+    calls
+      .filter((call) =>
+        call.args[0] === "switch" ||
+        call.args[0] === "cherry-pick" ||
+        call.args[0] === "reset"
+      )
+      .map((call) => call.args),
+    [
+      ["switch", "--detach", "base000"],
+      ["cherry-pick", "--no-commit", "a111"],
+      ["cherry-pick", "--abort"],
+      ["reset", "--hard"],
+      ["switch", "main"],
     ],
   );
 });
@@ -7039,6 +7441,7 @@ test("interactive graph server starts a try session and refreshes try links", as
 test("interactive graph server lands patches through browser prompts", async (t) => {
   const calls = [];
   const pushes = [];
+  let transactionSearches = 0;
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
     token: "secret",
@@ -7085,6 +7488,8 @@ test("interactive graph server lands patches through browser prompts", async (t)
       }
 
       if (route === "transaction.search") {
+        transactionSearches++;
+        await new Promise((resolve) => setTimeout(resolve, 20));
         return {
           result: {
             data: [
@@ -7239,11 +7644,40 @@ test("interactive graph server lands patches through browser prompts", async (t)
     patchChoice.links[1].url,
     "https://phabricator.services.mozilla.com/D987654",
   );
-  assert.equal(patchChoice.tryStatus.state, "stale");
+  assert.equal(patchChoice.tryStatus.state, "pending");
+  assert.equal(transactionSearches, 0);
+
+  const tryStatusUrl = new URL(
+    `api/land/${session.id}/patch/123456/987654/try-status?token=secret`,
+    serverInfo.url,
+  );
+  const [tryStatusResponse, duplicateTryStatusResponse] = await Promise.all([
+    fetch(tryStatusUrl),
+    fetch(tryStatusUrl),
+  ]);
+  const [tryStatusResult, duplicateTryStatusResult] = await Promise.all([
+    tryStatusResponse.json(),
+    duplicateTryStatusResponse.json(),
+  ]);
+
+  assert.equal(tryStatusResponse.ok, true);
+  assert.equal(duplicateTryStatusResponse.ok, true);
+  assert.equal(tryStatusResult.tryStatus.state, "stale");
+  assert.equal(duplicateTryStatusResult.tryStatus.state, "stale");
   assert.equal(
-    patchChoice.tryStatus.latestTryRun.url,
+    tryStatusResult.tryStatus.latestTryRun.url,
     "https://treeherder.mozilla.org/jobs?repo=try&revision=landing",
   );
+  assert.equal(transactionSearches, 1);
+
+  const cachedTryStatusResponse = await fetch(
+    tryStatusUrl,
+  );
+  const cachedTryStatusResult = await cachedTryStatusResponse.json();
+
+  assert.equal(cachedTryStatusResponse.ok, true);
+  assert.equal(cachedTryStatusResult.tryStatus.state, "stale");
+  assert.equal(transactionSearches, 1);
   assert.equal(
     session.prompt.actions.some((action) => action.id === "continue"),
     true,
