@@ -79,6 +79,25 @@ h1 {
 body.has-command-status main {
   padding-bottom: 52px;
 }
+.server-stopped {
+  align-items: center;
+  display: flex;
+  min-height: 100vh;
+}
+.server-stopped-message {
+  margin: 0 auto;
+  max-width: 520px;
+  padding: 24px;
+  text-align: center;
+}
+.server-stopped-message h1 {
+  font-size: 22px;
+  margin: 0 0 8px;
+}
+.server-stopped-message p {
+  color: #59616d;
+  margin: 0;
+}
 .update-actions {
   align-items: center;
   display: flex;
@@ -2745,6 +2764,9 @@ body.is-resizing-panes {
   body {
     background: #111418;
     color: #f1f3f6;
+  }
+  .server-stopped-message p {
+    color: #acb4c0;
   }
   header,
   .summary,

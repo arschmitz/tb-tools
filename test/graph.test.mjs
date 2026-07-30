@@ -4320,6 +4320,9 @@ test("runGraphRepositoryUpdate can shelf dirty changes before updating", async (
 
   assert.equal(result.dirtyAction, "shelf");
   assert.equal(result.shelves.length, 1);
+  assert.match(result.output, /\$ git stash push --include-untracked -m tb-tools graph update: comm/);
+  assert.match(result.output, /Saved working directory and index state/);
+  assert.match(result.output, /\$ git pull --ff-only origin main/);
   assert.deepEqual(result.shelves[0], {
     graphIndex: 0,
     label: "comm",
@@ -4389,6 +4392,8 @@ test("runGraphRepositoryUpdate can amend dirty changes before rebasing", async (
     "comm amended uncommitted changes into the current commit.",
   );
   assert.equal(result.results[0].rebasedCount, 2);
+  assert.match(result.output, /\$ git commit --amend --no-edit/);
+  assert.match(result.output, /\$ git rebase --update-refs origin\/main topic/);
   assert.deepEqual(
     calls.map((call) => call.args),
     [
@@ -4670,6 +4675,7 @@ test("unshelfGraphShelves pops requested graph shelves", async () => {
   });
 
   assert.equal(result.message, "Unshelved 1 checkout.");
+  assert.match(result.output, /\$ git stash pop stash@\{0\}/);
   assert.deepEqual(
     calls.map((call) => call.args),
     [["stash", "pop", "stash@{0}"]],
@@ -5786,6 +5792,10 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function runGraphUpdate/);
   assert.match(client, /function promptForDirtyUpdateAction/);
   assert.match(client, /function unshelfGraphUpdateChanges/);
+  assert.match(client, /function listenForServerShutdown/);
+  assert.match(client, /\/api\/shutdown-events/);
+  assert.match(client, /INTERACTIVE\.closeTabsOnShutdown !== false/);
+  assert.match(client, /window\.close\(\)/);
   assert.match(client, /function startGraphMachAction/);
   assert.match(client, /function openTryDialog/);
   assert.match(client, /function submitTryDialog/);
@@ -6083,6 +6093,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
     html,
     /class="origin-main-status" role="status" aria-label="origin\/main freshness"/,
   );
+  assert.match(html, /"closeTabsOnShutdown":true/);
   assert.match(
     html,
     /class="command-status-bar" role="region" aria-label="Command status" hidden/,
@@ -6631,6 +6642,8 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   );
   assert.equal(update.snapshots[0].branch, "main");
   assert.equal(update.snapshots[0].commits[0].hash, "abc123");
+  assert.match(update.output, /\$ git fetch origin main/);
+  assert.match(update.output, /\$ git pull --ff-only origin main/);
 
   const machResponse = await fetch(new URL("api/mach-action", serverInfo.url), {
     method: "POST",
@@ -7824,6 +7837,10 @@ test("interactive graph server starts a try session and refreshes try links", as
 test("interactive graph server lands patches through browser prompts", async (t) => {
   const calls = [];
   const pushes = [];
+  const bugUpdates = [];
+  const commPath = await mkdtemp(path.join(os.tmpdir(), "tb-tools-land-"));
+  await mkdir(path.join(commPath, "mail", "config"), { recursive: true });
+  await writeFile(path.join(commPath, "mail", "config", "version.txt"), "128.0a1\n");
   let transactionSearches = 0;
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
@@ -7832,7 +7849,7 @@ test("interactive graph server lands patches through browser prompts", async (t)
     graphs: [
       {
         label: "comm",
-        path: "/repo/comm",
+        path: commPath,
         branch: "main",
         commits: [],
         commitCount: 0,
@@ -7843,9 +7860,12 @@ test("interactive graph server lands patches through browser prompts", async (t)
       {
         id: "123456",
         summary: "Fix the landing flow",
-        target_milestone: "128 Branch",
+        target_milestone: "---",
       },
     ],
+    updateBug: async (bugId, update) => {
+      bugUpdates.push([bugId, update]);
+    },
     getAttachments: async () => [
       {
         content_type: "text/x-phabricator-request",
@@ -7971,6 +7991,7 @@ test("interactive graph server lands patches through browser prompts", async (t)
     if (serverInfo.server.listening) {
       serverInfo.server.close();
     }
+    return rm(commPath, { recursive: true, force: true });
   });
 
   async function answer(session, value) {
@@ -8119,6 +8140,14 @@ test("interactive graph server lands patches through browser prompts", async (t)
   session = await answer(session, "approve");
   session = await waitForLandSession(
     statusUrl,
+    (item) => item.prompt?.message === "Enter target milestone for bug 123456.",
+  );
+  assert.equal(session.prompt.type, "input");
+  assert.equal(session.prompt.defaultValue, "128 Branch");
+
+  session = await answer(session, "129 Branch");
+  session = await waitForLandSession(
+    statusUrl,
     (item) => item.status === "complete",
   );
   assert.equal(session.message, "Landing complete.");
@@ -8128,10 +8157,17 @@ test("interactive graph server lands patches through browser prompts", async (t)
     {
       landoRepo: "test-lando",
       relbranch: undefined,
-      localRepo: "/repo/comm",
+      localRepo: commPath,
       yes: true,
     },
   ]);
+  assert.deepEqual(bugUpdates, [
+    ["123456", { target_milestone: "129 Branch" }],
+  ]);
+  assert.match(
+    session.output,
+    /Set bug 123456 target milestone to 129 Branch\./,
+  );
 
   const closePromise = new Promise((resolve) =>
     serverInfo.server.once("close", resolve),
@@ -9402,6 +9438,49 @@ test("interactive graph server survives refreshes and multiple browser clients",
   assert.equal(serverInfo.server.closeReason, "all browser tabs closed");
 });
 
+test("interactive graph server asks browser tabs to close on shutdown", async (t) => {
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    browserShutdownGraceMs: 5,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    runCommand: async () => "",
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const shutdownEvent = fetch(
+    new URL("api/shutdown-events?token=secret&clientId=tab-one", serverInfo.url),
+  ).then((response) => response.json());
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  serverInfo.server.shutdown(0, "terminal signal received");
+
+  assert.deepEqual(await shutdownEvent, {
+    ok: true,
+    closing: true,
+    closeTabs: true,
+    reason: "terminal signal received",
+  });
+  await closePromise;
+  assert.equal(serverInfo.server.closeReason, "terminal signal received");
+});
+
 test("waitForInteractiveServerClose routes signals through the interactive shutdown hook", async () => {
   const signals = new EventEmitter();
   const server = new EventEmitter();
@@ -9428,6 +9507,7 @@ test("waitForInteractiveServerClose routes signals through the interactive shutd
   assert.deepEqual(calls, [{ delay: 0, reason: "terminal signal received" }]);
   assert.equal(signals.listenerCount("SIGINT"), 0);
   assert.equal(signals.listenerCount("SIGTERM"), 0);
+  assert.equal(signals.listenerCount("SIGHUP"), 0);
 });
 
 test("console command serves interactive mode without writing static output", async () => {
@@ -9446,13 +9526,19 @@ test("console command serves interactive mode without writing static output", as
     open: async (url) => calls.push(["open", url]),
     makeToken: () => "secret",
     log: () => {},
-    startServer: async ({ html, token, pageSize }) => {
+    startServer: async ({
+      html,
+      token,
+      pageSize,
+      closeBrowserTabsOnShutdown,
+    }) => {
       calls.push([
         "server",
         /id="graph-config"/.test(html),
         /\/assets\/graph-client\/init\.js/.test(html),
         token,
         pageSize,
+        closeBrowserTabsOnShutdown,
       ]);
       return {
         url: "http://127.0.0.1:1234/",
@@ -9466,8 +9552,43 @@ test("console command serves interactive mode without writing static output", as
 
   assert.equal(url, "http://127.0.0.1:1234/");
   assert.deepEqual(calls, [
-    ["server", true, true, "secret", 25],
+    ["server", true, true, "secret", 25, true],
     ["open", "http://127.0.0.1:1234/"],
+    ["wait", {}],
+  ]);
+});
+
+test("console command can leave browser tabs open on process shutdown", async () => {
+  const calls = [];
+  const command = createConsoleCommand({
+    getCheckoutMetadata: async ({ label }) => ({
+      label,
+      path: `/repo/${label}`,
+      branch: "main",
+      commitCount: 0,
+      commits: [],
+      diffs: {},
+    }),
+    makeDir: async () => calls.push(["mkdir"]),
+    write: async () => calls.push(["write"]),
+    open: async (url) => calls.push(["open", url]),
+    makeToken: () => "secret",
+    log: () => {},
+    startServer: async ({ closeBrowserTabsOnShutdown }) => {
+      calls.push(["server", closeBrowserTabsOnShutdown]);
+      return {
+        url: "http://127.0.0.1:1234/",
+        server: {},
+      };
+    },
+    waitForClose: async (server) => calls.push(["wait", server]),
+  });
+
+  const url = await command({ closeTabs: false, open: false });
+
+  assert.equal(url, "http://127.0.0.1:1234/");
+  assert.deepEqual(calls, [
+    ["server", false],
     ["wait", {}],
   ]);
 });

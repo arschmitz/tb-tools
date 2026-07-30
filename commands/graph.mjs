@@ -49,6 +49,7 @@ export function createGraphCommand({
     interactive = false,
     pageSize = 80,
     port = 0,
+    closeTabs = true,
   } = {}) {
     const count = Number(limit) || 80;
     const commitPageSize = Number(pageSize) || 80;
@@ -71,6 +72,7 @@ export function createGraphCommand({
     }
 
     const isInteractive = forceInteractive || Boolean(interactive);
+    const closeTabsOnShutdown = closeTabs !== false && closeTabs !== "false";
     const graphs = await Promise.all(checkouts.map((checkout) => {
       if (isInteractive) {
         return getCheckoutMetadata(checkout);
@@ -89,6 +91,7 @@ export function createGraphCommand({
       interactive: {
         enabled: isInteractive,
         pageSize: commitPageSize,
+        closeTabsOnShutdown,
         token,
       },
       stylesheetHref: isInteractive
@@ -108,11 +111,14 @@ export function createGraphCommand({
         pageSize: commitPageSize,
         maxDiffBytes: diffByteLimit,
         port,
+        closeBrowserTabsOnShutdown: closeTabsOnShutdown,
         runCommand,
       });
 
       log(`Interactive graph running at ${graphServer.url}`);
-      log("Close the browser tab or press Ctrl-C to stop the server.");
+      log(closeTabsOnShutdown
+        ? "Close the browser tab or press Ctrl-C to stop the server and close browser tabs."
+        : "Close the browser tab or press Ctrl-C to stop the server.");
 
       if (shouldOpen) {
         await open(graphServer.url);

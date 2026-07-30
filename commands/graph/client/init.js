@@ -539,6 +539,36 @@ if (INTERACTIVE.enabled) {
     return JSON.stringify({ token: INTERACTIVE.token, clientId });
   }
 
+  function clearInteractiveTimers() {
+    clearInterval(heartbeat);
+    clearInterval(graphPoll);
+    clearInterval(originMainStatusPoll);
+    if (uiState.machPollTimer) {
+      window.clearTimeout(uiState.machPollTimer);
+    }
+    if (uiState.lintPollTimer) {
+      window.clearTimeout(uiState.lintPollTimer);
+    }
+    if (uiState.newPatchPollTimer) {
+      window.clearTimeout(uiState.newPatchPollTimer);
+    }
+    if (uiState.patchPollTimer) {
+      window.clearTimeout(uiState.patchPollTimer);
+    }
+    if (uiState.testPollTimer) {
+      window.clearTimeout(uiState.testPollTimer);
+    }
+    if (uiState.landPollTimer) {
+      window.clearTimeout(uiState.landPollTimer);
+    }
+    if (uiState.commandElapsedTimer) {
+      window.clearInterval(uiState.commandElapsedTimer);
+    }
+    if (uiState.originMainStatusRetryTimer) {
+      window.clearTimeout(uiState.originMainStatusRetryTimer);
+    }
+  }
+
   function sendCloseSignal() {
     if (closeSignalSent) {
       return;
@@ -572,6 +602,56 @@ if (INTERACTIVE.enabled) {
     }).catch(() => {});
   }
 
+  function showServerStopped(reason = "") {
+    document.title = "Thunderbird Desktop Console stopped";
+    document.body.classList.add("server-stopped");
+    document.body.replaceChildren();
+
+    const message = document.createElement("main");
+    const title = document.createElement("h1");
+    const detail = document.createElement("p");
+
+    title.textContent = "Thunderbird Desktop Console stopped";
+    detail.textContent = reason || "The local console server has shut down.";
+    message.className = "server-stopped-message";
+    message.append(title, detail);
+    document.body.append(message);
+  }
+
+  async function listenForServerShutdown() {
+    while (!closeSignalSent) {
+      try {
+        const response = await fetch(
+          "/api/shutdown-events?token=" + encodeURIComponent(INTERACTIVE.token) +
+            "&clientId=" + encodeURIComponent(clientId),
+          { cache: "no-store" },
+        );
+        const result = await response.json();
+
+        if (!response.ok) {
+          return;
+        }
+
+        if (!result.closing) {
+          continue;
+        }
+
+        closeSignalSent = true;
+        clearInteractiveTimers();
+
+        if (result.closeTabs && INTERACTIVE.closeTabsOnShutdown !== false) {
+          window.close();
+          window.setTimeout(() => showServerStopped(result.reason), 250);
+        } else {
+          showServerStopped(result.reason);
+        }
+        return;
+      } catch {
+        return;
+      }
+    }
+  }
+
   const heartbeat = setInterval(sendHeartbeat, 2000);
   const graphPoll = setInterval(pollGraphUpdates, INTERACTIVE.pollIntervalMs);
   const originMainStatusPoll = setInterval(
@@ -581,37 +661,12 @@ if (INTERACTIVE.enabled) {
 
   sendHeartbeat();
   refreshOriginMainStatus();
+  listenForServerShutdown();
 
   window.addEventListener(
     "pagehide",
     () => {
-      clearInterval(heartbeat);
-      clearInterval(graphPoll);
-      clearInterval(originMainStatusPoll);
-      if (uiState.machPollTimer) {
-        window.clearTimeout(uiState.machPollTimer);
-      }
-      if (uiState.lintPollTimer) {
-        window.clearTimeout(uiState.lintPollTimer);
-      }
-      if (uiState.newPatchPollTimer) {
-        window.clearTimeout(uiState.newPatchPollTimer);
-      }
-      if (uiState.patchPollTimer) {
-        window.clearTimeout(uiState.patchPollTimer);
-      }
-      if (uiState.testPollTimer) {
-        window.clearTimeout(uiState.testPollTimer);
-      }
-      if (uiState.landPollTimer) {
-        window.clearTimeout(uiState.landPollTimer);
-      }
-      if (uiState.commandElapsedTimer) {
-        window.clearInterval(uiState.commandElapsedTimer);
-      }
-      if (uiState.originMainStatusRetryTimer) {
-        window.clearTimeout(uiState.originMainStatusRetryTimer);
-      }
+      clearInteractiveTimers();
       sendCloseSignal();
     },
     { once: true },

@@ -183,6 +183,17 @@ export function setMachOutputPanel(session = uiState.lastMachSession) {
   }
 }
 
+function clearCommandStatusOutput() {
+  uiState.lastMachSession = null;
+  uiState.machOutputVisible = false;
+  setMachOutputPanel(null);
+}
+
+function setCommandStatusOutputFromResult(result) {
+  uiState.lastMachSession = result?.output ? { output: result.output } : null;
+  setMachOutputPanel(uiState.lastMachSession);
+}
+
 export function formatCommandElapsed(elapsedMs) {
   const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -942,6 +953,7 @@ export function applyGraphSnapshots(snapshots) {
 }
 
 export async function unshelfGraphUpdateChanges(shelves) {
+  clearCommandStatusOutput();
   setUpdateStatus("Unshelving changes...", { busy: true });
 
   try {
@@ -955,6 +967,8 @@ export async function unshelfGraphUpdateChanges(shelves) {
       }),
     });
     const result = await response.json();
+
+    setCommandStatusOutputFromResult(result);
 
     if (!response.ok) {
       throw new Error(result.error || response.statusText);
@@ -971,6 +985,7 @@ export async function unshelfGraphUpdateChanges(shelves) {
 }
 
 export async function runGraphUpdate(mode, dirtyAction = "") {
+  clearCommandStatusOutput();
   setUpdateStatus(getUpdateActionLabel(mode) + " running...", { busy: true });
 
   try {
@@ -985,6 +1000,8 @@ export async function runGraphUpdate(mode, dirtyAction = "") {
       }),
     });
     const result = await response.json();
+
+    setCommandStatusOutputFromResult(result);
 
     if (!response.ok) {
       if (!dirtyAction && Array.isArray(result.dirty) && result.dirty.length) {

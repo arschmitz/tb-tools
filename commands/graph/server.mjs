@@ -14,6 +14,7 @@ import defaultPhab, { comment as defaultComment } from "../../lib/phab.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
 import {
   DEFAULT_CLIENT_DISCONNECT_GRACE_MS,
+  DEFAULT_BROWSER_SHUTDOWN_GRACE_MS,
   DEFAULT_HEARTBEAT_TIMEOUT_MS,
   DEFAULT_MAX_DIFF_BYTES,
   DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS,
@@ -80,6 +81,7 @@ import {
 } from "./testing.mjs";
 
 const REVIEWER_RATE_LIMIT_COOLDOWN_MS = 60_000;
+const INTERACTIVE_SERVER_CLOSE_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
 
 async function readRequestJson(request) {
   const chunks = [];
@@ -150,6 +152,8 @@ export async function startInteractiveGraphServer({
   heartbeatIntervalMs = 2000,
   heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
   clientDisconnectGraceMs = DEFAULT_CLIENT_DISCONNECT_GRACE_MS,
+  browserShutdownGraceMs = DEFAULT_BROWSER_SHUTDOWN_GRACE_MS,
+  closeBrowserTabsOnShutdown = true,
   runCommand = run,
   getBugs = defaultGetBugs,
   getAttachments = defaultGetAttachments,
@@ -183,6 +187,7 @@ export async function startInteractiveGraphServer({
   const reviewerSearchRouteCooldowns = new Map();
   const sockets = new Set();
   const browserClients = new Map();
+  const browserShutdownWaiters = new Set();
   let closeTimer;
   let noClientCloseTimer;
   let browserMonitorStarted = false;
@@ -199,6 +204,42 @@ export async function startInteractiveGraphServer({
 
     clearTimeout(noClientCloseTimer);
     noClientCloseTimer = undefined;
+  }
+
+  function sendBrowserShutdownEvent(
+    waiter,
+    {
+      closing = false,
+      closeTabs = false,
+      reason = "",
+    } = {},
+  ) {
+    clearTimeout(waiter.timer);
+    browserShutdownWaiters.delete(waiter);
+
+    if (waiter.response.writableEnded) {
+      return;
+    }
+
+    sendJson(waiter.response, 200, {
+      ok: true,
+      closing,
+      closeTabs,
+      reason,
+    });
+  }
+
+  function notifyBrowserShutdown({
+    closeTabs = false,
+    reason = "",
+  } = {}) {
+    for (const waiter of [...browserShutdownWaiters]) {
+      sendBrowserShutdownEvent(waiter, {
+        closing: true,
+        closeTabs,
+        reason,
+      });
+    }
   }
 
   function noteBrowserActivity(now = Date.now()) {
@@ -274,11 +315,20 @@ export async function startInteractiveGraphServer({
     }
 
     shuttingDown = true;
+    const shouldCloseBrowserTabs = Boolean(closeBrowserTabsOnShutdown);
+    const shutdownDelay = shouldCloseBrowserTabs
+      ? Math.max(Number(delay) || 0, Number(browserShutdownGraceMs) || 0)
+      : Number(delay) || 0;
+
     machSessions.forEach((session) => session.cancel?.());
     newPatchSessions.forEach((session) => session.cancel?.());
     patchSessions.forEach((session) => session.cancel?.());
     testSessions.forEach((session) => session.cancel?.());
     server.closeReason = reason;
+    notifyBrowserShutdown({
+      closeTabs: shouldCloseBrowserTabs,
+      reason,
+    });
     closeTimer = setTimeout(() => {
       clearInterval(heartbeatTimer);
       clearNoClientCloseTimer();
@@ -290,7 +340,7 @@ export async function startInteractiveGraphServer({
       setTimeout(() => {
         sockets.forEach((socket) => socket.destroy());
       }, 250);
-    }, delay);
+    }, shutdownDelay);
   }
 
   async function getServerGraphSnapshot(graph, limit) {
@@ -1723,6 +1773,36 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/api/shutdown-events") {
+        validateToken(url.searchParams.get("token"), token);
+        registerBrowserClient(url.searchParams.get("clientId") || "");
+
+        if (shuttingDown) {
+          sendJson(response, 200, {
+            ok: true,
+            closing: true,
+            closeTabs: Boolean(closeBrowserTabsOnShutdown),
+            reason: server.closeReason || "server shutdown requested",
+          });
+          return;
+        }
+
+        const waiter = {
+          response,
+          timer: setTimeout(() => {
+            sendBrowserShutdownEvent(waiter);
+          }, heartbeatIntervalMs * 15),
+        };
+
+        waiter.timer.unref?.();
+        browserShutdownWaiters.add(waiter);
+        request.once("close", () => {
+          clearTimeout(waiter.timer);
+          browserShutdownWaiters.delete(waiter);
+        });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/api/close") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
@@ -1762,6 +1842,10 @@ export async function startInteractiveGraphServer({
         body.dirty = error.dirty;
       }
 
+      if (error?.output) {
+        body.output = error.output;
+      }
+
       attachRebaseConflict(body, error);
 
       sendJson(response, error.statusCode || 500, body);
@@ -1786,6 +1870,10 @@ export async function startInteractiveGraphServer({
 
     if (closeTimer) {
       clearTimeout(closeTimer);
+    }
+
+    for (const waiter of [...browserShutdownWaiters]) {
+      sendBrowserShutdownEvent(waiter);
     }
   });
 
@@ -1816,13 +1904,15 @@ export function waitForInteractiveServerClose(server, signalSource = process) {
       }
     };
     const cleanup = () => {
-      signalSource.off("SIGINT", close);
-      signalSource.off("SIGTERM", close);
+      for (const signal of INTERACTIVE_SERVER_CLOSE_SIGNALS) {
+        signalSource.off(signal, close);
+      }
       resolve(server.closeReason || "server closed");
     };
 
     server.once("close", cleanup);
-    signalSource.once("SIGINT", close);
-    signalSource.once("SIGTERM", close);
+    for (const signal of INTERACTIVE_SERVER_CLOSE_SIGNALS) {
+      signalSource.once(signal, close);
+    }
   });
 }

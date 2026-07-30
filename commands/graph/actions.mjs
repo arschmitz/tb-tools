@@ -1212,23 +1212,58 @@ export async function unshelfGraphShelves({
   runCommand = run,
 }) {
   const results = [];
+  const { session: outputSession, runCommand: runCommandWithOutput } =
+    createGraphCommandOutputRecorder(runCommand);
 
-  for (const shelf of shelves) {
-    const graph = graphs[Number(shelf.graphIndex)];
+  try {
+    for (const shelf of shelves) {
+      const graph = graphs[Number(shelf.graphIndex)];
 
-    results.push(await unshelfGraphChanges({
-      graph,
-      stashRef: shelf.stashRef || "stash@{0}",
-      runCommand,
-    }));
+      results.push(await unshelfGraphChanges({
+        graph,
+        stashRef: shelf.stashRef || "stash@{0}",
+        runCommand: runCommandWithOutput,
+      }));
+    }
+
+    return {
+      action: "unshelf",
+      shelves: results,
+      output: outputSession.output || "",
+      message: results.length
+        ? `Unshelved ${results.length} checkout${results.length === 1 ? "" : "s"}.`
+        : "No shelved changes to unshelve.",
+    };
+  } catch (error) {
+    error.output = outputSession.output || "";
+    throw error;
   }
+}
+
+function createGraphCommandOutputRecorder(runCommand = run) {
+  const session = { output: "" };
 
   return {
-    action: "unshelf",
-    shelves: results,
-    message: results.length
-      ? `Unshelved ${results.length} checkout${results.length === 1 ? "" : "s"}.`
-      : "No shelved changes to unshelve.",
+    session,
+    async runCommand(command) {
+      appendSubmitOutput(session, `$ ${formatCommandForOutput(command)}\n`);
+
+      try {
+        const output = await runCommand(command);
+
+        appendSubmitOutput(session, output);
+        return output;
+      } catch (error) {
+        appendSubmitOutput(session, error.stdout || "");
+        appendSubmitOutput(session, error.stderr || "");
+
+        if (!error.stdout && !error.stderr && error.message) {
+          appendSubmitOutput(session, `${error.message}\n`);
+        }
+
+        throw error;
+      }
+    },
   };
 }
 
@@ -1238,61 +1273,73 @@ export async function runGraphRepositoryUpdate({
   dirtyAction = "",
   runCommand = run,
 }) {
-  const updateMode = normalizeGraphUpdateMode(mode);
-  const normalizedDirtyAction = normalizeGraphDirtyAction(dirtyAction);
-  const dirty = await getGraphDirtyCheckouts({ graphs, runCommand });
-  const shelves = [];
-  const dirtyResults = [];
+  const { session: outputSession, runCommand: runCommandWithOutput } =
+    createGraphCommandOutputRecorder(runCommand);
+  try {
+    const updateMode = normalizeGraphUpdateMode(mode);
+    const normalizedDirtyAction = normalizeGraphDirtyAction(dirtyAction);
+    const dirty = await getGraphDirtyCheckouts({
+      graphs,
+      runCommand: runCommandWithOutput,
+    });
+    const shelves = [];
+    const dirtyResults = [];
 
-  if (dirty.length && !normalizedDirtyAction) {
-    const error = new Error(`Uncommitted changes found in ${dirty.map((item) => item.label).join(", ")}.`);
-    error.statusCode = 409;
-    error.dirty = dirty;
-    throw error;
-  }
+    if (dirty.length && !normalizedDirtyAction) {
+      const error = new Error(`Uncommitted changes found in ${dirty.map((item) => item.label).join(", ")}.`);
+      error.statusCode = 409;
+      error.dirty = dirty;
+      error.output = outputSession.output || "";
+      throw error;
+    }
 
-  for (const item of dirty) {
-    const graph = graphs[item.index];
+    for (const item of dirty) {
+      const graph = graphs[item.index];
 
-    if (normalizedDirtyAction === "amend") {
-      dirtyResults.push(await amendGraphDirtyChanges(graph, runCommand));
-    } else if (normalizedDirtyAction === "shelf") {
-      const shelf = await shelfGraphDirtyChanges(graph, runCommand);
+      if (normalizedDirtyAction === "amend") {
+        dirtyResults.push(await amendGraphDirtyChanges(graph, runCommandWithOutput));
+      } else if (normalizedDirtyAction === "shelf") {
+        const shelf = await shelfGraphDirtyChanges(graph, runCommandWithOutput);
 
-      if (shelf) {
-        shelves.push({
-          graphIndex: item.index,
-          ...shelf,
-        });
-        dirtyResults.push({
-          label: graph.label,
-          path: graph.path,
-          message: `${graph.label} shelved uncommitted changes.`,
-        });
+        if (shelf) {
+          shelves.push({
+            graphIndex: item.index,
+            ...shelf,
+          });
+          dirtyResults.push({
+            label: graph.label,
+            path: graph.path,
+            message: `${graph.label} shelved uncommitted changes.`,
+          });
+        }
       }
     }
-  }
 
-  const results = [];
+    const results = [];
 
-  for (const graph of graphs) {
-    results.push(await updateGraphCheckout({
-      graph,
+    for (const graph of graphs) {
+      results.push(await updateGraphCheckout({
+        graph,
+        mode: updateMode,
+        runCommand: runCommandWithOutput,
+      }));
+    }
+
+    return {
+      action: "update-graphs",
       mode: updateMode,
-      runCommand,
-    }));
+      dirtyAction: normalizedDirtyAction,
+      dirty,
+      dirtyResults,
+      shelves,
+      results,
+      output: outputSession.output || "",
+      message: results.map((result) => result.message).join(" "),
+    };
+  } catch (error) {
+    error.output = error.output || outputSession.output || "";
+    throw error;
   }
-
-  return {
-    action: "update-graphs",
-    mode: updateMode,
-    dirtyAction: normalizedDirtyAction,
-    dirty,
-    dirtyResults,
-    shelves,
-    results,
-    message: results.map((result) => result.message).join(" "),
-  };
 }
 
 function parseLsRemoteHash(output = "") {

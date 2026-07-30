@@ -442,6 +442,7 @@ ${testOutputTab}</nav>
       enabled: Boolean(interactive.enabled),
       pageSize: interactive.pageSize || 80,
       pollIntervalMs: interactive.pollIntervalMs || 3000,
+      closeTabsOnShutdown: interactive.closeTabsOnShutdown !== false,
       token: interactive.token,
     },
     originMainStatusCacheMs: DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS,

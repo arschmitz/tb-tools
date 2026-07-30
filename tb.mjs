@@ -151,6 +151,7 @@ const commands = {
     header: "Console Options",
     options: [
       { name: "open", description: "Open the console in a browser", defaultValue: "true" },
+      { name: "closeTabs", description: "Close open console browser tabs when the console process exits", defaultValue: "true" },
       { name: "comm", description: "Include the comm checkout tab", defaultValue: "true" },
       { name: "firefox", description: "Include the Firefox parent checkout tab", defaultValue: "true" },
       { name: "maxDiffBytes", description: "Maximum server-loaded diff bytes per commit", defaultValue: "200000" },

@@ -39,6 +39,7 @@ Use the console to:
 - run modified tests or explicit path/glob patterns, including headless runs, with parsed final summaries and rerun actions for failures
 - watch command progress in a slim status bar with elapsed time, cancellable running work, and toggleable output
 - monitor comm and Firefox `origin/main` freshness plus Rust dependency sync warnings before remote-build workflows like try and submit
+- close console browser tabs automatically when the local console process exits, with an opt-out for keeping tabs open
 
 ![Thunderbird Desktop Console showing a selected commit, integration badges, and a GitHub-style diff](/images/console-overview.png)
 
@@ -213,6 +214,7 @@ tb console
 |option|alias|Description|Default|example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
 |----|-----------|--|--|---|
 |--open||Open the console in a browser|true|`tb console --open=false`
+|--closeTabs||Close open console browser tabs when the console process exits|true|`tb console --closeTabs=false`
 |--comm||Include the comm checkout tab|true|`tb console --comm=false`
 |--firefox||Include the Firefox parent checkout tab|true|`tb console --firefox=false`
 |--maxDiffBytes||Maximum server-loaded diff bytes per commit|200000|`tb console --maxDiffBytes=200000`

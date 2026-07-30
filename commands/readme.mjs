@@ -46,6 +46,7 @@ function pushConsoleSection(lines) {
     "- run modified tests or explicit path/glob patterns, including headless runs, with parsed final summaries and rerun actions for failures",
     "- watch command progress in a slim status bar with elapsed time, cancellable running work, and toggleable output",
     "- monitor comm and Firefox `origin/main` freshness plus Rust dependency sync warnings before remote-build workflows like try and submit",
+    "- close console browser tabs automatically when the local console process exits, with an opt-out for keeping tabs open",
     "",
   );
 
