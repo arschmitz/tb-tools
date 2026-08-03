@@ -83,6 +83,7 @@ import {
   installTbToolsCommitMsgHook,
   TB_TOOLS_ID_TRAILER,
 } from "../lib/commit-message.mjs";
+import { run } from "../lib/utils.mjs";
 
 const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "style.css", output: "graph-client/style.css" },
@@ -3763,83 +3764,151 @@ test("rebaseCommit selected mode ignores ambiguous descendant stacks", async () 
   );
 });
 
-test("rebaseCommit selected mode keeps stack branch refs when rebasing only the tip", async () => {
-  const calls = [];
-  const rewrittenHashes = ["base000", "new-docs"];
+test("rebaseCommit selected mode moves a tip branch and leaves its parent branch alone", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-rebase-real-"));
+  const git = async (args) =>
+    (await run({
+      cmd: "git",
+      args,
+      cwd: tempDir,
+      capture: true,
+      silent: true,
+    })).trim();
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await git(["init", "-b", "main"]);
+  await git(["config", "user.name", "tb-tools"]);
+  await git(["config", "user.email", "tb-tools@example.invalid"]);
+  await writeFile(path.join(tempDir, "base.txt"), "base\n");
+  await git(["add", "base.txt"]);
+  await git(["commit", "-m", "base"]);
+
+  const firstMain = await git(["rev-parse", "HEAD"]);
+  await git(["update-ref", "refs/remotes/origin/main", firstMain]);
+  await git(["switch", "-c", "topic"]);
+  await writeFile(path.join(tempDir, "parent.txt"), "parent\n");
+  await git(["add", "parent.txt"]);
+  await git(["commit", "-m", "Bug 1111111 - Parent"]);
+  const parent = await git(["rev-parse", "HEAD"]);
+  await git(["branch", "Bug-1111111", parent]);
+  await writeFile(path.join(tempDir, "child.txt"), "child\n");
+  await git(["add", "child.txt"]);
+  await git(["commit", "-m", "Bug 2222222 - Child"]);
+  const child = await git(["rev-parse", "HEAD"]);
+
+  await git(["switch", "main"]);
+  await writeFile(path.join(tempDir, "main.txt"), "main\n");
+  await git(["add", "main.txt"]);
+  await git(["commit", "-m", "advance main"]);
+  const newMain = await git(["rev-parse", "HEAD"]);
+  await git(["update-ref", "refs/remotes/origin/main", newMain]);
+
+  const graph = {
+    label: "comm",
+    path: tempDir,
+    branch: "main",
+    knownHashes: new Set([child]),
+  };
   const result = await rebaseCommit({
-    graph: {
-      label: "comm",
-      path: "/repo/comm",
-      branch: "(detached)",
-      knownHashes: new Set(["docs1"]),
-    },
-    hash: "docs1",
-    preferredBranch: "bct4",
+    graph,
+    hash: child,
+    preferredBranch: "topic",
     rebaseMode: "selected",
-    runCommand: async (command) => {
-      calls.push(command);
-
-      if (command.args[0] === "status") {
-        return "";
-      }
-
-      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
-        return "";
-      }
-
-      if (
-        command.args[0] === "for-each-ref" &&
-        command.args.includes("--points-at")
-      ) {
-        return "bct4\n";
-      }
-
-      if (
-        command.args[0] === "for-each-ref" &&
-        command.args.includes("--contains")
-      ) {
-        return "bct4\n";
-      }
-
-      if (command.args[0] === "rev-list" && command.args[1] === "--parents") {
-        return "docs1 bct6final\n";
-      }
-
-      if (command.args[0] === "merge-base") {
-        throw new Error("not on main");
-      }
-
-      if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
-        return "tb-tools-try-runs.json\n";
-      }
-
-      if (command.args[0] === "rev-parse") {
-        return `${rewrittenHashes.shift()}\n`;
-      }
-
-      return "";
-    },
   });
 
   assert.equal(result.mode, "selected");
-  assert.equal(result.branch, "");
-  assert.equal(result.currentHash, "new-docs");
-  assert.equal(result.detached, true);
-  assert.deepEqual(result.branchUpdates, []);
-  assert.deepEqual(
-    calls
-      .filter((call) =>
-        call.args[0] === "branch" && call.args[1] === "-f"
-      )
-      .map((call) => call.args),
-    [],
-  );
-  assert.deepEqual(
-    calls
-      .filter((call) => call.args[0] === "switch")
-      .map((call) => call.args),
-    [["switch", "--detach", "base000"]],
-  );
+  assert.equal(result.branch, "topic");
+  assert.equal(result.detached, false);
+  assert.deepEqual(result.commits, [child]);
+  assert.deepEqual(result.preservedBranches, []);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "topic", originalHash: child, hash: result.currentHash },
+  ]);
+  assert.equal(await git(["rev-parse", "Bug-1111111"]), parent);
+  assert.equal(await git(["rev-list", "--count", `origin/main..Bug-1111111`]), "1");
+  assert.equal(await git(["rev-parse", "topic"]), result.currentHash);
+  assert.equal(await git(["rev-list", "--count", "origin/main..topic"]), "1");
+  assert.notEqual(result.currentHash, child);
+  assert.equal(graph.branch, "topic");
+});
+
+test("rebaseCommit selected mode creates a parent branch when only the tip has one", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-rebase-real-"));
+  const git = async (args) =>
+    (await run({
+      cmd: "git",
+      args,
+      cwd: tempDir,
+      capture: true,
+      silent: true,
+    })).trim();
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await git(["init", "-b", "main"]);
+  await git(["config", "user.name", "tb-tools"]);
+  await git(["config", "user.email", "tb-tools@example.invalid"]);
+  await writeFile(path.join(tempDir, "base.txt"), "base\n");
+  await git(["add", "base.txt"]);
+  await git(["commit", "-m", "base"]);
+
+  const firstMain = await git(["rev-parse", "HEAD"]);
+  await git(["update-ref", "refs/remotes/origin/main", firstMain]);
+  await git(["switch", "-c", "topic"]);
+  await writeFile(path.join(tempDir, "parent.txt"), "parent\n");
+  await git(["add", "parent.txt"]);
+  await git(["commit", "-m", "Bug 1111111 - Parent"]);
+  const parent = await git(["rev-parse", "HEAD"]);
+  await writeFile(path.join(tempDir, "child.txt"), "child\n");
+  await git(["add", "child.txt"]);
+  await git(["commit", "-m", "Bug 2222222 - Child"]);
+  const child = await git(["rev-parse", "HEAD"]);
+
+  await git(["switch", "main"]);
+  await writeFile(path.join(tempDir, "main.txt"), "main\n");
+  await git(["add", "main.txt"]);
+  await git(["commit", "-m", "advance main"]);
+  const newMain = await git(["rev-parse", "HEAD"]);
+  await git(["update-ref", "refs/remotes/origin/main", newMain]);
+
+  const graph = {
+    label: "comm",
+    path: tempDir,
+    branch: "main",
+    knownHashes: new Set([child]),
+  };
+  const result = await rebaseCommit({
+    graph,
+    hash: child,
+    preferredBranch: "topic",
+    rebaseMode: "selected",
+  });
+
+  assert.equal(result.mode, "selected");
+  assert.equal(result.branch, "topic");
+  assert.equal(result.detached, false);
+  assert.deepEqual(result.commits, [child]);
+  assert.deepEqual(result.preservedBranches, [{
+    branch: "Bug-1111111",
+    hash: parent,
+    sourceBranch: "topic",
+  }]);
+  assert.deepEqual(result.branchUpdates, [
+    {
+      branch: "Bug-1111111",
+      originalHash: parent,
+      hash: parent,
+      preserved: true,
+    },
+    { branch: "topic", originalHash: child, hash: result.currentHash },
+  ]);
+  assert.equal(await git(["rev-parse", "Bug-1111111"]), parent);
+  assert.equal(await git(["rev-list", "--count", `origin/main..Bug-1111111`]), "1");
+  assert.equal(await git(["rev-parse", "topic"]), result.currentHash);
+  assert.equal(await git(["rev-list", "--count", "origin/main..topic"]), "1");
+  assert.notEqual(result.currentHash, child);
+  assert.equal(graph.branch, "topic");
 });
 
 test("rebaseCommit children mode preserves the selected stack path", async () => {
@@ -5781,6 +5850,114 @@ test("getGraphRustUpstreamStatus compares Firefox remote rust files to comm orig
       [tempDir, ["show", "FETCH_HEAD:toolkit/library/rust/shared/Cargo.toml"]],
       [tempDir, ["show", "FETCH_HEAD:build/workspace-hack/Cargo.toml"]],
       [tempDir, ["show", "FETCH_HEAD:Cargo.lock"]],
+    ],
+  );
+  const fallbackFetch = calls.find(
+    (call) => call.cwd === tempDir && call.args[0] === "fetch",
+  );
+
+  assert.equal(fallbackFetch.timeoutMs, 30_000);
+  assert.equal(fallbackFetch.killProcessGroup, true);
+});
+
+test("getGraphRustUpstreamStatus reads GitHub raw files instead of shallow-fetching Firefox", async () => {
+  const calls = [];
+  const fetchedUrls = [];
+  const remoteFiles = {
+    "Cargo.toml": "workspace\n",
+    "toolkit/library/rust/shared/Cargo.toml": "gkrust\n",
+    "build/workspace-hack/Cargo.toml": "hack\n",
+    "Cargo.lock": "remote lock\n",
+  };
+  const checksumData = {
+    mc_workspace_toml: createHash("sha512")
+      .update(remoteFiles["Cargo.toml"])
+      .digest("hex"),
+    mc_gkrust_toml: createHash("sha512")
+      .update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"])
+      .digest("hex"),
+    mc_hack_toml: createHash("sha512")
+      .update(remoteFiles["build/workspace-hack/Cargo.toml"])
+      .digest("hex"),
+    mc_cargo_lock: createHash("sha512")
+      .update(remoteFiles["Cargo.lock"])
+      .digest("hex"),
+  };
+
+  const result = await getGraphRustUpstreamStatus({
+    graphs: [
+      { label: "comm", path: "/repo/comm" },
+      { label: "firefox", path: "/repo/firefox" },
+    ],
+    makeTempDir: async () => {
+      throw new Error("GitHub raw checks should not create a temp Git repo.");
+    },
+    fetchImpl: async (url) => {
+      fetchedUrls.push(url);
+      const file = new URL(url).pathname
+        .split("/")
+        .slice(4)
+        .map(decodeURIComponent)
+        .join("/");
+
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        text: async () => remoteFiles[file],
+      };
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cwd === "/repo/comm" && command.args[0] === "rev-parse") {
+        return "cccccccccccccccccccccccccccccccccccccccc\n";
+      }
+
+      if (command.cwd === "/repo/comm" && command.args[0] === "show") {
+        return JSON.stringify(checksumData);
+      }
+
+      if (command.cwd === "/repo/firefox" && command.args[0] === "ls-remote") {
+        return "ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n";
+      }
+
+      if (
+        command.cwd === "/repo/firefox" &&
+        command.args.join(" ") === "remote get-url origin"
+      ) {
+        return "git@github.com:mozilla-firefox/firefox.git\n";
+      }
+
+      if (command.cwd === "/repo/firefox" && command.args[0] === "rev-parse") {
+        return "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n";
+      }
+
+      throw new Error(`Unexpected command: ${JSON.stringify(command)}`);
+    },
+  });
+
+  assert.equal(result.type, "rust-upstream");
+  assert.equal(result.state, "current");
+  assert.equal(result.upToDate, true);
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(
+    fetchedUrls.sort(),
+    [
+      "https://raw.githubusercontent.com/mozilla-firefox/firefox/ffffffffffffffffffffffffffffffffffffffff/Cargo.lock",
+      "https://raw.githubusercontent.com/mozilla-firefox/firefox/ffffffffffffffffffffffffffffffffffffffff/Cargo.toml",
+      "https://raw.githubusercontent.com/mozilla-firefox/firefox/ffffffffffffffffffffffffffffffffffffffff/build/workspace-hack/Cargo.toml",
+      "https://raw.githubusercontent.com/mozilla-firefox/firefox/ffffffffffffffffffffffffffffffffffffffff/toolkit/library/rust/shared/Cargo.toml",
+    ].sort(),
+  );
+  assert.deepEqual(
+    calls.map((call) => [call.cwd, call.args]),
+    [
+      ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+      ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
+      ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
+      ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
+      ["/repo/firefox", ["remote", "get-url", "origin"]],
     ],
   );
 });
@@ -7777,6 +7954,18 @@ test("interactive graph server returns origin status before slow Rust dependency
   assert.equal(pendingStatus.statuses[2].type, "rust-upstream");
   assert.equal(pendingStatus.statuses[2].state, "checking");
 
+  const forcedPendingResponse = await fetch(
+    new URL("api/origin-main-status?token=secret&force=1", serverInfo.url),
+  );
+  const forcedPendingStatus = await forcedPendingResponse.json();
+
+  assert.equal(forcedPendingStatus.statuses[0].label, "comm");
+  assert.equal(forcedPendingStatus.statuses[0].state, "current");
+  assert.equal(forcedPendingStatus.statuses[1].label, "firefox");
+  assert.equal(forcedPendingStatus.statuses[1].state, "current");
+  assert.equal(forcedPendingStatus.statuses[2].type, "rust-upstream");
+  assert.equal(forcedPendingStatus.statuses[2].state, "checking");
+
   resolveRustStatus({
     type: "rust-upstream",
     label: "rust",
@@ -8091,7 +8280,7 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.equal(pingResponse.ok, true);
 
   const originMainStatusResponse = await fetch(
-    new URL("api/origin-main-status?token=secret&force=1", serverInfo.url),
+    new URL("api/origin-main-status?token=secret&force=1&wait=1", serverInfo.url),
   );
   const originMainStatus = await originMainStatusResponse.json();
   assert.equal(originMainStatus.statuses[0].label, "comm");

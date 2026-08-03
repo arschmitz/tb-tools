@@ -68,6 +68,8 @@ const RUST_UPSTREAM_FILES = {
   mc_hack_toml: "build/workspace-hack/Cargo.toml",
   mc_cargo_lock: "Cargo.lock",
 };
+const RUST_UPSTREAM_FETCH_TIMEOUT_MS = 30_000;
+const RUST_UPSTREAM_RAW_FETCH_TIMEOUT_MS = 10_000;
 const GRAPH_REBASE_MODE_SELECTED = "selected";
 const GRAPH_REBASE_MODE_CHILDREN = "children";
 const GRAPH_REBASE_MODE_DESCENDANTS = "descendants";
@@ -884,6 +886,83 @@ async function getRebaseStackBranches({
   return entries;
 }
 
+async function getLocalBranchNames(graph, runCommand) {
+  const branchData = await runCommand({
+    cmd: "git",
+    args: ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+
+  return branchData.split(/\r?\n/).map((branch) => branch.trim()).filter(Boolean);
+}
+
+async function getBugBranchNameForCommit(graph, hash, runCommand) {
+  const message = await getGraphCommitMessage({
+    graph,
+    hash,
+    runCommand,
+  });
+  const bugId = getBugIdFromText(message);
+
+  if (!bugId) {
+    return "";
+  }
+
+  return getNextBugBranchName(
+    await getLocalBranchNames(graph, runCommand),
+    bugId,
+  );
+}
+
+async function getSelectedRebaseParentAnchors({
+  graph,
+  hash,
+  resultBranch = "",
+  runCommand,
+} = {}) {
+  if (!resultBranch) {
+    return [];
+  }
+
+  const parents = await getCommitParents(graph, hash, runCommand);
+
+  if (parents.length !== 1) {
+    return [];
+  }
+
+  const parent = parents[0];
+
+  if (await isCommitReachableFromMain(graph, parent, runCommand)) {
+    return [];
+  }
+
+  const parentBranches = parseBranchRefs(
+    await getLocalBranchesAtCommit(graph, parent, runCommand),
+  );
+
+  if (parentBranches.length) {
+    return [];
+  }
+
+  const branch = await getBugBranchNameForCommit(graph, parent, runCommand);
+
+  if (!branch) {
+    const error = new Error(
+      `Cannot rebase branch ${resultBranch} by itself because parent ${parent.slice(0, 12)} is unpublished and has no branch or Bug number.`,
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
+  return [{
+    branch,
+    hash: parent,
+    sourceBranch: resultBranch,
+  }];
+}
+
 function chooseRebaseResultBranch({
   stackBranchRefs = [],
   candidateBranch = "",
@@ -904,28 +983,11 @@ function chooseRebaseResultBranch({
 }
 
 async function chooseSelectedRebaseResultBranch({
-  graph,
-  hash,
   branchRefs = "",
   currentBranch = "",
   preferredBranch = "",
-  runCommand,
 }) {
-  const branch = chooseCheckoutBranch(branchRefs, preferredBranch || currentBranch);
-
-  if (!branch) {
-    return "";
-  }
-
-  const parents = await getCommitParents(graph, hash, runCommand);
-
-  if (parents.length !== 1) {
-    return branch;
-  }
-
-  return await isCommitReachableFromMain(graph, parents[0], runCommand)
-    ? branch
-    : "";
+  return chooseCheckoutBranch(branchRefs, preferredBranch || currentBranch);
 }
 
 export async function getCurrentGraphBase(graph, runCommand) {
@@ -1532,11 +1594,108 @@ async function getRustFileChecksumsFromRef({ cwd, ref, runCommand = run }) {
   return Object.fromEntries(entries);
 }
 
+function getGithubRawBaseUrl(remoteUrl = "") {
+  const normalizedUrl = String(remoteUrl || "").trim();
+  let owner = "";
+  let repo = "";
+  let match = normalizedUrl.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i);
+
+  if (match) {
+    [, owner, repo] = match;
+  } else {
+    match = normalizedUrl.match(/^(?:https?|git|ssh):\/\/(?:git@)?github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/i);
+
+    if (match) {
+      [, owner, repo] = match;
+    }
+  }
+
+  if (!owner || !repo) {
+    return "";
+  }
+
+  return `https://raw.githubusercontent.com/${owner}/${repo.replace(/\.git$/i, "")}`;
+}
+
+function getGithubRawFileUrl({ remoteUrl, ref, file }) {
+  const rawBaseUrl = getGithubRawBaseUrl(remoteUrl);
+
+  if (!rawBaseUrl) {
+    return "";
+  }
+
+  const encodedRef = encodeURIComponent(ref);
+  const encodedFile = file.split("/").map(encodeURIComponent).join("/");
+
+  return `${rawBaseUrl}/${encodedRef}/${encodedFile}`;
+}
+
+async function fetchTextWithTimeout({
+  url,
+  fetchImpl,
+  timeoutMs,
+}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  timer.unref?.();
+
+  try {
+    const response = await fetchImpl(url, { signal: controller.signal });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText || ""}`.trim());
+    }
+
+    return await response.text();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Timed out fetching ${url} after ${timeoutMs}ms.`);
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getRustFileChecksumsFromGithubRaw({
+  remoteUrl,
+  ref,
+  fetchImpl = fetch,
+}) {
+  const urls = Object.fromEntries(
+    Object.entries(RUST_UPSTREAM_FILES).map(([key, file]) => [
+      key,
+      getGithubRawFileUrl({ remoteUrl, ref, file }),
+    ]),
+  );
+
+  if (Object.values(urls).some((url) => !url)) {
+    return null;
+  }
+
+  const entries = await Promise.all(
+    Object.entries(urls).map(async ([key, url]) => {
+      const content = await fetchTextWithTimeout({
+        url,
+        fetchImpl,
+        timeoutMs: RUST_UPSTREAM_RAW_FETCH_TIMEOUT_MS,
+      });
+
+      return [key, getSha512(content)];
+    }),
+  );
+
+  return Object.fromEntries(entries);
+}
+
 export async function getGraphRustUpstreamStatus({
   graphs,
   commGraph = getGraphByLabel(graphs, "comm"),
   firefoxGraph = getGraphByLabel(graphs, "firefox"),
   runCommand = run,
+  fetchImpl = fetch,
   makeTempDir = mkdtemp,
   removeDir = rm,
 }) {
@@ -1593,31 +1752,41 @@ export async function getGraphRustUpstreamStatus({
       capture: true,
       silent: true,
     })).trim();
-    const tempDir = await makeTempDir(path.join(os.tmpdir(), "tb-tools-rust-upstream-"));
+    actualChecksums = await getRustFileChecksumsFromGithubRaw({
+      remoteUrl: firefoxRemoteUrl,
+      ref: firefoxRemoteHash,
+      fetchImpl,
+    });
 
-    try {
-      await runCommand({
-        cmd: "git",
-        args: ["init"],
-        cwd: tempDir,
-        capture: true,
-        silent: true,
-      });
-      await runCommand({
-        cmd: "git",
-        args: ["fetch", "--depth=1", "--no-tags", firefoxRemoteUrl, firefoxRemoteHash],
-        cwd: tempDir,
-        capture: true,
-        silent: true,
-      });
+    if (!actualChecksums) {
+      const tempDir = await makeTempDir(path.join(os.tmpdir(), "tb-tools-rust-upstream-"));
 
-      actualChecksums = await getRustFileChecksumsFromRef({
-        cwd: tempDir,
-        ref: "FETCH_HEAD",
-        runCommand,
-      });
-    } finally {
-      await removeDir(tempDir, { recursive: true, force: true });
+      try {
+        await runCommand({
+          cmd: "git",
+          args: ["init"],
+          cwd: tempDir,
+          capture: true,
+          silent: true,
+        });
+        await runCommand({
+          cmd: "git",
+          args: ["fetch", "--depth=1", "--no-tags", firefoxRemoteUrl, firefoxRemoteHash],
+          cwd: tempDir,
+          capture: true,
+          silent: true,
+          timeoutMs: RUST_UPSTREAM_FETCH_TIMEOUT_MS,
+          killProcessGroup: true,
+        });
+
+        actualChecksums = await getRustFileChecksumsFromRef({
+          cwd: tempDir,
+          ref: "FETCH_HEAD",
+          runCommand,
+        });
+      } finally {
+        await removeDir(tempDir, { recursive: true, force: true });
+      }
     }
   }
 
@@ -3268,6 +3437,7 @@ async function finishRebaseReplay(session, runCommand) {
     mode,
     stackCommits,
     stackBranchRefs,
+    selectedParentAnchors = [],
     skippedMainCommits,
     rewrittenCommits,
     skippedReplayedCommits,
@@ -3279,6 +3449,23 @@ async function finishRebaseReplay(session, runCommand) {
     skippedReplayedCommits.map((commit) => [commit.originalHash, commit.hash]),
   );
   const branchUpdates = [];
+  const preservedBranches = [];
+
+  for (const anchor of selectedParentAnchors) {
+    await runCommand({
+      cmd: "git",
+      args: ["branch", anchor.branch, anchor.hash],
+      cwd: graph.path,
+      silent: true,
+    });
+    preservedBranches.push(anchor);
+    branchUpdates.push({
+      branch: anchor.branch,
+      originalHash: anchor.hash,
+      hash: anchor.hash,
+      preserved: true,
+    });
+  }
 
   for (const { hash: originalHash, branches } of stackBranchRefs) {
     const rewrittenHash =
@@ -3353,6 +3540,7 @@ async function finishRebaseReplay(session, runCommand) {
     skippedMainCommits,
     rewrittenCommits,
     branchUpdates,
+    preservedBranches,
     rebasedCount: rewrittenCommits.length,
     currentHash,
     detached: !branch,
@@ -4578,6 +4766,14 @@ export async function rebaseCommit({
     currentBranch: base.branch,
     preferredBranch,
   });
+  const selectedParentAnchors = mode === GRAPH_REBASE_MODE_SELECTED
+    ? await getSelectedRebaseParentAnchors({
+        graph,
+        hash,
+        resultBranch: branch,
+        runCommand,
+      })
+    : [];
 
   if (stackCommits.includes(base.hash)) {
     const error = new Error(`Cannot rebase ${hash.slice(0, 12)} because the current checkout is inside the selected commit stack.`);
@@ -4615,6 +4811,7 @@ export async function rebaseCommit({
     mode,
     stackCommits,
     stackBranchRefs,
+    selectedParentAnchors,
     skippedMainCommits,
     tryRunIdentityByHash: await getRebaseTryRunIdentityByHash({
       graph,

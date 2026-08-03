@@ -446,7 +446,10 @@ export async function startInteractiveGraphServer({
     return status;
   }
 
-  async function getServerOriginMainStatuses({ force = false } = {}) {
+  async function getServerOriginMainStatuses({
+    force = false,
+    waitForRust = false,
+  } = {}) {
     const statuses = (
       await Promise.all(
         serverGraphs.map((graph) =>
@@ -454,7 +457,10 @@ export async function startInteractiveGraphServer({
         ),
       )
     ).filter(Boolean);
-    statuses.push(await getServerRustUpstreamStatus({ force }));
+    statuses.push(await getServerRustUpstreamStatus({
+      force,
+      wait: waitForRust,
+    }));
 
     return statuses;
   }
@@ -510,7 +516,10 @@ export async function startInteractiveGraphServer({
     );
   }
 
-  async function getServerRustUpstreamStatus({ force = false } = {}) {
+  async function getServerRustUpstreamStatus({
+    force = false,
+    wait = false,
+  } = {}) {
     const now = Date.now();
 
     if (!force && isFreshRustUpstreamStatus(now)) {
@@ -518,6 +527,16 @@ export async function startInteractiveGraphServer({
     }
 
     if (force) {
+      if (wait) {
+        return refreshServerRustUpstreamStatus();
+      }
+
+      rustUpstreamStatus = getServerRustUpstreamCheckingStatus();
+      refreshServerRustUpstreamStatus();
+      return rustUpstreamStatus;
+    }
+
+    if (wait) {
       return refreshServerRustUpstreamStatus();
     }
 
@@ -663,6 +682,7 @@ export async function startInteractiveGraphServer({
         noteBrowserActivity();
         const statuses = await getServerOriginMainStatuses({
           force: url.searchParams.get("force") === "1",
+          waitForRust: url.searchParams.get("wait") === "1",
         });
 
         sendJson(response, 200, { ok: true, statuses });
