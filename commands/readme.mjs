@@ -40,8 +40,8 @@ function pushConsoleSection(lines) {
     "",
     "- inspect live comm and Firefox branch graphs with the current checkout, uncommitted changes, branch labels, and tracked try runs",
     "- click commits for full commit messages, Bugzilla and Phabricator links, integration status, change totals, and GitHub-style syntax-highlighted diffs",
-    "- create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, and blocking-review toggles",
-    "- checkout, rebase, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit",
+    "- create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, blocking-review toggles, and a durable `TB-Tools-Id` trailer for console metadata",
+    "- checkout, rebase, interactively reorder/squash/fixup/drop local commit ranges, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit",
     "- update both repositories, update and rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches",
     "- run modified tests or explicit path/glob patterns, including headless runs, with parsed final summaries and rerun actions for failures",
     "- watch command progress in a slim status bar with elapsed time, cancellable running work, and toggleable output",
@@ -129,7 +129,7 @@ export default async function (optionList, subOptions) {
 3. Make changes until ready to commit
 4. run lint \`tb lint\`
 5. run tests based on your changes \`tb test\`
-6. Commit changes \`tb commit\` and follow prompt to generate commit message.
+6. Commit changes \`tb commit\` and follow prompt to generate commit message. New commits include a \`TB-Tools-Id\` trailer so console metadata such as try runs can survive rebases and amends.
 7. Make more changes
 8. Add changes to your commit \`tb amend\`, selecting new files to add
 9. When ready to submit patches to phabricator lint changes, run tests based on changes, push a try run with \`mach try\`, and submit unsubmitted comments in phabricator \`tb submit\`

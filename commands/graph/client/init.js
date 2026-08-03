@@ -10,6 +10,8 @@ import {
   commitReviewerPills,
   contextMenu,
   graphStates,
+  interactiveRebaseEnd,
+  interactiveRebaseForm,
   landClose,
   landDialog,
   landInputForm,
@@ -112,6 +114,13 @@ import {
   closeRebaseDialog,
   handleRebaseDialogClick,
 } from "./rebase-dialog.js";
+import {
+  closeInteractiveRebaseDialog,
+  handleInteractiveRebaseDialogClick,
+  openInteractiveRebaseDialog,
+  submitInteractiveRebaseDialog,
+  updateInteractiveRebaseRange,
+} from "./interactive-rebase-dialog.js";
 import { markBugForCheckin } from "./diff-viewer.js";
 import { hideCommitContextMenu } from "./lane-renderer.js";
 
@@ -245,6 +254,10 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (handleInteractiveRebaseDialogClick(event)) {
+    return;
+  }
+
   const rebaseContinue = event.target.closest(".rebase-continue");
   if (rebaseContinue) {
     continueRebaseDialog();
@@ -280,6 +293,12 @@ contextMenu.addEventListener("click", (event) => {
     rebaseMode: button.dataset.rebaseMode || "",
   };
   hideCommitContextMenu();
+
+  if (button.dataset.action === "interactive-rebase") {
+    openInteractiveRebaseDialog(actionState);
+    return;
+  }
+
   runCommitAction(button.dataset.action, actionState);
 });
 
@@ -291,6 +310,11 @@ amendForm.addEventListener("submit", (event) => {
 amendDialog
   .querySelector(".amend-cancel")
   .addEventListener("click", closeAmendDialog);
+interactiveRebaseForm.addEventListener("submit", submitInteractiveRebaseDialog);
+interactiveRebaseEnd.addEventListener("change", updateInteractiveRebaseRange);
+interactiveRebaseForm
+  .querySelector(".interactive-rebase-close")
+  .addEventListener("click", closeInteractiveRebaseDialog);
 commitForm.addEventListener("submit", submitCommitDialog);
 commitClose.addEventListener("click", closeCommitDialog);
 commitReviewerInput.addEventListener("focus", scheduleCommitReviewerSearch);

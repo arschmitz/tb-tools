@@ -147,7 +147,7 @@ const commands = {
     },
   },
   console: {
-    description: "Starts the interactive Thunderbird Desktop Console with live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/prune/amend/submit/land actions, Bugzilla/Phabricator status, tracked try runs, update/rebase controls, and build/run output.",
+    description: "Starts the interactive Thunderbird Desktop Console with live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, Bugzilla/Phabricator status, tracked try runs, update/rebase controls, and build/run output.",
     header: "Console Options",
     options: [
       { name: "open", description: "Open the console in a browser", defaultValue: "true" },

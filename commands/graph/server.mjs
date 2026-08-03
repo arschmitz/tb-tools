@@ -53,6 +53,7 @@ import {
   getGraphCommitIntegrationStatus,
   getGraphOriginMainStatus,
   getGraphRustUpstreamStatus,
+  getInteractiveRebasePlan,
   markGraphBugForCheckin,
   runGraphCommitAction,
   runGraphRepositoryUpdate,
@@ -60,6 +61,7 @@ import {
   serializeGraphMachSession,
   serializeGraphTrySession,
   serializeSubmitSession,
+  startInteractiveRebase,
   unshelfGraphShelves,
 } from "./actions.mjs";
 import {
@@ -937,6 +939,66 @@ export async function startInteractiveGraphServer({
           serverGraphs[Number(body.graphIndex)],
           getRequestLimit(body.snapshotLimit),
         );
+        sendJson(response, 200, { ok: true, ...result, snapshot });
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/interactive-rebase/plan"
+      ) {
+        validateToken(url.searchParams.get("token"), token);
+        noteBrowserActivity();
+        const graphIndex = Number(url.searchParams.get("graphIndex"));
+        const graph = serverGraphs[graphIndex];
+
+        if (!graph) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
+          return;
+        }
+
+        const plan = await getInteractiveRebasePlan({
+          graph,
+          hash: url.searchParams.get("hash") || "",
+          preferredBranch: url.searchParams.get("preferredBranch") || "",
+          runCommand,
+        });
+
+        sendJson(response, 200, { ok: true, graphIndex, plan });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/interactive-rebase") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        noteBrowserActivity();
+        const graphIndex = Number(body.graphIndex);
+        const graph = serverGraphs[graphIndex];
+
+        if (!graph) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
+          return;
+        }
+
+        const result = await startInteractiveRebase({
+          graph,
+          graphIndex,
+          hash: body.hash,
+          preferredBranch: body.preferredBranch,
+          items: body.items || [],
+          runCommand,
+        });
+        const snapshot = await getServerGraphSnapshot(
+          graph,
+          getRequestLimit(body.snapshotLimit),
+        );
+
         sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
       }

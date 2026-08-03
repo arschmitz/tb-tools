@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  getTbToolsIdFromCommitMessage,
+  installTbToolsCommitMsgHook,
+} from "../../lib/commit-message.mjs";
 import { run } from "../../lib/utils.mjs";
 import { formatPrettyDiffHtml, getDiffChangeCounts } from "./diff-renderer.mjs";
 import {
@@ -278,8 +282,9 @@ function normalizeGraphTryRun(run = {}) {
 
   const createdAt = String(run.createdAt || new Date().toISOString());
   const patchId = String(run.patchId || "").trim();
+  const tbToolsId = String(run.tbToolsId || run.tryId || run.localPatchId || "").trim();
   const hash = String(run.hash || "").trim();
-  const id = String(run.id || getContentHash(`${patchId}\0${hash}\0${url}\0${createdAt}`));
+  const id = String(run.id || getContentHash(`${tbToolsId}\0${patchId}\0${hash}\0${url}\0${createdAt}`));
 
   return {
     id,
@@ -287,6 +292,7 @@ function normalizeGraphTryRun(run = {}) {
     createdAt,
     hash,
     patchId,
+    tbToolsId,
     subject: String(run.subject || "").trim(),
     label: String(run.label || "").trim(),
   };
@@ -294,6 +300,10 @@ function normalizeGraphTryRun(run = {}) {
 
 function sortGraphTryRuns(runs = []) {
   return [...runs].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+
+function normalizeGraphTrySubject(subject = "") {
+  return String(subject || "").split("\n").find((line) => line.trim())?.trim() || "";
 }
 
 export function normalizeGraphTryStore(store = {}) {
@@ -311,7 +321,7 @@ export function normalizeGraphTryStore(store = {}) {
       continue;
     }
 
-    const identity = `${run.patchId}\0${run.hash}\0${run.url}\0${run.createdAt}`;
+    const identity = `${run.tbToolsId}\0${run.patchId}\0${run.hash}\0${run.url}\0${run.createdAt}`;
 
     if (seen.has(identity)) {
       continue;
@@ -387,7 +397,9 @@ export async function recordGraphTryRun({
 
   const store = await readGraphTryStore({ graph, runCommand });
   const runs = store.runs.filter((run) => {
-    const sameTarget = normalizedRun.patchId
+    const sameTarget = normalizedRun.tbToolsId && run.tbToolsId
+      ? run.tbToolsId === normalizedRun.tbToolsId
+      : normalizedRun.patchId
       ? run.patchId === normalizedRun.patchId
       : run.hash === normalizedRun.hash;
 
@@ -405,6 +417,31 @@ export async function recordGraphTryRun({
   });
 
   return normalizedRun;
+}
+
+export function getGraphCommitTbToolsIdFromMessage(message = "") {
+  return getTbToolsIdFromCommitMessage(message);
+}
+
+export async function getGraphCommitTbToolsId({
+  graph,
+  hash,
+  message,
+  runCommand = run,
+}) {
+  if (!graph || !hash || isWorkingTreeCommitHash(hash)) {
+    return "";
+  }
+
+  const commitMessage = typeof message === "string"
+    ? message
+    : await getGraphCommitMessage({
+      graph,
+      hash,
+      runCommand,
+    });
+
+  return getGraphCommitTbToolsIdFromMessage(commitMessage);
 }
 
 export function isWorkingTreeCommitHash(hash) {
@@ -452,15 +489,47 @@ export async function getGraphCommitPatchId({
   return patchId;
 }
 
-function filterGraphTryRuns(store, { hash = "", patchId = "" } = {}) {
+function isGraphTryRunSubjectMatch(run, { subject = "", label = "" } = {}) {
+  const normalizedSubject = normalizeGraphTrySubject(subject);
+
+  if (!normalizedSubject || normalizeGraphTrySubject(run.subject) !== normalizedSubject) {
+    return false;
+  }
+
+  return !label || !run.label || run.label === label;
+}
+
+function filterGraphTryRuns(store, {
+  hash = "",
+  label = "",
+  patchId = "",
+  subject = "",
+  tbToolsId = "",
+} = {}) {
   const runs = store?.runs || [];
 
-  return sortGraphTryRuns(runs.filter((run) => {
-    if (patchId && run.patchId === patchId) {
-      return true;
+  return sortGraphTryRuns(runs.flatMap((run) => {
+    const subjectMatch = isGraphTryRunSubjectMatch(run, { subject, label });
+
+    if (tbToolsId) {
+      if (run.tbToolsId) {
+        return run.tbToolsId === tbToolsId || subjectMatch
+          ? [{ ...run, hash: hash || run.hash }]
+          : [];
+      }
+
+      return (
+        (hash && run.hash === hash) ||
+        (patchId && run.patchId === patchId) ||
+        subjectMatch
+      ) ? [{ ...run, tbToolsId }] : [];
     }
 
-    return Boolean(hash && run.hash === hash);
+    return (
+      (hash && run.hash === hash) ||
+      (patchId && run.patchId === patchId) ||
+      subjectMatch
+    ) ? [run] : [];
   }));
 }
 
@@ -472,20 +541,34 @@ export async function getGraphTryRunsForCommit({
 }) {
   const normalizedStore = store || await readGraphTryStore({ graph, runCommand });
   const hash = String(commit?.hash || "").trim();
-  const directRuns = filterGraphTryRuns(normalizedStore, { hash });
+  const subject = normalizeGraphTrySubject(commit?.subject);
+  const label = graph?.label || "";
 
   if (isWorkingTreeCommit(commit)) {
     const patchId = getWorkingTreeTryPatchId(commit?.changeId);
-    return patchId ? filterGraphTryRuns(normalizedStore, { patchId }) : [];
+    return patchId ? filterGraphTryRuns(normalizedStore, { label, patchId, subject }) : [];
   }
 
-  const hasPatchRuns = normalizedStore.runs.some((tryRun) => tryRun.patchId);
+  const hasStableRuns = normalizedStore.runs.some((tryRun) =>
+    tryRun.tbToolsId || tryRun.patchId
+  );
 
-  if (!hasPatchRuns) {
-    return directRuns;
+  if (!hasStableRuns) {
+    return filterGraphTryRuns(normalizedStore, { hash, label, subject });
   }
 
+  let tbToolsId = "";
   let patchId = "";
+
+  try {
+    tbToolsId = await getGraphCommitTbToolsId({
+      graph,
+      hash,
+      runCommand,
+    });
+  } catch {
+    tbToolsId = "";
+  }
 
   try {
     patchId = await getGraphCommitPatchId({
@@ -497,20 +580,17 @@ export async function getGraphTryRunsForCommit({
     patchId = "";
   }
 
-  if (!patchId) {
-    return directRuns;
+  if (!tbToolsId && !patchId) {
+    return filterGraphTryRuns(normalizedStore, { hash, label, subject });
   }
 
-  const byId = new Map();
-
-  for (const run of [
-    ...directRuns,
-    ...filterGraphTryRuns(normalizedStore, { hash, patchId }),
-  ]) {
-    byId.set(run.id, run);
-  }
-
-  return sortGraphTryRuns([...byId.values()]);
+  return filterGraphTryRuns(normalizedStore, {
+    hash,
+    label,
+    patchId,
+    subject,
+    tbToolsId,
+  });
 }
 
 export async function attachGraphTryRunsToCommits({
@@ -837,10 +917,18 @@ export async function getCheckoutGraphMetadata({
       runCommand({ cmd: "git", args: ["rev-parse", "--show-toplevel"], cwd: absolutePath, capture: true, silent: true }),
       runCommand({ cmd: "git", args: ["branch", "--show-current"], cwd: absolutePath, capture: true, silent: true }),
     ]);
+    const graphPath = root.trim() || absolutePath;
+
+    if (label === "comm" && runCommand === run) {
+      await installTbToolsCommitMsgHook({
+        cwd: graphPath,
+        runCommand,
+      }).catch(() => {});
+    }
 
     return {
       label,
-      path: root.trim() || absolutePath,
+      path: graphPath,
       branch: branch.trim() || "(detached)",
       commits: [],
       commitCount: 0,
@@ -938,6 +1026,14 @@ export async function getCheckoutGraphData({
       runCommand({ cmd: "git", args: getGitLogArgs(limit), cwd: absolutePath, capture: true, silent: true }),
       getCheckoutHeadHash({ cwd: absolutePath, runCommand }),
     ]);
+    const graphPath = root.trim() || absolutePath;
+
+    if (label === "comm" && runCommand === run) {
+      await installTbToolsCommitMsgHook({
+        cwd: graphPath,
+        runCommand,
+      }).catch(() => {});
+    }
 
     const gitCommits = parseGitLog(log);
     const workingTree = await getWorkingTreeCommits({
@@ -948,7 +1044,7 @@ export async function getCheckoutGraphData({
       runCommand,
     });
     const commits = await attachGraphTryRunsToCommits({
-      graph: { path: root.trim() || absolutePath },
+      graph: { path: graphPath },
       commits: pruneMissingParents(insertWorkingTreeCommitsNearParent(gitCommits, workingTree.commits)),
       runCommand,
     });
@@ -961,7 +1057,7 @@ export async function getCheckoutGraphData({
 
     return {
       label,
-      path: root.trim() || absolutePath,
+      path: graphPath,
       branch: branch.trim() || "(detached)",
       limit,
       commits,

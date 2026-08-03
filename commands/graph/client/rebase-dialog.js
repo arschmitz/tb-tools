@@ -58,7 +58,9 @@ export function openRebaseFailureDialog(conflict, { fallbackMessage = "" } = {})
     ? "Conflict markers are still present. Remove them before continuing."
     : conflict?.type === "conflict"
       ? "Resolve the conflicts, then continue the rebase."
-      : "The rebase failed.";
+      : conflict?.type === "edit"
+        ? "Interactive rebase paused for manual work."
+        : "The rebase failed.";
   rebaseSummary.textContent = conflict?.message ||
     fallbackMessage ||
     "The rebase could not complete.";
@@ -67,6 +69,10 @@ export function openRebaseFailureDialog(conflict, { fallbackMessage = "" } = {})
       ? "These files still contain conflict markers for " + commitLabel + "."
       : "Conflict while applying " + commitLabel + " in " +
         (conflict.label || "checkout") + ".";
+  } else if (conflict?.type === "edit") {
+    rebaseSummary.textContent = conflict?.reason === "dirty-edit-stop"
+      ? "Commit or amend the manual work for " + commitLabel + ", then continue."
+      : "Make any manual changes for " + commitLabel + ", amend if needed, then continue.";
   }
 
   rebaseConflictFiles.replaceChildren();

@@ -1000,6 +1000,141 @@ body.is-resizing-panes {
   padding: 10px;
   white-space: pre-wrap;
 }
+.interactive-rebase-dialog {
+  border: 1px solid #b9c0cc;
+  border-radius: 8px;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+  color: #20242a;
+  max-width: min(900px, calc(100vw - 32px));
+  padding: 0;
+  width: 860px;
+}
+.interactive-rebase-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.36);
+}
+.interactive-rebase-form {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 16px;
+}
+.interactive-rebase-title {
+  font-size: 16px;
+  margin: 0;
+}
+.interactive-rebase-status,
+.interactive-rebase-help,
+.interactive-rebase-error {
+  font-size: 13px;
+  margin: 0;
+}
+.interactive-rebase-status,
+.interactive-rebase-help {
+  color: #59616d;
+}
+.interactive-rebase-status.error,
+.interactive-rebase-error {
+  color: #9b1c1c;
+}
+.interactive-rebase-range {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+.interactive-rebase-range label {
+  color: #59616d;
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+}
+.interactive-rebase-end,
+.interactive-rebase-action {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-radius: 4px;
+  color: #20242a;
+  font: inherit;
+  padding: 5px 8px;
+}
+.interactive-rebase-todo {
+  border: 1px solid #d6dae1;
+  border-radius: 6px;
+  max-height: min(460px, 55vh);
+  overflow: auto;
+}
+.interactive-rebase-row {
+  align-items: center;
+  background: #fff;
+  border-top: 1px solid #d6dae1;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto 96px minmax(0, 1fr);
+  min-height: 34px;
+  padding: 6px 8px;
+}
+.interactive-rebase-row:first-child {
+  border-top: 0;
+}
+.interactive-rebase-row-controls {
+  align-items: center;
+  display: flex;
+  gap: 5px;
+}
+.interactive-rebase-move,
+.interactive-rebase-close,
+.interactive-rebase-submit {
+  border: 1px solid #d0d7de;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 5px 10px;
+}
+.interactive-rebase-move {
+  background: #fff;
+  color: #0969da;
+}
+.interactive-rebase-move:disabled,
+.interactive-rebase-submit:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.interactive-rebase-hash {
+  color: #59616d;
+}
+.interactive-rebase-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.interactive-rebase-after-range {
+  background: #f6f8fa;
+  color: #59616d;
+  font-size: 12px;
+  padding: 8px 10px;
+}
+.interactive-rebase-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.interactive-rebase-close {
+  background: #fff;
+  color: #20242a;
+}
+.interactive-rebase-submit {
+  background: #1f5f9f;
+  border-color: #1f5f9f;
+  color: #fff;
+}
+.interactive-rebase-move:hover,
+.interactive-rebase-move:focus,
+.interactive-rebase-close:hover,
+.interactive-rebase-close:focus {
+  background: #f6f8fa;
+  outline: none;
+}
 .amend-dialog {
   border: 1px solid #b9c0cc;
   border-radius: 8px;
@@ -3177,6 +3312,58 @@ body.is-resizing-panes {
   .rebase-output {
     background: #0d1117;
     color: #e6edf3;
+  }
+  .interactive-rebase-dialog {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .interactive-rebase-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.58);
+  }
+  .interactive-rebase-status,
+  .interactive-rebase-help,
+  .interactive-rebase-range label,
+  .interactive-rebase-hash {
+    color: #acb4c0;
+  }
+  .interactive-rebase-status.error,
+  .interactive-rebase-error {
+    color: #ff9f9f;
+  }
+  .interactive-rebase-end,
+  .interactive-rebase-action {
+    background: #0d1117;
+    border-color: #424b59;
+    color: #e6edf3;
+  }
+  .interactive-rebase-todo {
+    border-color: #424b59;
+  }
+  .interactive-rebase-row {
+    background: #151920;
+    border-color: #424b59;
+  }
+  .interactive-rebase-after-range {
+    background: #0d1117;
+    color: #acb4c0;
+  }
+  .interactive-rebase-move,
+  .interactive-rebase-close {
+    background: #191d23;
+    border-color: #424b59;
+    color: #79c0ff;
+  }
+  .interactive-rebase-move:hover,
+  .interactive-rebase-move:focus,
+  .interactive-rebase-close:hover,
+  .interactive-rebase-close:focus {
+    background: #222832;
+  }
+  .interactive-rebase-submit {
+    background: #4b9eff;
+    border-color: #4b9eff;
+    color: #07111f;
   }
   .graph-options-menu,
   .graph-submenu {

@@ -29,6 +29,7 @@ import {
   getGraphOriginMainStatus,
   getGraphRustUpstreamStatus,
   getGraphTryRunsForCommit,
+  getInteractiveRebasePlan,
   getLandingPatchTryStatus,
   getLatestLandingPatchTryRun,
   getCheckoutCommitPage,
@@ -63,6 +64,7 @@ import {
   runGraphRepositoryUpdate,
   runInteractiveSubmitCommand,
   serializeGraphTestSession,
+  startInteractiveRebase,
   startInteractiveGraphServer,
   truncateDiff,
   unshelfGraphShelves,
@@ -76,6 +78,11 @@ import {
 } from "../commands/graph/diff-renderer.mjs";
 import { DEFAULT_HEARTBEAT_TIMEOUT_MS } from "../commands/graph/constants.mjs";
 import { buildGraphHtml } from "../commands/graph/templates.mjs";
+import {
+  ensureTbToolsIdInCommitMessage,
+  installTbToolsCommitMsgHook,
+  TB_TOOLS_ID_TRAILER,
+} from "../lib/commit-message.mjs";
 
 const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "style.css", output: "graph-client/style.css" },
@@ -87,6 +94,7 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "diff-viewer.js", output: "graph-client/diff-viewer.js" },
   { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
   { source: "rebase-dialog.js", output: "graph-client/rebase-dialog.js" },
+  { source: "interactive-rebase-dialog.js", output: "graph-client/interactive-rebase-dialog.js" },
   { source: "commit-actions.js", output: "graph-client/commit-actions.js" },
   { source: "commit-dialog.js", output: "graph-client/commit-dialog.js" },
   { source: "landing-dialog.js", output: "graph-client/landing-dialog.js" },
@@ -801,11 +809,286 @@ test("graph try runs are stored by stable patch id and attach after a rebase", a
   assert.equal(normalized.runs[0].patchId, "stable-patch-id");
 });
 
+test("graph try runs prefer tbToolsId trailers over patch-id collisions", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-try-store-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const graph = { label: "comm", path: "/repo/comm" };
+  const runCommand = async (command) => {
+    if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+      return storePath;
+    }
+
+    if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+      return "Bug 123 - Try this. r=#reviewers\n\nTB-Tools-Id: current-tb-tools-id\n";
+    }
+
+    if (command.cmd === "sh") {
+      return "stable-patch-id def456\n";
+    }
+
+    return "";
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  for (const tryRun of [
+    {
+      id: "current",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=current",
+      createdAt: "2026-07-27T12:00:00.000Z",
+      hash: "abc123",
+      patchId: "stable-patch-id",
+      tbToolsId: "current-tb-tools-id",
+    },
+    {
+      id: "legacy-patch",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=legacy-patch",
+      createdAt: "2026-07-27T12:01:00.000Z",
+      hash: "abc000",
+      patchId: "stable-patch-id",
+    },
+    {
+      id: "legacy-hash",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=legacy-hash",
+      createdAt: "2026-07-27T12:02:00.000Z",
+      hash: "def456",
+      patchId: "different-patch-id",
+    },
+    {
+      id: "other-local",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=other-local",
+      createdAt: "2026-07-27T12:03:00.000Z",
+      hash: "def456",
+      patchId: "stable-patch-id",
+      tbToolsId: "other-tb-tools-id",
+    },
+  ]) {
+    await recordGraphTryRun({
+      graph,
+      runCommand,
+      tryRun: {
+        ...tryRun,
+        subject: "Bug 123 - Try this",
+        label: "comm",
+      },
+    });
+  }
+
+  const runs = await getGraphTryRunsForCommit({
+    graph,
+    runCommand,
+    commit: {
+      hash: "def456",
+      parents: [],
+      refs: ["HEAD"],
+      subject: "Bug 123 - Try this",
+    },
+  });
+
+  assert.deepEqual(
+    runs.map((run) => run.id),
+    ["other-local", "legacy-hash", "legacy-patch", "current"],
+  );
+});
+
+test("graph try runs attach legacy ids when a rebased commit has a newer trailer", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-try-store-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const graph = { label: "comm", path: "/repo/comm" };
+  const subject = "Bug 2056377 - Fix bct2 failures part 3 - Expose card view row clicks through the subject grid cell. r=#thunderbird-front-end-reviewers";
+  const runCommand = async (command) => {
+    if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+      return storePath;
+    }
+
+    if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+      return `${subject}\n\nTB-Tools-Id: current-message-id\n`;
+    }
+
+    if (command.cmd === "sh") {
+      return "current-patch-id current-part3\n";
+    }
+
+    return "";
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await recordGraphTryRun({
+    graph,
+    runCommand,
+    tryRun: {
+      id: "part3-old-try",
+      url: "https://treeherder.mozilla.org/jobs?repo=try-comm-central&revision=part3-old",
+      createdAt: "2026-07-31T13:17:42.183Z",
+      hash: "old-part3",
+      patchId: "old-part3-patch-id",
+      tbToolsId: "legacy-part3-id",
+      subject,
+      label: "comm",
+    },
+  });
+
+  const runs = await getGraphTryRunsForCommit({
+    graph,
+    runCommand,
+    commit: {
+      hash: "current-part3",
+      subject,
+    },
+  });
+
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].id, "part3-old-try");
+  assert.equal(runs[0].tbToolsId, "legacy-part3-id");
+});
+
+test("rebaseCommit backfills legacy try ids before replaying trailerless commits", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-rebase-try-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const calls = [];
+  const part3Subject = "Bug 2056377 - Fix bct2 failures part 3 - Expose card view row clicks through the subject grid cell. r=#thunderbird-front-end-reviewers";
+  const part4Subject = "Bug 2056377 - Fix bct2 failures part 4 - Make message attachment bar keyboard accessible. r=#thunderbird-front-end-reviewers";
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "Bug-2056377_2",
+    knownHashes: new Set(["part3"]),
+    backfillTryRunIds: true,
+  };
+  const headHashes = ["part2", "rebasedPart3", "rebasedPart4", "rebasedPart4"];
+  let amendedPart3Message = "";
+  const runCommand = async (command) => {
+    calls.push(command);
+
+    if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+      return storePath;
+    }
+
+    if (command.args[0] === "status") {
+      return "";
+    }
+
+    if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      return "Bug-2056377_2\n";
+    }
+
+    if (
+      command.args[0] === "for-each-ref" &&
+      command.args.includes("--points-at")
+    ) {
+      const hash = command.args[command.args.indexOf("--points-at") + 1];
+
+      return {
+        part3: "Bug-2056377_3\n",
+        part4: "Bug-2056377_4\n",
+      }[hash] || "";
+    }
+
+    if (
+      command.args[0] === "for-each-ref" &&
+      command.args.includes("--contains")
+    ) {
+      return "Bug-2056377_3\nBug-2056377_4\n";
+    }
+
+    if (command.args[0] === "rev-list") {
+      return {
+        "part3..Bug-2056377_3": "",
+        "part3..Bug-2056377_4": "part4\n",
+      }[command.args.at(-1)] || "";
+    }
+
+    if (command.args[0] === "merge-base") {
+      throw new Error("not on main");
+    }
+
+    if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+      return {
+        part3: `${part3Subject}\n\nBody before ids.\n`,
+        part4: `${part4Subject}\n\nTB-Tools-Id: part4-existing-id\n`,
+        rebasedPart3: amendedPart3Message,
+        rebasedPart4: `${part4Subject}\n\nTB-Tools-Id: part4-existing-id\n`,
+      }[command.args.at(-1)] || "";
+    }
+
+    if (command.cmd === "sh") {
+      return `patch-id-for-${command.args.at(-1)} ${command.args.at(-1)}\n`;
+    }
+
+    if (
+      command.args[0] === "commit" &&
+      command.args[1] === "--amend" &&
+      command.args.includes("--only")
+    ) {
+      amendedPart3Message = readFileSync(command.args.at(-1), "utf8");
+      return "";
+    }
+
+    if (command.args[0] === "rev-parse") {
+      return `${headHashes.shift()}\n`;
+    }
+
+    return "";
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await recordGraphTryRun({
+    graph,
+    runCommand,
+    tryRun: {
+      id: "part3-old-try",
+      url: "https://treeherder.mozilla.org/jobs?repo=try-comm-central&revision=part3-old",
+      createdAt: "2026-07-31T13:17:42.183Z",
+      hash: "old-part3",
+      patchId: "old-part3-patch-id",
+      tbToolsId: "legacy-part3-id",
+      subject: part3Subject,
+      label: "comm",
+    },
+  });
+
+  const result = await rebaseCommit({
+    graph,
+    hash: "part3",
+    preferredBranch: "Bug-2056377_3",
+    rebaseMode: "children",
+    runCommand,
+  });
+
+  assert.equal(result.branch, "Bug-2056377_4");
+  assert.deepEqual(result.commits, ["part3", "part4"]);
+  assert.match(amendedPart3Message, /TB-Tools-Id: legacy-part3-id/);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "commit" && call.args[1] === "--amend")
+      .map((call) => call.args.slice(0, 4)),
+    [["commit", "--amend", "--only", "-F"]],
+  );
+
+  const runs = await getGraphTryRunsForCommit({
+    graph,
+    runCommand,
+    commit: {
+      hash: "rebasedPart3",
+      subject: part3Subject,
+    },
+  });
+
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].id, "part3-old-try");
+  assert.equal(runs[0].hash, "rebasedPart3");
+});
+
 test("runGraphTrySubmission records mach try output for the current commit", async (t) => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-try-run-"));
   const storePath = path.join(tempDir, "try-runs.json");
   const calls = [];
   const graph = { label: "comm", path: "/repo/comm" };
+  let headHash = "abc123";
+  let messageHasId = false;
+  let committedMessage = "";
   const runCommand = async (command) => {
     calls.push(command);
 
@@ -822,7 +1105,7 @@ test("runGraphTrySubmission records mach try output for the current commit", asy
     }
 
     if (command.args[0] === "rev-parse") {
-      return "abc123\n";
+      return `${headHash}\n`;
     }
 
     if (command.args[0] === "diff" || command.args[0] === "ls-files") {
@@ -830,11 +1113,24 @@ test("runGraphTrySubmission records mach try output for the current commit", asy
     }
 
     if (command.args[0] === "log" && command.args.includes("--format=%B")) {
-      return "Bug 123 - Try me. r=#reviewers\n";
+      return messageHasId
+        ? committedMessage
+        : "Bug 123 - Try me. r=#reviewers\n";
     }
 
     if (command.cmd === "sh") {
-      return "stable-patch-id abc123\n";
+      return `stable-patch-id ${headHash}\n`;
+    }
+
+    if (
+      command.args[0] === "commit" &&
+      command.args[1] === "--amend" &&
+      command.args.includes("--only")
+    ) {
+      headHash = "amended456";
+      messageHasId = true;
+      committedMessage = readFileSync(command.args.at(-1), "utf8");
+      return "";
     }
 
     return "";
@@ -860,6 +1156,9 @@ test("runGraphTrySubmission records mach try output for the current commit", asy
     "https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
   );
   assert.equal(result.tryRun.patchId, "stable-patch-id");
+  assert.equal(result.tryRun.hash, "amended456");
+  assert.match(result.tryRun.tbToolsId, /^[0-9a-f-]+$/);
+  assert.equal(result.target.originalHash, "abc123");
   assert.equal(result.tryRun.subject, "Bug 123 - Try me. r=#reviewers");
   assert.match(
     session.output,
@@ -1619,6 +1918,72 @@ test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", as
   });
 });
 
+test("getGraphCommitIntegrationStatus keeps subject-matched legacy try runs", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-integration-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const subject = "Bug 2056377 - Fix bct2 failures part 3 - Expose card view row clicks through the subject grid cell. r=#thunderbird-front-end-reviewers";
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    commits: [
+      {
+        hash: "current-part3",
+        subject,
+      },
+    ],
+  };
+  const runCommand = async (command) => {
+    if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+      return storePath;
+    }
+
+    if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+      return `${subject}\n\nTB-Tools-Id: current-message-id\n`;
+    }
+
+    if (command.cmd === "sh") {
+      return "current-patch-id current-part3\n";
+    }
+
+    return "";
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await recordGraphTryRun({
+    graph,
+    runCommand,
+    tryRun: {
+      id: "part3-old-try",
+      url: "https://treeherder.mozilla.org/jobs?repo=try-comm-central&revision=part3-old",
+      createdAt: "2026-07-31T13:17:42.183Z",
+      hash: "old-part3",
+      patchId: "old-part3-patch-id",
+      tbToolsId: "legacy-part3-id",
+      subject,
+      label: "comm",
+    },
+  });
+
+  const result = await getGraphCommitIntegrationStatus({
+    graph,
+    hash: "current-part3",
+    runCommand,
+    getBug: async () => {
+      throw new Error("Bugzilla should not be queried.");
+    },
+    phab: async () => {
+      throw new Error("Phabricator should not be queried.");
+    },
+  });
+
+  assert.deepEqual(
+    result.tryRuns.map((tryRun) => tryRun.id),
+    ["part3-old-try"],
+  );
+  assert.equal(result.tryRuns[0].hash, "current-part3");
+});
+
 test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected bug", async () => {
   const calls = [];
   const updates = [];
@@ -1746,7 +2111,7 @@ test("markGraphBugForCheckin refuses patches that are not accepted", async () =>
 });
 
 test("buildGraphCommitMessage uses a Bug branch prefix and reviewer pills", () => {
-  assert.equal(
+  assert.match(
     buildGraphCommitMessage({
       branch: "Bug-1234567_2",
       summary: "Fix calendar keyboard handling",
@@ -1756,16 +2121,16 @@ test("buildGraphCommitMessage uses a Bug branch prefix and reviewer pills", () =
         "aleca",
       ],
     }),
-    "Bug 1234567 - Fix calendar keyboard handling. r=aleca!,#thunderbird-front-end-reviewers!",
+    /^Bug 1234567 - Fix calendar keyboard handling\. r=aleca!,#thunderbird-front-end-reviewers!\n\nTB-Tools-Id: [0-9a-f-]+$/,
   );
-  assert.equal(
+  assert.match(
     buildGraphCommitMessage({
       branch: "topic",
       bugId: "7654321",
       summary: "Fix account setup",
       reviewers: "#mail-reviewers",
     }),
-    "Bug 7654321 - Fix account setup. r=#mail-reviewers",
+    /^Bug 7654321 - Fix account setup\. r=#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
   );
   assert.deepEqual(
     normalizeGraphCommitReviewers([
@@ -1783,6 +2148,44 @@ test("buildGraphCommitMessage uses a Bug branch prefix and reviewer pills", () =
     () => buildGraphCommitMessage({ branch: "topic", summary: "Fix thing" }),
     /Bugzilla bug ID is required/,
   );
+});
+
+test("commit message helpers add tbToolsId trailers and install an idempotent hook", async (t) => {
+  const ensured = ensureTbToolsIdInCommitMessage("Bug 123 - Fix thing. r=#reviewers");
+  const preserved = ensureTbToolsIdInCommitMessage(
+    "Bug 123 - Fix thing. r=#reviewers\n\nTB-Tools-Id: existing-id",
+  );
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-hook-"));
+  const hookPath = path.join(tempDir, "hooks", "commit-msg");
+  const runCommand = async (command) => {
+    assert.deepEqual(command.args, ["rev-parse", "--git-path", "hooks/commit-msg"]);
+    return `${hookPath}\n`;
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+  await mkdir(path.dirname(hookPath), { recursive: true });
+  await writeFile(hookPath, "#!/bin/sh\nexit 0\n");
+
+  assert.match(
+    ensured.message,
+    /^Bug 123 - Fix thing\. r=#reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
+  );
+  assert.equal(preserved.id, "existing-id");
+  assert.equal(preserved.added, false);
+  assert.equal(
+    await installTbToolsCommitMsgHook({ cwd: tempDir, runCommand }),
+    true,
+  );
+  assert.equal(
+    await installTbToolsCommitMsgHook({ cwd: tempDir, runCommand }),
+    false,
+  );
+
+  const hook = readFileSync(hookPath, "utf8");
+
+  assert.match(hook, /^#!\/bin\/sh\n\n# tb-tools commit-msg hook begin/);
+  assert.match(hook, new RegExp(`const trailer = "${TB_TOOLS_ID_TRAILER}"`));
+  assert.match(hook, /exit 0\n$/);
 });
 
 test("searchGraphCommitReviewers skips short reviewer queries", async () => {
@@ -1916,10 +2319,7 @@ test("createGraphCommit stages changes and commits with generated message", asyn
         return "Bug-1234567_2\n";
       }
 
-      if (
-        command.args.join(" ") ===
-        "commit -m Bug 1234567 - Fix message list focus. r=aleca,#mail-reviewers"
-      ) {
+      if (command.args[0] === "commit" && command.args[1] === "-m") {
         return "[Bug-1234567_2 def456] Bug 1234567 - Fix message list focus. r=aleca,#mail-reviewers\n";
       }
 
@@ -1931,23 +2331,20 @@ test("createGraphCommit stages changes and commits with generated message", asyn
     },
   });
 
-  assert.deepEqual(
-    calls.map((call) => call.args),
-    [
-      ["branch", "--show-current"],
-      ["add", "-A"],
-      [
-        "commit",
-        "-m",
-        "Bug 1234567 - Fix message list focus. r=aleca,#mail-reviewers",
-      ],
-      ["rev-parse", "HEAD"],
-    ],
+  assert.deepEqual(calls.map((call) => call.args.slice(0, 2)), [
+    ["branch", "--show-current"],
+    ["add", "-A"],
+    ["commit", "-m"],
+    ["rev-parse", "HEAD"],
+  ]);
+  assert.match(
+    calls[2].args[2],
+    /^Bug 1234567 - Fix message list focus\. r=aleca,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
   );
   assert.equal(result.hash, "def4567890abcdef");
-  assert.equal(
+  assert.match(
     result.commitMessage,
-    "Bug 1234567 - Fix message list focus. r=aleca,#mail-reviewers",
+    /^Bug 1234567 - Fix message list focus\. r=aleca,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
   );
   assert.equal(result.message, "comm created commit def4567890ab.");
 });
@@ -2002,7 +2399,9 @@ test("amendCurrentCommit stages shown changes and amends with an edited message"
       }
 
       if (command.args[0] === "log" && command.args.includes("--format=%B")) {
-        return "Bug 123 - Better message. r=#reviewers\n\nUpdated body.\n";
+        return command.args.includes("def456")
+          ? "Bug 123 - Better message. r=#reviewers\n\nUpdated body.\n\nTB-Tools-Id: amend-id\n"
+          : "Bug 123 - Old message. r=#reviewers\n\nTB-Tools-Id: amend-id\n";
       }
 
       return "";
@@ -2017,12 +2416,13 @@ test("amendCurrentCommit stages shown changes and amends with an edited message"
   assert.match(writes[0].file, /tb-tools-amend-[^.]+\.txt$/);
   assert.equal(
     writes[0].content,
-    "Bug 123 - Better message. r=#reviewers\n\nUpdated body.\n",
+    "Bug 123 - Better message. r=#reviewers\n\nUpdated body.\n\nTB-Tools-Id: amend-id\n",
   );
   assert.deepEqual(removes, [writes[0].file]);
   assert.deepEqual(
     calls.map((call) => call.args),
     [
+      ["log", "-1", "--format=%B"],
       [
         "diff",
         "--patch",
@@ -2063,7 +2463,9 @@ test("amendCurrentCommit can update only the commit message without staging dirt
       }
 
       if (command.args[0] === "log" && command.args.includes("--format=%B")) {
-        return "Bug 123 - Message only. r=#reviewers\n";
+        return command.args.includes("def456")
+          ? "Bug 123 - Message only. r=#reviewers\n\nTB-Tools-Id: amend-message-id\n"
+          : "Bug 123 - Old message. r=#reviewers\n\nTB-Tools-Id: amend-message-id\n";
       }
 
       return "";
@@ -2076,17 +2478,105 @@ test("amendCurrentCommit can update only the commit message without staging dirt
   assert.equal(result.branch, "topic");
   assert.equal(result.currentHash, "def456");
   assert.equal(result.rewrittenHash, "def456");
-  assert.equal(writes[0].content, "Bug 123 - Message only. r=#reviewers\n");
+  assert.equal(
+    writes[0].content,
+    "Bug 123 - Message only. r=#reviewers\n\nTB-Tools-Id: amend-message-id\n",
+  );
   assert.deepEqual(removes, [writes[0].file]);
   assert.deepEqual(
     calls.map((call) => call.args),
     [
+      ["log", "-1", "--format=%B"],
       ["commit", "--amend", "--only", "-F", writes[0].file],
       ["branch", "--show-current"],
       ["rev-parse", "HEAD"],
       ["log", "-1", "--format=%B", "def456"],
     ],
   );
+});
+
+test("amendCurrentCommit keeps try runs on the rewritten commit", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-amend-try-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const calls = [];
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+  };
+  let headHash = "old111";
+  const runCommand = async (command) => {
+    calls.push(command);
+
+    if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+      return storePath;
+    }
+
+    if (command.args[0] === "branch") {
+      return "topic\n";
+    }
+
+    if (command.args[0] === "rev-parse") {
+      return `${headHash}\n`;
+    }
+
+    if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+      return "Bug 123 - Message only. r=#reviewers\n\nTB-Tools-Id: amend-try-id\n";
+    }
+
+    if (command.cmd === "sh") {
+      return `new-patch-id ${headHash}\n`;
+    }
+
+    if (command.args[0] === "commit" && command.args[1] === "--amend") {
+      headHash = "new222";
+      return "";
+    }
+
+    return "";
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await recordGraphTryRun({
+    graph,
+    runCommand,
+    tryRun: {
+      id: "try-current-amend",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=current-amend",
+      createdAt: "2026-07-31T12:00:00.000Z",
+      hash: "old111",
+      patchId: "old-patch-id",
+      tbToolsId: "amend-try-id",
+      subject: "Bug 123 - Message only. r=#reviewers",
+      label: "comm",
+    },
+  });
+
+  const result = await amendCurrentCommit({
+    graph,
+    message: "Bug 123 - Message only. r=#reviewers",
+    runCommand,
+    writeMessage: async () => {},
+    removeMessage: async () => {},
+  });
+
+  assert.equal(result.rewrittenHash, "new222");
+
+  const runs = await getGraphTryRunsForCommit({
+    graph,
+    runCommand,
+    commit: {
+      hash: "new222",
+      subject: "Bug 123 - Message only. r=#reviewers",
+    },
+  });
+
+  assert.equal(runs.length, 1);
+  assert.equal(
+    runs[0].url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=current-amend",
+  );
+  assert.equal(runs[0].hash, "new222");
 });
 
 test("amendCommitMessage rewrites a selected commit message and replays descendants", async () => {
@@ -2158,7 +2648,9 @@ test("amendCommitMessage rewrites a selected commit message and replays descenda
       }
 
       if (command.args[0] === "log" && command.args.includes("--format=%B")) {
-        return "Bug 123 - Reword selected commit. r=#reviewers\n";
+        return command.args.includes("newabc999")
+          ? "Bug 123 - Reword selected commit. r=#reviewers\n\nTB-Tools-Id: selected-amend-id\n"
+          : "Bug 123 - Old selected commit. r=#reviewers\n\nTB-Tools-Id: selected-amend-id\n";
       }
 
       return "";
@@ -2180,12 +2672,13 @@ test("amendCommitMessage rewrites a selected commit message and replays descenda
   assert.match(writes[0].file, /tb-tools-amend-[^.]+\.txt$/);
   assert.equal(
     writes[0].content,
-    "Bug 123 - Reword selected commit. r=#reviewers\n",
+    "Bug 123 - Reword selected commit. r=#reviewers\n\nTB-Tools-Id: selected-amend-id\n",
   );
   assert.deepEqual(removes, [writes[0].file]);
   assert.deepEqual(
     calls.map((call) => call.args),
     [
+      ["log", "-1", "--format=%B", "abc123"],
       ["branch", "--show-current"],
       ["rev-parse", "HEAD"],
       ["status", "--porcelain"],
@@ -2221,8 +2714,10 @@ test("amendCommitMessage rewrites a selected commit message and replays descenda
       ["log", "-1", "--format=%B", "newabc999"],
       ["cherry-pick", "--no-commit", "def456"],
       ["commit", "-C", "def456"],
+      ["rev-parse", "HEAD"],
       ["cherry-pick", "--no-commit", "fed789"],
       ["commit", "-C", "fed789"],
+      ["rev-parse", "HEAD"],
       ["rev-parse", "HEAD"],
       ["branch", "-f", "topic", "newtip999"],
       ["switch", "topic"],
@@ -2560,6 +3055,10 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
         throw new Error("not on main");
       }
 
+      if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+        return "tb-tools-try-runs.json\n";
+      }
+
       if (command.args[0] === "rev-parse") {
         return calls.filter((call) => call.args[0] === "rev-parse").length === 1
           ? "base123\n"
@@ -2643,6 +3142,10 @@ test("rebaseCommit rebases a selected commit onto the current checkout without a
 
       if (command.args[0] === "merge-base") {
         throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+        return "tb-tools-try-runs.json\n";
       }
 
       if (command.args[0] === "rev-parse") {
@@ -2738,6 +3241,10 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
 
       if (command.args[0] === "merge-base") {
         throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+        return "tb-tools-try-runs.json\n";
       }
 
       if (command.args[0] === "rev-parse") {
@@ -3216,7 +3723,15 @@ test("rebaseCommit selected mode ignores ambiguous descendant stacks", async () 
         return "Bug-100\nBug-102\nBug-202\n";
       }
 
+      if (command.args[0] === "rev-list" && command.args[1] === "--parents") {
+        return "a111 base000\n";
+      }
+
       if (command.args[0] === "merge-base") {
+        if (command.args[2] === "base000") {
+          return "";
+        }
+
         throw new Error("not on main");
       }
 
@@ -3238,13 +3753,92 @@ test("rebaseCommit selected mode ignores ambiguous descendant stacks", async () 
     calls
       .filter((call) => call.args[0] === "rev-list")
       .map((call) => call.args),
-    [],
+    [["rev-list", "--parents", "-n", "1", "a111"]],
   );
   assert.deepEqual(
     calls
       .filter((call) => call.args[0] === "cherry-pick")
       .map((call) => call.args),
     [["cherry-pick", "--no-commit", "a111"]],
+  );
+});
+
+test("rebaseCommit selected mode keeps stack branch refs when rebasing only the tip", async () => {
+  const calls = [];
+  const rewrittenHashes = ["base000", "new-docs"];
+  const result = await rebaseCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "(detached)",
+      knownHashes: new Set(["docs1"]),
+    },
+    hash: "docs1",
+    preferredBranch: "bct4",
+    rebaseMode: "selected",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        return "bct4\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "bct4\n";
+      }
+
+      if (command.args[0] === "rev-list" && command.args[1] === "--parents") {
+        return "docs1 bct6final\n";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+        return "tb-tools-try-runs.json\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${rewrittenHashes.shift()}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.mode, "selected");
+  assert.equal(result.branch, "");
+  assert.equal(result.currentHash, "new-docs");
+  assert.equal(result.detached, true);
+  assert.deepEqual(result.branchUpdates, []);
+  assert.deepEqual(
+    calls
+      .filter((call) =>
+        call.args[0] === "branch" && call.args[1] === "-f"
+      )
+      .map((call) => call.args),
+    [],
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "switch")
+      .map((call) => call.args),
+    [["switch", "--detach", "base000"]],
   );
 });
 
@@ -3444,6 +4038,163 @@ test("rebaseCommit children mode preserves a branch-per-commit Thunderbird stack
       rewrittenByCommit.get(commit),
     ]),
   );
+});
+
+test("rebaseCommit children mode preserves middle branch-per-commit mappings", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-rebase-try-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const calls = [];
+  const commits = Array.from({ length: 9 }, (_, index) =>
+    "c" + String(index + 1).padStart(3, "0"),
+  );
+  const selectedIndex = 4;
+  const selectedCommit = commits[selectedIndex];
+  const childCommits = commits.slice(selectedIndex);
+  const branchByCommit = new Map(
+    commits.map((commit, index) => [commit, `Bug-${101 + index}`]),
+  );
+  const rewrittenByCommit = new Map(
+    childCommits.map((commit, index) => [
+      commit,
+      "new" + String(selectedIndex + index + 1).padStart(3, "0"),
+    ]),
+  );
+  const rewrittenHashes = [
+    "base000",
+    ...childCommits.map((commit) => rewrittenByCommit.get(commit)),
+    rewrittenByCommit.get(childCommits.at(-1)),
+  ];
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "main",
+    knownHashes: new Set([selectedCommit]),
+  };
+  const runCommand = async (command) => {
+    calls.push(command);
+
+    if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+      return storePath;
+    }
+
+    if (command.args[0] === "status") {
+      return "";
+    }
+
+    if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      return "main\n";
+    }
+
+    if (
+      command.args[0] === "for-each-ref" &&
+      command.args.includes("--points-at")
+    ) {
+      const hash = command.args[command.args.indexOf("--points-at") + 1];
+
+      return branchByCommit.has(hash) ? branchByCommit.get(hash) + "\n" : "";
+    }
+
+    if (
+      command.args[0] === "for-each-ref" &&
+      command.args.includes("--contains")
+    ) {
+      return childCommits.map((commit) => branchByCommit.get(commit)).join("\n") + "\n";
+    }
+
+    if (command.args[0] === "rev-list") {
+      const range = command.args.at(-1);
+      const branch = range.slice(range.indexOf("..") + 2);
+      const targetIndex = Array.from(branchByCommit.values()).indexOf(branch);
+
+      if (range.startsWith(`origin/main..`)) {
+        throw new Error("children mode should not prepend unpublished parents");
+      }
+
+      return targetIndex <= selectedIndex
+        ? ""
+        : commits.slice(selectedIndex + 1, targetIndex + 1).join("\n") + "\n";
+    }
+
+    if (command.args[0] === "merge-base") {
+      throw new Error("not on main");
+    }
+
+    if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+      return "Bug 105 - Middle commit\n\nTB-Tools-Id: middle-try-id\n";
+    }
+
+    if (command.cmd === "sh") {
+      return `middle-patch-id ${command.args.at(-1)}\n`;
+    }
+
+    if (command.args[0] === "rev-parse") {
+      return `${rewrittenHashes.shift()}\n`;
+    }
+
+    return "";
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await recordGraphTryRun({
+    graph,
+    runCommand,
+    tryRun: {
+      id: "try-middle",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=middle",
+      createdAt: "2026-07-30T12:00:00.000Z",
+      hash: selectedCommit,
+      tbToolsId: "middle-try-id",
+      subject: "Bug 105 - Middle commit",
+      label: "comm",
+    },
+  });
+
+  const result = await rebaseCommit({
+    graph,
+    hash: selectedCommit,
+    preferredBranch: branchByCommit.get(selectedCommit),
+    rebaseMode: "children",
+    runCommand,
+  });
+
+  assert.equal(result.mode, "children");
+  assert.equal(result.branch, branchByCommit.get(commits.at(-1)));
+  assert.deepEqual(result.commits, childCommits);
+  assert.deepEqual(
+    result.branchUpdates,
+    childCommits.map((commit) => ({
+      branch: branchByCommit.get(commit),
+      originalHash: commit,
+      hash: rewrittenByCommit.get(commit),
+    })),
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "branch" && call.args[1] === "-f")
+      .map((call) => call.args),
+    childCommits.map((commit) => [
+      "branch",
+      "-f",
+      branchByCommit.get(commit),
+      rewrittenByCommit.get(commit),
+    ]),
+  );
+  const runs = await getGraphTryRunsForCommit({
+    graph,
+    runCommand,
+    commit: {
+      hash: rewrittenByCommit.get(selectedCommit),
+      subject: "Bug 105 - Middle commit",
+    },
+  });
+
+  assert.equal(runs.length, 1);
+  assert.equal(
+    runs[0].url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=middle",
+  );
+  assert.equal(runs[0].hash, rewrittenByCommit.get(selectedCommit));
 });
 
 test("rebaseCommit skips an empty cherry-pick and keeps rebasing descendants", async () => {
@@ -4094,6 +4845,364 @@ test("rebaseCommit refuses when the current checkout is inside the selected stac
   );
 });
 
+test("getInteractiveRebasePlan builds a branch stack todo with fixup defaults", async () => {
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "main",
+    knownHashes: new Set(["c1"]),
+  };
+  const messages = {
+    c1: "Bug 123 - Base patch. r=#reviewers\n",
+    c2: "fixup! Bug 123 - Base patch. r=#reviewers\n",
+    c3: "squash! Bug 123 - Base patch. r=#reviewers\n",
+  };
+  const plan = await getInteractiveRebasePlan({
+    graph,
+    hash: "c1",
+    preferredBranch: "Bug-123_3",
+    runCommand: async (command) => {
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+
+        return {
+          c1: "Bug-123\n",
+          c2: "Bug-123_2\n",
+          c3: "Bug-123_3\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-123\nBug-123_2\nBug-123_3\n";
+      }
+
+      if (command.args[0] === "rev-list" && command.args[1] === "--parents") {
+        return "c1 base0\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return {
+          "c1..Bug-123": "",
+          "c1..Bug-123_2": "c2\n",
+          "c1..Bug-123_3": "c2\nc3\n",
+        }[command.args.at(-1)] || "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "log") {
+        return messages[command.args.at(-1)] || "";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(plan.branch, "Bug-123_3");
+  assert.equal(plan.base, "base0");
+  assert.deepEqual(
+    plan.commits.map((commit) => [commit.hash, commit.action]),
+    [
+      ["c1", "pick"],
+      ["c2", "fixup"],
+      ["c3", "squash"],
+    ],
+  );
+});
+
+test("startInteractiveRebase reorders commits and squashes messages", async () => {
+  const calls = [];
+  const messages = {
+    c1: "Bug 123 - First patch. r=#reviewers\n\nFirst body.\n",
+    c2: "Bug 123 - Second patch. r=#reviewers\n\nSecond body.\n",
+    c3: "Bug 123 - Third patch. r=#reviewers\n\nThird body.\n",
+  };
+  const branchHeads = new Map();
+  let currentHead = "checkout0";
+  let squashedMessage = "";
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "Bug-123_2",
+    knownHashes: new Set(["c1"]),
+  };
+  const runCommand = async (command) => {
+    calls.push(command);
+
+    if (command.args[0] === "status") {
+      return "";
+    }
+
+    if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      return "Bug-123_2\n";
+    }
+
+    if (
+      command.args[0] === "for-each-ref" &&
+      command.args.includes("--points-at")
+    ) {
+      const hash = command.args[command.args.indexOf("--points-at") + 1];
+
+      return {
+        c1: "Bug-123\n",
+        c2: "Bug-123_2\n",
+        c3: "Bug-123_3\n",
+      }[hash] || "";
+    }
+
+    if (
+      command.args[0] === "for-each-ref" &&
+      command.args.includes("--contains")
+    ) {
+      return "Bug-123\nBug-123_2\nBug-123_3\n";
+    }
+
+    if (command.args[0] === "rev-list" && command.args[1] === "--parents") {
+      return "c1 base0\n";
+    }
+
+    if (command.args[0] === "rev-list") {
+      return {
+        "c1..Bug-123": "",
+        "c1..Bug-123_2": "c2\n",
+        "c1..Bug-123_3": "c2\nc3\n",
+      }[command.args.at(-1)] || "";
+    }
+
+    if (command.args[0] === "merge-base") {
+      throw new Error("not on main");
+    }
+
+    if (command.args[0] === "switch" && command.args[1] === "--detach") {
+      currentHead = command.args[2];
+      return "";
+    }
+
+    if (command.args[0] === "switch") {
+      currentHead = branchHeads.get(command.args[1]) || currentHead;
+      return "";
+    }
+
+    if (command.args[0] === "cherry-pick") {
+      return "";
+    }
+
+    if (command.args[0] === "commit" && command.args[1] === "-C") {
+      currentHead = "new-" + command.args[2];
+      return "";
+    }
+
+    if (command.args[0] === "commit" && command.args[1] === "--amend") {
+      squashedMessage = readFileSync(command.args.at(-1), "utf8");
+      currentHead = "squashed-c2-c1";
+      return "";
+    }
+
+    if (command.args[0] === "branch" && command.args[1] === "-f") {
+      branchHeads.set(command.args[2], command.args[3]);
+      return "";
+    }
+
+    if (command.args[0] === "rev-parse") {
+      return `${currentHead}\n`;
+    }
+
+    if (command.args[0] === "log") {
+      return {
+        ...messages,
+        "new-c2": messages.c2,
+        "squashed-c2-c1": squashedMessage,
+        "new-c3": messages.c3,
+      }[command.args.at(-1)] || "";
+    }
+
+    return "";
+  };
+
+  const result = await startInteractiveRebase({
+    graph,
+    graphIndex: 0,
+    hash: "c1",
+    preferredBranch: "Bug-123_3",
+    items: [
+      { hash: "c2", action: "pick" },
+      { hash: "c1", action: "squash" },
+      { hash: "c3", action: "pick" },
+    ],
+    runCommand,
+  });
+
+  assert.equal(result.action, "interactive-rebase");
+  assert.equal(result.branch, "Bug-123_3");
+  assert.equal(result.currentHash, "new-c3");
+  assert.match(squashedMessage, /Second body\./);
+  assert.match(squashedMessage, /First body\./);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-123", originalHash: "c1", hash: "squashed-c2-c1" },
+    { branch: "Bug-123_2", originalHash: "c2", hash: "squashed-c2-c1" },
+    { branch: "Bug-123_3", originalHash: "c3", hash: "new-c3" },
+  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.args[0] === "cherry-pick")
+      .map((call) => call.args),
+    [
+      ["cherry-pick", "--no-commit", "c2"],
+      ["cherry-pick", "--no-commit", "c1"],
+      ["cherry-pick", "--no-commit", "c3"],
+    ],
+  );
+});
+
+test("startInteractiveRebase pauses for edit and continues after manual amend", async () => {
+  const calls = [];
+  const messages = {
+    c1: "Bug 123 - First patch. r=#reviewers\n",
+    c2: "Bug 123 - Second patch. r=#reviewers\n",
+    amended1: "Bug 123 - First patch amended. r=#reviewers\n",
+    new2: "Bug 123 - Second patch. r=#reviewers\n",
+  };
+  const branchHeads = new Map();
+  let currentHead = "checkout0";
+  let session;
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "Bug-123",
+    knownHashes: new Set(["c1"]),
+  };
+  const runCommand = async (command) => {
+    calls.push(command);
+
+    if (command.args[0] === "status") {
+      return "";
+    }
+
+    if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      return "Bug-123\n";
+    }
+
+    if (
+      command.args[0] === "for-each-ref" &&
+      command.args.includes("--points-at")
+    ) {
+      const hash = command.args[command.args.indexOf("--points-at") + 1];
+
+      return {
+        c1: "Bug-123\n",
+        c2: "Bug-123_2\n",
+      }[hash] || "";
+    }
+
+    if (
+      command.args[0] === "for-each-ref" &&
+      command.args.includes("--contains")
+    ) {
+      return "Bug-123\nBug-123_2\n";
+    }
+
+    if (command.args[0] === "rev-list" && command.args[1] === "--parents") {
+      return "c1 base0\n";
+    }
+
+    if (command.args[0] === "rev-list") {
+      return {
+        "c1..Bug-123": "",
+        "c1..Bug-123_2": "c2\n",
+      }[command.args.at(-1)] || "";
+    }
+
+    if (command.args[0] === "merge-base") {
+      throw new Error("not on main");
+    }
+
+    if (command.args[0] === "switch" && command.args[1] === "--detach") {
+      currentHead = command.args[2];
+      return "";
+    }
+
+    if (command.args[0] === "switch") {
+      currentHead = branchHeads.get(command.args[1]) || currentHead;
+      return "";
+    }
+
+    if (command.args[0] === "cherry-pick") {
+      return "";
+    }
+
+    if (command.args[0] === "commit" && command.args[1] === "-C") {
+      currentHead = command.args[2] === "c1" ? "new1" : "new2";
+      return "";
+    }
+
+    if (command.args[0] === "branch" && command.args[1] === "-f") {
+      branchHeads.set(command.args[2], command.args[3]);
+      return "";
+    }
+
+    if (command.args[0] === "rev-parse") {
+      return `${currentHead}\n`;
+    }
+
+    if (command.args[0] === "log") {
+      return {
+        ...messages,
+        new1: messages.c1,
+      }[command.args.at(-1)] || "";
+    }
+
+    return "";
+  };
+
+  await assert.rejects(
+    startInteractiveRebase({
+      graph,
+      graphIndex: 0,
+      hash: "c1",
+      preferredBranch: "Bug-123_2",
+      items: [
+        { hash: "c1", action: "edit" },
+        { hash: "c2", action: "pick" },
+      ],
+      runCommand,
+    }),
+    (error) => {
+      session = error.rebaseState;
+      assert.equal(error.rebaseConflict.type, "edit");
+      assert.equal(error.rebaseConflict.canContinue, true);
+      return true;
+    },
+  );
+
+  currentHead = "amended1";
+  const result = await continueRebaseCommit({
+    session,
+    runCommand,
+  });
+
+  assert.equal(result.currentHash, "new2");
+  assert.deepEqual(result.rewrittenCommits, [
+    { originalHash: "c1", hash: "amended1" },
+    { originalHash: "c2", hash: "new2" },
+  ]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-123", originalHash: "c1", hash: "amended1" },
+    { branch: "Bug-123_2", originalHash: "c2", hash: "new2" },
+  ]);
+});
+
 test("updateGraphCheckout switches to updated main for plain updates", async () => {
   const calls = [];
   const graph = {
@@ -4245,6 +5354,115 @@ test("updateGraphCheckout rebases the containing branch for a detached checkout"
   );
 });
 
+test("updateGraphCheckout keeps try runs on commits rewritten by update rebase", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-update-try-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const calls = [];
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "topic",
+  };
+  let rebaseComplete = false;
+  const runCommand = async (command) => {
+    calls.push(command);
+
+    if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
+      return storePath;
+    }
+
+    if (command.args[0] === "branch") {
+      return "topic\n";
+    }
+
+    if (command.args[0] === "rev-list") {
+      return rebaseComplete ? "new111\nnew222\n" : "old111\nold222\n";
+    }
+
+    if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+      const hash = command.args.at(-1);
+      if (hash === "old222") {
+        return "Bug 123 - Patch two. r=#reviewers\n\nTB-Tools-Id: patch-two-id\n";
+      }
+
+      return hash.endsWith("222")
+        ? "Bug 123 - Patch two after upstream drift. r=#reviewers\n\nTB-Tools-Id: patch-two-id\n"
+        : "Bug 123 - Patch one. r=#reviewers\n\nTB-Tools-Id: patch-one-id\n";
+    }
+
+    if (command.cmd === "sh") {
+      const hash = command.args.at(-1);
+      return hash.endsWith("222")
+        ? `${hash === "old222" ? "old" : "new"}-patch-two 0000000000000000000000000000000000000000\n`
+        : "patch-one 0000000000000000000000000000000000000000\n";
+    }
+
+    if (command.args[0] === "rebase") {
+      rebaseComplete = true;
+      return "";
+    }
+
+    if (command.args[0] === "rev-parse") {
+      return "new222\n";
+    }
+
+    return "";
+  };
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await recordGraphTryRun({
+    graph,
+    runCommand,
+    tryRun: {
+      id: "try-update-rebase",
+      url: "https://treeherder.mozilla.org/jobs?repo=try&revision=update-rebase",
+      createdAt: "2026-07-31T12:30:00.000Z",
+      hash: "old222",
+      tbToolsId: "patch-two-id",
+      patchId: "old-patch-two",
+      subject: "Bug 123 - Patch two. r=#reviewers",
+      label: "comm",
+    },
+  });
+
+  const result = await updateGraphCheckout({
+    graph,
+    mode: "rebase",
+    runCommand,
+  });
+
+  assert.deepEqual(result.commits, ["old111", "old222"]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.cmd === "git" && call.args[0] === "rebase")
+      .map((call) => call.args),
+    [[
+      "rebase",
+      "--update-refs",
+      "origin/main",
+      "topic",
+    ]],
+  );
+
+  const runs = await getGraphTryRunsForCommit({
+    graph,
+    runCommand,
+    commit: {
+      hash: "new222",
+      subject: "Bug 123 - Patch two. r=#reviewers",
+    },
+  });
+
+  assert.equal(runs.length, 1);
+  assert.equal(
+    runs[0].url,
+    "https://treeherder.mozilla.org/jobs?repo=try&revision=update-rebase",
+  );
+  assert.equal(runs[0].hash, "new222");
+  assert.equal(runs[0].tbToolsId, "patch-two-id");
+});
+
 test("runGraphRepositoryUpdate reports dirty checkouts before changing anything", async () => {
   const calls = [];
   const graphs = [
@@ -4393,7 +5611,10 @@ test("runGraphRepositoryUpdate can amend dirty changes before rebasing", async (
   );
   assert.equal(result.results[0].rebasedCount, 2);
   assert.match(result.output, /\$ git commit --amend --no-edit/);
-  assert.match(result.output, /\$ git rebase --update-refs origin\/main topic/);
+  assert.match(
+    result.output,
+    /\$ git rebase --update-refs origin\/main topic/,
+  );
   assert.deepEqual(
     calls.map((call) => call.args),
     [
@@ -4716,12 +5937,18 @@ test("pruneCommitBranches drops a commit from the current branch history", async
         return "topic\nmain\n";
       }
 
-      if (command.args[0] === "rev-list") {
+      if (command.args[0] === "rev-list" && command.args.includes("--parents")) {
         return "abc123 parent123\n";
       }
 
+      if (command.args[0] === "rev-list") {
+        return command.args.at(-1) === "abc123..main" ? "child456\n" : "";
+      }
+
       if (command.args[0] === "rev-parse") {
-        return "rebased456\n";
+        return calls.filter((call) => call.args[0] === "rev-parse").length === 1
+          ? "tip789\n"
+          : "rebased456\n";
       }
 
       return "";
@@ -4771,8 +5998,35 @@ test("pruneCommitBranches drops a commit from the current branch history", async
         "refs/tb-tools",
       ],
       ["rev-list", "--parents", "-n", "1", "abc123"],
-      ["rebase", "--onto", "parent123", "abc123", "main"],
-      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "--ancestry-path",
+        "abc123..topic",
+      ],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "--ancestry-path",
+        "abc123..main",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "child456",
+        "refs/heads",
+      ],
+      ["switch", "--detach", "parent123"],
+      ["cherry-pick", "--no-commit", "child456"],
+      ["commit", "-C", "child456"],
+      ["rev-parse", "HEAD"],
+      ["branch", "-f", "main", "rebased456"],
+      ["switch", "main"],
       ["rev-parse", "HEAD"],
     ],
   );
@@ -4817,8 +6071,12 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
         return "main\n";
       }
 
-      if (command.args[0] === "rev-list") {
+      if (command.args[0] === "rev-list" && command.args.includes("--parents")) {
         return "abc123 parent123\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "";
       }
 
       if (command.args[0] === "rev-parse") {
@@ -4872,8 +6130,166 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
         "refs/tb-tools",
       ],
       ["rev-list", "--parents", "-n", "1", "abc123"],
-      ["rebase", "--onto", "parent123", "abc123", "main"],
+      ["rev-parse", "HEAD"],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "--ancestry-path",
+        "abc123..main",
+      ],
+      ["switch", "--detach", "parent123"],
+      ["branch", "-f", "main", "parent123"],
+      ["switch", "main"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
+});
+
+test("pruneCommitBranches removes a branch-per-commit stack commit in one pass", async () => {
+  const calls = [];
+  const result = await pruneCommitBranches({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "(detached)",
+      knownHashes: new Set(["b222"]),
+    },
+    hash: "b222",
+    preferredBranch: "Bug-101",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
+        return "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+
+        return {
+          b222: "Bug-101\n",
+          c333: "Bug-102\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-101\nBug-102\n";
+      }
+
+      if (command.args[0] === "rev-list" && command.args.includes("--parents")) {
+        return "b222 a111\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return {
+          "b222..Bug-101": "",
+          "b222..Bug-102": "c333\n",
+        }[command.args.at(-1)] || "";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return calls.filter((call) => call.args[0] === "rev-parse").length === 1
+          ? "b222\n"
+          : calls.filter((call) => call.args[0] === "rev-parse").length === 2
+            ? "new333\n"
+            : "a111\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(
+    result.message,
+    "comm pruned b222 from branches Bug-101, Bug-102.",
+  );
+  assert.deepEqual(result.branches, ["Bug-101", "Bug-102"]);
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-101", originalHash: "b222", hash: "a111" },
+    { branch: "Bug-102", originalHash: "c333", hash: "new333" },
+  ]);
+  assert.equal(result.parent, "a111");
+  assert.equal(result.currentHash, "a111");
+  assert.equal(result.branch, "Bug-101");
+  assert.equal(result.detached, false);
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ["status", "--porcelain"],
       ["branch", "--show-current"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "b222",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--contains",
+        "b222",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--points-at",
+        "b222",
+        "refs/tb-tools",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)",
+        "--contains",
+        "b222",
+        "refs/tb-tools",
+      ],
+      ["rev-list", "--parents", "-n", "1", "b222"],
+      ["rev-parse", "HEAD"],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "--ancestry-path",
+        "b222..Bug-101",
+      ],
+      [
+        "rev-list",
+        "--reverse",
+        "--topo-order",
+        "--ancestry-path",
+        "b222..Bug-102",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "c333",
+        "refs/heads",
+      ],
+      ["switch", "--detach", "a111"],
+      ["cherry-pick", "--no-commit", "c333"],
+      ["commit", "-C", "c333"],
+      ["rev-parse", "HEAD"],
+      ["branch", "-f", "Bug-101", "a111"],
+      ["branch", "-f", "Bug-102", "new333"],
+      ["switch", "Bug-101"],
       ["rev-parse", "HEAD"],
     ],
   );
@@ -5585,6 +7001,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /data-rebase-mode="children"/);
   assert.match(html, /data-rebase-mode="descendants"/);
   assert.match(html, /data-rebase-mode="stack"/);
+  assert.match(html, /data-action="interactive-rebase"/);
   assert.match(html, /data-action="branch"/);
   assert.match(html, /data-action="prune"/);
   assert.match(
@@ -5606,6 +7023,8 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /class="submit-prompt"/);
   assert.match(html, /class="submit-links" hidden/);
   assert.match(html, /class="submit-output"/);
+  assert.match(html, /id="interactive-rebase-dialog"/);
+  assert.match(html, /class="interactive-rebase-todo"/);
   assert.match(html, /id="try-dialog"/);
   assert.match(html, /class="try-selector"/);
   assert.match(html, /class="try-tasks-regex"/);
@@ -5790,6 +7209,11 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function refreshGraphFromServer/);
   assert.match(client, /function pollGraphUpdates/);
   assert.match(client, /function runGraphUpdate/);
+  assert.match(client, /function openInteractiveRebaseDialog/);
+  assert.match(client, /function submitInteractiveRebaseDialog/);
+  assert.match(client, /function handleInteractiveRebaseDialogClick/);
+  assert.match(client, /\/api\/interactive-rebase\/plan/);
+  assert.match(client, /\/api\/interactive-rebase/);
   assert.match(client, /function promptForDirtyUpdateAction/);
   assert.match(client, /function unshelfGraphUpdateChanges/);
   assert.match(client, /function listenForServerShutdown/);
@@ -5955,6 +7379,8 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /button\.style\.display = hidden \? "none" : ""/);
   assert.match(client, /Uncommitted changes/);
   assert.match(client, /rebaseMode: button\.dataset\.rebaseMode \|\| ""/);
+  assert.match(client, /button\.dataset\.action === "interactive-rebase"/);
+  assert.match(client, /openInteractiveRebaseDialog\(actionState\)/);
   assert.match(client, /preferredBranch/);
   assert.match(client, /rebaseMode/);
   assert.match(client, /commitGroup\.addEventListener\("contextmenu"/);
@@ -6371,6 +7797,92 @@ test("interactive graph server returns origin status before slow Rust dependency
 
   assert.equal(completedStatus.statuses[2].type, "rust-upstream");
   assert.equal(completedStatus.statuses[2].state, "current");
+});
+
+test("interactive graph server returns interactive rebase plans", async (t) => {
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        commits: [{ hash: "c1", parents: [], refs: [], subject: "Bug 123" }],
+        commitCount: 1,
+        diffs: {},
+      },
+    ],
+    runCommand: async (command) => {
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return "main\n";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--points-at")
+      ) {
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+
+        return {
+          c1: "Bug-123\n",
+          c2: "Bug-123_2\n",
+        }[hash] || "";
+      }
+
+      if (
+        command.args[0] === "for-each-ref" &&
+        command.args.includes("--contains")
+      ) {
+        return "Bug-123\nBug-123_2\n";
+      }
+
+      if (command.args[0] === "rev-list" && command.args[1] === "--parents") {
+        return "c1 base0\n";
+      }
+
+      if (command.args[0] === "rev-list") {
+        return command.args.at(-1) === "c1..Bug-123_2" ? "c2\n" : "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw new Error("not on main");
+      }
+
+      if (command.args[0] === "log") {
+        return {
+          c1: "Bug 123 - Base patch. r=#reviewers\n",
+          c2: "fixup! Bug 123 - Base patch. r=#reviewers\n",
+        }[command.args.at(-1)] || "";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const response = await fetch(
+    new URL(
+      "api/interactive-rebase/plan?token=secret&graphIndex=0&hash=c1&preferredBranch=Bug-123_2",
+      serverInfo.url,
+    ),
+  );
+  const result = await response.json();
+
+  assert.equal(response.ok, true);
+  assert.equal(result.plan.branch, "Bug-123_2");
+  assert.deepEqual(
+    result.plan.commits.map((commit) => [commit.hash, commit.action]),
+    [
+      ["c1", "pick"],
+      ["c2", "fixup"],
+    ],
+  );
 });
 
 test("interactive graph server streams commits, diffs, checkout responses, and closes", async (t) => {
@@ -6885,6 +8397,7 @@ test("interactive graph server exposes rebase conflict sessions and continue", a
 test("interactive graph server amends current commit with edited message and refreshes", async (t) => {
   const calls = [];
   let amended = false;
+  let committedMessage = "";
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
     token: "secret",
@@ -6904,7 +8417,7 @@ test("interactive graph server amends current commit with edited message and ref
 
       if (command.args[0] === "log" && command.args.includes("--format=%B")) {
         return amended
-          ? "Bug 123 - New message. r=#reviewers\n\nNew body.\n"
+          ? committedMessage
           : "Bug 123 - Old message. r=#reviewers\n\nOld body.\n";
       }
 
@@ -6926,6 +8439,7 @@ test("interactive graph server amends current commit with edited message and ref
 
       if (command.args[0] === "commit" && command.args[1] === "--amend") {
         amended = true;
+        committedMessage = readFileSync(command.args.at(-1), "utf8");
         return "";
       }
 
@@ -7718,6 +9232,7 @@ test("interactive graph server starts a try session and refreshes try links", as
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-server-try-"));
   const storePath = path.join(tempDir, "try-runs.json");
   const calls = [];
+  let committedMessage = "";
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
     token: "secret",
@@ -7759,7 +9274,7 @@ test("interactive graph server starts a try session and refreshes try links", as
       }
 
       if (command.args[0] === "log" && command.args.includes("--format=%B")) {
-        return "Bug 123 - Server try. r=#reviewers\n";
+        return committedMessage || "Bug 123 - Server try. r=#reviewers\n";
       }
 
       if (command.args[0] === "log") {
@@ -7768,6 +9283,11 @@ test("interactive graph server starts a try session and refreshes try links", as
 
       if (command.cmd === "sh") {
         return "server-patch-id abc123\n";
+      }
+
+      if (command.args[0] === "commit" && command.args[1] === "--amend") {
+        committedMessage = readFileSync(command.args.at(-1), "utf8");
+        return "";
       }
 
       return "";
@@ -9036,11 +10556,12 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
       }
 
       if (command.args[0] === "commit") {
-        assert.deepEqual(command.args, [
-          "commit",
-          "-m",
-          "Bug 1234567 - Fix folder keyboard flow. r=aleca!,#mail-reviewers",
-        ]);
+        assert.equal(command.args[0], "commit");
+        assert.equal(command.args[1], "-m");
+        assert.match(
+          command.args[2],
+          /^Bug 1234567 - Fix folder keyboard flow\. r=aleca!,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
+        );
         return "[Bug-1234567 def456] Bug 1234567 - Fix folder keyboard flow. r=aleca!,#mail-reviewers\n";
       }
 
@@ -9125,9 +10646,9 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
 
   assert.equal(commit.ok, true);
   assert.equal(commit.hash, "def4567890abcdef");
-  assert.equal(
+  assert.match(
     commit.commitMessage,
-    "Bug 1234567 - Fix folder keyboard flow. r=aleca!,#mail-reviewers",
+    /^Bug 1234567 - Fix folder keyboard flow\. r=aleca!,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
   );
   assert.equal(commit.snapshots[0].branch, "Bug-1234567");
   assert.equal(commit.snapshots[0].commits[0].hash, "def4567890abcdef");
@@ -9142,6 +10663,7 @@ test("interactive graph server submits current commit through browser prompts", 
   const storePath = path.join(tempDir, "try-runs.json");
   const calls = [];
   const comments = [];
+  let committedMessage = "";
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
     token: "secret",
@@ -9190,7 +10712,8 @@ test("interactive graph server submits current commit through browser prompts", 
       }
 
       if (command.args[0] === "log" && command.args.includes("--format=%B")) {
-        return "Bug 123 - Submit me. r=#reviewers\n\nDifferential Revision: https://phabricator.services.mozilla.com/D123456\n";
+        return committedMessage ||
+          "Bug 123 - Submit me. r=#reviewers\n\nDifferential Revision: https://phabricator.services.mozilla.com/D123456\n";
       }
 
       if (command.args[0] === "log") {
@@ -9199,6 +10722,11 @@ test("interactive graph server submits current commit through browser prompts", 
 
       if (command.cmd === "sh") {
         return "submit-patch-id abc123\n";
+      }
+
+      if (command.args[0] === "commit" && command.args[1] === "--amend") {
+        committedMessage = readFileSync(command.args.at(-1), "utf8");
+        return "";
       }
 
       if (command.args[0] === "diff" || command.args[0] === "ls-files") {

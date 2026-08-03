@@ -8,6 +8,10 @@ import { getBug as defaultGetBug, updateBug as defaultUpdateBug } from "../../li
 import defaultPhab, { comment as defaultComment } from "../../lib/phab.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
 import {
+  ensureTbToolsIdInCommitMessage,
+  getTbToolsIdFromCommitMessage,
+} from "../../lib/commit-message.mjs";
+import {
   getBugIdFromText,
   getBugUrl,
   getPhabRevisionFromText,
@@ -53,6 +57,7 @@ import {
   isCheckedOutCommit,
   isWorkingTreeCommitHash,
   parseBranchRefs,
+  readGraphTryStore,
   recordGraphTryRun,
 } from "./data.mjs";
 
@@ -73,6 +78,18 @@ const GRAPH_REBASE_MODES = new Set([
   GRAPH_REBASE_MODE_CHILDREN,
   GRAPH_REBASE_MODE_DESCENDANTS,
   GRAPH_REBASE_MODE_STACK,
+]);
+const INTERACTIVE_REBASE_ACTION_PICK = "pick";
+const INTERACTIVE_REBASE_ACTION_SQUASH = "squash";
+const INTERACTIVE_REBASE_ACTION_FIXUP = "fixup";
+const INTERACTIVE_REBASE_ACTION_EDIT = "edit";
+const INTERACTIVE_REBASE_ACTION_DROP = "drop";
+const INTERACTIVE_REBASE_ACTIONS = new Set([
+  INTERACTIVE_REBASE_ACTION_PICK,
+  INTERACTIVE_REBASE_ACTION_SQUASH,
+  INTERACTIVE_REBASE_ACTION_FIXUP,
+  INTERACTIVE_REBASE_ACTION_EDIT,
+  INTERACTIVE_REBASE_ACTION_DROP,
 ]);
 
 async function amendCheckedOutCommit({
@@ -98,6 +115,16 @@ async function amendCheckedOutCommit({
     throw error;
   }
 
+  const existingMessage = await getGraphCurrentCommitMessage({
+    graph,
+    runCommand,
+  }).catch(() => "");
+  const expectedTbToolsId = getTbToolsIdFromCommitMessage(existingMessage) || undefined;
+  const commitMessageWithId = ensureTbToolsIdInCommitMessage(
+    commitMessage,
+    expectedTbToolsId,
+  ).message;
+
   if (includeChanges) {
     const workingTree = await getWorkingTreeCommits({
       cwd: graph.path,
@@ -120,8 +147,10 @@ async function amendCheckedOutCommit({
   }
 
   const messagePath = path.join(os.tmpdir(), `tb-tools-amend-${randomUUID()}.txt`);
-
-  await writeMessage(messagePath, commitMessage.endsWith("\n") ? commitMessage : `${commitMessage}\n`);
+  await writeMessage(
+    messagePath,
+    commitMessageWithId.endsWith("\n") ? commitMessageWithId : `${commitMessageWithId}\n`,
+  );
 
   try {
     if (includeChanges) {
@@ -159,7 +188,7 @@ async function amendCheckedOutCommit({
     runCommand,
   });
 
-  ensureAmendedCommitMessage(amendedMessage, commitMessage, currentHashValue);
+  ensureAmendedCommitMessage(amendedMessage, commitMessageWithId, currentHashValue);
 
   graph.branch = branch || "(detached)";
 
@@ -241,12 +270,23 @@ export async function amendCommitMessage({
     throw error;
   }
 
+  const existingMessage = await getGraphCommitMessage({
+    graph,
+    hash: selectedHash,
+    runCommand,
+  }).catch(() => "");
+  const expectedTbToolsId = getTbToolsIdFromCommitMessage(existingMessage) || undefined;
+  const commitMessageWithId = ensureTbToolsIdInCommitMessage(
+    commitMessage,
+    expectedTbToolsId,
+  ).message;
+
   const base = await getCurrentGraphBase(graph, runCommand);
 
   if (base.hash === selectedHash) {
     return amendCheckedOutCommit({
       graph,
-      message: commitMessage,
+      message: commitMessageWithId,
       runCommand,
       writeMessage,
       removeMessage,
@@ -290,9 +330,13 @@ export async function amendCommitMessage({
   const parent = parents[0];
   const stackCommits = await getRebaseCommitStack(graph, selectedHash, branch, runCommand);
   const messagePath = path.join(os.tmpdir(), `tb-tools-amend-${randomUUID()}.txt`);
+  const rewrittenCommits = [];
   let rewrittenHash = "";
 
-  await writeMessage(messagePath, commitMessage.endsWith("\n") ? commitMessage : `${commitMessage}\n`);
+  await writeMessage(
+    messagePath,
+    commitMessageWithId.endsWith("\n") ? commitMessageWithId : `${commitMessageWithId}\n`,
+  );
 
   try {
     await runCommand({
@@ -337,7 +381,16 @@ export async function amendCommitMessage({
           runCommand,
         });
 
-        ensureAmendedCommitMessage(amendedMessage, commitMessage, rewrittenHash);
+        ensureAmendedCommitMessage(amendedMessage, commitMessageWithId, rewrittenHash);
+        rewrittenCommits.push({
+          originalHash: commit,
+          hash: rewrittenHash,
+        });
+      } else {
+        rewrittenCommits.push({
+          originalHash: commit,
+          hash: await getCurrentGraphHeadHash(graph, runCommand),
+        });
       }
     }
   } finally {
@@ -381,6 +434,7 @@ export async function amendCommitMessage({
     branch,
     parent,
     commits: stackCommits,
+    rewrittenCommits,
     amendedCount: stackCommits.length,
     rewrittenHash,
     currentHash,
@@ -644,6 +698,10 @@ async function getRebaseCommitsForMode({
     return [hash];
   }
 
+  if (mode === GRAPH_REBASE_MODE_CHILDREN) {
+    return stackCommits;
+  }
+
   return [
     ...(await getWholeRebaseStackPrefix(graph, hash, runCommand)),
     ...stackCommits,
@@ -843,6 +901,31 @@ function chooseRebaseResultBranch({
   }
 
   return chooseCheckoutBranch(lastBranches.join("\n"), currentBranch);
+}
+
+async function chooseSelectedRebaseResultBranch({
+  graph,
+  hash,
+  branchRefs = "",
+  currentBranch = "",
+  preferredBranch = "",
+  runCommand,
+}) {
+  const branch = chooseCheckoutBranch(branchRefs, preferredBranch || currentBranch);
+
+  if (!branch) {
+    return "";
+  }
+
+  const parents = await getCommitParents(graph, hash, runCommand);
+
+  if (parents.length !== 1) {
+    return branch;
+  }
+
+  return await isCommitReachableFromMain(graph, parents[0], runCommand)
+    ? branch
+    : "";
 }
 
 export async function getCurrentGraphBase(graph, runCommand) {
@@ -1701,6 +1784,7 @@ export async function getGraphCommitIntegrationStatus({
     hash,
     runCommand,
   });
+  const subject = getCommitSubjectFromMessage(message, hash);
   const haystack = getGraphCommitIntegrationHaystack({ graph, hash, message });
   let bugId = getBugIdFromText(haystack);
   const phabRevision = getPhabRevisionFromText(haystack);
@@ -1710,7 +1794,7 @@ export async function getGraphCommitIntegrationStatus({
   ]);
   const tryRuns = await getGraphTryRunsForCommit({
     graph,
-    commit: { hash },
+    commit: { hash, subject },
     runCommand,
   });
   let effectiveBug = bug;
@@ -1984,6 +2068,158 @@ function getCommitSubjectFromMessage(message = "", fallback = "") {
   return String(message || "").split("\n").find((line) => line.trim())?.trim() || fallback;
 }
 
+async function ensureCurrentGraphCommitTbToolsId({
+  graph,
+  current,
+  message,
+  runCommand = run,
+  writeMessage = writeFile,
+  removeMessage = unlink,
+}) {
+  const ensured = ensureTbToolsIdInCommitMessage(message);
+
+  if (!ensured.added) {
+    return {
+      hash: current.hash,
+      message: ensured.message,
+      tbToolsId: ensured.id,
+    };
+  }
+
+  const messagePath = path.join(os.tmpdir(), `tb-tools-id-${randomUUID()}.txt`);
+  await writeMessage(
+    messagePath,
+    ensured.message.endsWith("\n") ? ensured.message : `${ensured.message}\n`,
+  );
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: getGitAmendArgs(messagePath, { includeChanges: false }),
+      cwd: graph.path,
+      silent: true,
+    });
+  } finally {
+    await removeMessage(messagePath).catch(() => {});
+  }
+
+  const hash = (await runCommand({
+    cmd: "git",
+    args: ["rev-parse", "HEAD"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  })).trim();
+  const amendedMessage = await getGraphCommitMessage({
+    graph,
+    hash,
+    runCommand,
+  });
+
+  ensureAmendedCommitMessage(amendedMessage, ensured.message, hash);
+
+  return {
+    hash,
+    originalHash: current.hash === hash ? "" : current.hash,
+    message: amendedMessage,
+    tbToolsId: ensured.id,
+  };
+}
+
+function shouldBackfillRebaseTryRunIds(graph, runCommand) {
+  return runCommand === run || graph?.backfillTryRunIds;
+}
+
+async function getRebaseTryRunIdentityByHash({
+  graph,
+  stackCommits = [],
+  runCommand = run,
+}) {
+  const identities = new Map();
+
+  if (!shouldBackfillRebaseTryRunIds(graph, runCommand)) {
+    return identities;
+  }
+
+  const store = await readGraphTryStore({ graph, runCommand }).catch(() => null);
+
+  if (!store?.runs?.length) {
+    return identities;
+  }
+
+  for (const commit of stackCommits) {
+    const message = await getGraphCommitMessage({
+      graph,
+      hash: commit,
+      runCommand,
+    }).catch(() => "");
+
+    if (!message || getTbToolsIdFromCommitMessage(message)) {
+      continue;
+    }
+
+    const subject = getCommitSubjectFromMessage(message, commit);
+    const tryRuns = await getGraphTryRunsForCommit({
+      graph,
+      commit: { hash: commit, subject },
+      store,
+      runCommand,
+    }).catch(() => []);
+    const tbToolsId = tryRuns.find((tryRun) => tryRun.tbToolsId)?.tbToolsId || "";
+
+    if (!tbToolsId) {
+      continue;
+    }
+
+    identities.set(commit, {
+      message: ensureTbToolsIdInCommitMessage(message, tbToolsId).message,
+      tbToolsId,
+    });
+  }
+
+  return identities;
+}
+
+async function amendReplayedCommitTryRunIdentity({
+  session,
+  commit,
+  runCommand = run,
+}) {
+  const identity = session.tryRunIdentityByHash?.get(commit);
+
+  if (!identity?.message) {
+    return getCurrentGraphHeadHash(session.graph, runCommand);
+  }
+
+  const messagePath = path.join(os.tmpdir(), `tb-tools-rebase-id-${randomUUID()}.txt`);
+  await writeFile(
+    messagePath,
+    identity.message.endsWith("\n") ? identity.message : `${identity.message}\n`,
+  );
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: getGitAmendArgs(messagePath, { includeChanges: false }),
+      cwd: session.graph.path,
+      silent: true,
+    });
+  } finally {
+    await unlink(messagePath).catch(() => {});
+  }
+
+  const hash = await getCurrentGraphHeadHash(session.graph, runCommand);
+  const amendedMessage = await getGraphCommitMessage({
+    graph: session.graph,
+    hash,
+    runCommand,
+  });
+
+  ensureAmendedCommitMessage(amendedMessage, identity.message, hash);
+
+  return hash;
+}
+
 export function normalizeGraphTryOptions(options = {}) {
   const selector = String(options.selector || (options.query ? "fuzzy" : "auto")).trim().toLowerCase();
   const normalized = {
@@ -2031,23 +2267,30 @@ export async function getGraphTryTarget({
     };
   }
 
-  const [message, patchId] = await Promise.all([
-    getGraphCommitMessage({
-      graph,
-      hash: current.hash,
-      runCommand,
-    }),
-    getGraphCommitPatchId({
-      graph,
-      hash: current.hash,
-      runCommand,
-    }),
-  ]);
+  const message = await getGraphCommitMessage({
+    graph,
+    hash: current.hash,
+    runCommand,
+  });
+  const commitWithId = await ensureCurrentGraphCommitTbToolsId({
+    graph,
+    current,
+    message,
+    runCommand,
+  });
+  const patchId = await getGraphCommitPatchId({
+    graph,
+    hash: commitWithId.hash,
+    runCommand,
+  });
+  const subject = getCommitSubjectFromMessage(commitWithId.message, commitWithId.hash);
 
   return {
-    hash: current.hash,
+    hash: commitWithId.hash,
+    originalHash: commitWithId.originalHash,
     patchId,
-    subject: getCommitSubjectFromMessage(message, current.hash),
+    tbToolsId: commitWithId.tbToolsId,
+    subject,
   };
 }
 
@@ -3117,6 +3360,752 @@ async function finishRebaseReplay(session, runCommand) {
   };
 }
 
+function getInteractiveRebaseDefaultAction(subject = "", index = 0) {
+  if (index > 0 && /^fixup!\s+/i.test(subject)) {
+    return INTERACTIVE_REBASE_ACTION_FIXUP;
+  }
+
+  if (index > 0 && /^squash!\s+/i.test(subject)) {
+    return INTERACTIVE_REBASE_ACTION_SQUASH;
+  }
+
+  return INTERACTIVE_REBASE_ACTION_PICK;
+}
+
+function normalizeInteractiveRebaseAction(action = "") {
+  const normalized = String(action || INTERACTIVE_REBASE_ACTION_PICK)
+    .trim()
+    .toLowerCase();
+
+  if (!INTERACTIVE_REBASE_ACTIONS.has(normalized)) {
+    const error = new Error(`Unknown interactive rebase action: ${action}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
+async function getInteractiveRebaseCommitItems(graph, commits, runCommand) {
+  const items = [];
+
+  for (const [index, hash] of commits.entries()) {
+    const message = await getGraphCommitMessage({
+      graph,
+      hash,
+      runCommand,
+    });
+    const subject = getCommitSubjectFromMessage(message, hash);
+
+    items.push({
+      hash,
+      shortHash: hash.slice(0, 12),
+      subject,
+      action: getInteractiveRebaseDefaultAction(subject, index),
+    });
+  }
+
+  return items;
+}
+
+export async function getInteractiveRebasePlan({
+  graph,
+  hash,
+  preferredBranch = "",
+  runCommand = run,
+}) {
+  ensureKnownGraphCommit(graph, hash);
+
+  if (isWorkingTreeCommitHash(hash)) {
+    const error = new Error("Uncommitted changes cannot start an interactive rebase.");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const currentBranch = await getCurrentGraphBranch(graph, runCommand);
+  const [branchRefs, containingBranchRefs] = await Promise.all([
+    getLocalBranchesAtCommit(graph, hash, runCommand),
+    getLocalBranchesContainingCommit(graph, hash, runCommand),
+  ]);
+  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const stackCandidate = chooseRebaseStackCandidate({
+    candidates: await Promise.all(
+      containingBranches.map((candidateBranch) =>
+        getRebaseStackCandidate(graph, hash, candidateBranch, runCommand),
+      ),
+    ),
+    currentBranch,
+    hash,
+    preferredBranch,
+  });
+  const stackCommits = uniqueCommits(stackCandidate.commits);
+  const { kept, skipped } = await filterRebaseCommitsOnMain(
+    graph,
+    stackCommits,
+    runCommand,
+  );
+
+  if (skipped.length) {
+    const error = new Error(
+      `Cannot interactive rebase ${skipped.length === 1 ? "a commit that is" : "commits that are"} already on origin/${DEFAULT_BRANCH}.`,
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const parents = await getCommitParents(graph, kept[0], runCommand);
+
+  if (parents.length !== 1) {
+    const error = new Error(parents.length
+      ? `Cannot interactive rebase merge commit ${kept[0].slice(0, 12)} because it has multiple parents.`
+      : `Cannot interactive rebase root commit ${kept[0].slice(0, 12)}.`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const stackBranchRefs = await getRebaseStackBranches({
+    graph,
+    stackCommits: kept,
+    selectedHash: hash,
+    selectedCommitRefs: branchRefs,
+    runCommand,
+  });
+  const branch = chooseRebaseResultBranch({
+    stackBranchRefs,
+    candidateBranch: stackCandidate.branch,
+    currentBranch,
+    preferredBranch,
+  });
+
+  return {
+    action: "interactive-rebase-plan",
+    label: graph.label,
+    path: graph.path,
+    hash,
+    branch,
+    base: parents[0],
+    commits: await getInteractiveRebaseCommitItems(graph, kept, runCommand),
+  };
+}
+
+function normalizeInteractiveRebaseTodo({
+  items = [],
+  planCommits = [],
+} = {}) {
+  const planHashes = new Set(planCommits.map((commit) => commit.hash));
+  const todoItems = Array.isArray(items) && items.length
+    ? items
+    : planCommits;
+  const seen = new Set();
+  let hasPreviousCommit = false;
+  const todo = todoItems.map((item) => {
+    const hash = String(item?.hash || "").trim();
+
+    if (!planHashes.has(hash)) {
+      const error = new Error(`Commit ${hash.slice(0, 12) || "(unknown)"} is not in the selected interactive rebase range.`);
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (seen.has(hash)) {
+      const error = new Error(`Commit ${hash.slice(0, 12)} appears more than once in the interactive rebase todo.`);
+      error.statusCode = 400;
+      throw error;
+    }
+
+    seen.add(hash);
+    const action = normalizeInteractiveRebaseAction(item?.action);
+
+    if (!hasPreviousCommit && [
+      INTERACTIVE_REBASE_ACTION_SQUASH,
+      INTERACTIVE_REBASE_ACTION_FIXUP,
+    ].includes(action)) {
+      const error = new Error("The first interactive rebase commit cannot use squash or fixup.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (action !== INTERACTIVE_REBASE_ACTION_DROP) {
+      hasPreviousCommit = true;
+    }
+
+    return {
+      hash,
+      action,
+      subject: String(item?.subject || "").trim(),
+    };
+  });
+
+  if (seen.size !== planHashes.size) {
+    const error = new Error("Interactive rebase todo must include every commit in the selected range. Use Drop for commits you want to remove.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return todo;
+}
+
+function setInteractiveRebaseRewrite(session, originalHash, hash) {
+  const existing = session.rewrittenCommits.find((commit) =>
+    commit.originalHash === originalHash
+  );
+
+  if (existing) {
+    existing.hash = hash;
+    return;
+  }
+
+  session.rewrittenCommits.push({
+    originalHash,
+    hash,
+  });
+}
+
+function buildInteractiveSquashMessage(baseMessage = "", nextMessage = "") {
+  return [
+    String(baseMessage || "").trimEnd(),
+    String(nextMessage || "").trimEnd(),
+  ].filter(Boolean).join("\n\n");
+}
+
+async function amendInteractiveRebaseHead({
+  graph,
+  message,
+  runCommand,
+}) {
+  const messagePath = path.join(os.tmpdir(), `tb-tools-interactive-rebase-${randomUUID()}.txt`);
+  await writeFile(
+    messagePath,
+    message.endsWith("\n") ? message : `${message}\n`,
+  );
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: getGitAmendArgs(messagePath, { includeChanges: true }),
+      cwd: graph.path,
+      silent: true,
+    });
+  } finally {
+    await unlink(messagePath).catch(() => {});
+  }
+
+  const hash = await getCurrentGraphHeadHash(graph, runCommand);
+  const amendedMessage = await getGraphCommitMessage({
+    graph,
+    hash,
+    runCommand,
+  });
+
+  ensureAmendedCommitMessage(amendedMessage, message, hash);
+
+  return {
+    hash,
+    message: amendedMessage,
+  };
+}
+
+function createInteractiveRebasePauseError({
+  session,
+  item,
+  index,
+  hash,
+}) {
+  session.editPause = {
+    commit: item.hash,
+    index,
+    hash,
+  };
+
+  const error = new Error(
+    `Interactive rebase paused after applying ${item.hash.slice(0, 12)}.`,
+  );
+  error.statusCode = 409;
+  error.rebaseState = session;
+  error.rebaseConflict = {
+    type: "edit",
+    reason: "edit-stop",
+    graphIndex: session.graphIndex,
+    label: session.graph.label,
+    path: session.graph.path,
+    hash: session.hash,
+    base: session.base.hash,
+    branch: session.branch,
+    mode: "interactive",
+    conflictCommit: item.hash,
+    conflictIndex: index,
+    totalCommits: session.todo.length,
+    files: [],
+    markerFiles: [],
+    message: error.message,
+    output: "",
+    canContinue: true,
+  };
+
+  return error;
+}
+
+function createInteractiveRebaseDirtyPauseError({
+  session,
+  output = "",
+}) {
+  const pause = session.editPause || {};
+  const commit = pause.commit || session.hash;
+  const error = new Error(
+    "Interactive rebase cannot continue while the checkout has uncommitted changes. Amend, commit, or stash the manual work, then continue.",
+  );
+
+  error.statusCode = 409;
+  error.rebaseState = session;
+  error.rebaseConflict = {
+    type: "edit",
+    reason: "dirty-edit-stop",
+    graphIndex: session.graphIndex,
+    label: session.graph.label,
+    path: session.graph.path,
+    hash: session.hash,
+    base: session.base.hash,
+    branch: session.branch,
+    mode: "interactive",
+    conflictCommit: commit,
+    conflictIndex: pause.index || 0,
+    totalCommits: session.todo.length,
+    files: [],
+    markerFiles: [],
+    message: error.message,
+    output,
+    canContinue: true,
+  };
+
+  return error;
+}
+
+async function commitInteractiveRebaseItem({
+  session,
+  item,
+  index,
+  runCommand,
+}) {
+  const { graph } = session;
+
+  if (
+    [
+      INTERACTIVE_REBASE_ACTION_SQUASH,
+      INTERACTIVE_REBASE_ACTION_FIXUP,
+    ].includes(item.action)
+  ) {
+    if (!session.currentGroupOriginalHashes?.length) {
+      const error = new Error(`${item.action} requires a previous picked commit.`);
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const itemMessage = await getGraphCommitMessage({
+      graph,
+      hash: item.hash,
+      runCommand,
+    });
+    const message = item.action === INTERACTIVE_REBASE_ACTION_SQUASH
+      ? buildInteractiveSquashMessage(session.currentGroupMessage, itemMessage)
+      : session.currentGroupMessage;
+    const amended = await amendInteractiveRebaseHead({
+      graph,
+      message,
+      runCommand,
+    });
+    const groupOriginalHashes = [
+      ...session.currentGroupOriginalHashes,
+      item.hash,
+    ];
+
+    for (const originalHash of groupOriginalHashes) {
+      setInteractiveRebaseRewrite(session, originalHash, amended.hash);
+    }
+
+    session.currentGroupOriginalHashes = groupOriginalHashes;
+    session.currentGroupMessage = amended.message;
+    return amended.hash;
+  }
+
+  await runCommand({
+    cmd: "git",
+    args: ["commit", "-C", item.hash],
+    cwd: graph.path,
+    silent: true,
+  });
+  const rewrittenHash = await amendReplayedCommitTryRunIdentity({
+    session,
+    commit: item.hash,
+    runCommand,
+  });
+  const message = await getGraphCommitMessage({
+    graph,
+    hash: rewrittenHash,
+    runCommand,
+  });
+
+  setInteractiveRebaseRewrite(session, item.hash, rewrittenHash);
+  session.currentGroupOriginalHashes = [item.hash];
+  session.currentGroupMessage = message;
+
+  if (item.action === INTERACTIVE_REBASE_ACTION_EDIT) {
+    throw createInteractiveRebasePauseError({
+      session,
+      item,
+      index,
+      hash: rewrittenHash,
+    });
+  }
+
+  return rewrittenHash;
+}
+
+async function applyInteractiveRebaseItem({
+  session,
+  item,
+  index,
+  runCommand,
+}) {
+  const { graph } = session;
+
+  if (item.action === INTERACTIVE_REBASE_ACTION_DROP) {
+    const hash = await getCurrentGraphHeadHash(graph, runCommand);
+
+    setInteractiveRebaseRewrite(session, item.hash, hash);
+    return hash;
+  }
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["cherry-pick", "--no-commit", item.hash],
+      cwd: graph.path,
+      silent: true,
+    });
+  } catch (error) {
+    const conflictFiles = await getGraphConflictFiles(graph, runCommand);
+
+    if (conflictFiles.length || isCherryPickConflictError(error)) {
+      throw createRebaseConflictError({
+        session,
+        conflictCommit: item.hash,
+        conflictIndex: index,
+        conflictFiles,
+        cause: error,
+      });
+    }
+
+    if (!isEmptyCherryPickError(error)) {
+      throw error;
+    }
+
+    await resetGraphReplayState(graph, runCommand);
+    setInteractiveRebaseRewrite(
+      session,
+      item.hash,
+      await getCurrentGraphHeadHash(graph, runCommand),
+    );
+    return "";
+  }
+
+  try {
+    return await commitInteractiveRebaseItem({
+      session,
+      item,
+      index,
+      runCommand,
+    });
+  } catch (error) {
+    if (!isEmptyCherryPickError(error)) {
+      throw error;
+    }
+
+    await resetGraphReplayState(graph, runCommand);
+    setInteractiveRebaseRewrite(
+      session,
+      item.hash,
+      await getCurrentGraphHeadHash(graph, runCommand),
+    );
+    return "";
+  }
+}
+
+async function finishInteractiveRebaseReplay(session, runCommand) {
+  const {
+    graph,
+    hash,
+    branch,
+    base,
+    stackBranchRefs,
+    rewrittenCommits,
+    todo,
+  } = session;
+  const rewrittenHashByOriginalHash = new Map(
+    rewrittenCommits.map((commit) => [commit.originalHash, commit.hash]),
+  );
+  const branchUpdates = [];
+  let currentHash = await getCurrentGraphHeadHash(graph, runCommand);
+
+  for (const { hash: originalHash, branches } of stackBranchRefs) {
+    const rewrittenHash = rewrittenHashByOriginalHash.get(originalHash);
+
+    if (!rewrittenHash) {
+      continue;
+    }
+
+    for (const branchName of branches) {
+      await runCommand({
+        cmd: "git",
+        args: ["branch", "-f", branchName, rewrittenHash],
+        cwd: graph.path,
+        silent: true,
+      });
+      branchUpdates.push({
+        branch: branchName,
+        originalHash,
+        hash: rewrittenHash,
+      });
+    }
+  }
+
+  if (branch && !branchUpdates.some((update) => update.branch === branch)) {
+    await runCommand({
+      cmd: "git",
+      args: ["branch", "-f", branch, currentHash],
+      cwd: graph.path,
+      silent: true,
+    });
+    branchUpdates.push({
+      branch,
+      originalHash: todo.at(-1)?.hash || hash,
+      hash: currentHash,
+    });
+  }
+
+  if (branch) {
+    await runCommand({
+      cmd: "git",
+      args: ["switch", branch],
+      cwd: graph.path,
+      silent: true,
+    });
+    currentHash = await getCurrentGraphHeadHash(graph, runCommand);
+    graph.branch = branch;
+  } else {
+    graph.branch = "(detached)";
+  }
+
+  const changedCount = todo.filter((item) =>
+    item.action !== INTERACTIVE_REBASE_ACTION_DROP
+  ).length;
+
+  return {
+    action: "interactive-rebase",
+    label: graph.label,
+    path: graph.path,
+    hash,
+    branch,
+    base: base.hash,
+    commits: todo.map((item) => item.hash),
+    todo,
+    rewrittenCommits,
+    branchUpdates,
+    rebasedCount: changedCount,
+    currentHash,
+    detached: !branch,
+    message: `${graph.label} interactive rebased ${branch ? `branch ${branch}` : hash.slice(0, 12)} (${todo.length} commits) from ${base.hash.slice(0, 12)}.`,
+  };
+}
+
+async function replayInteractiveRebase(session, startIndex, runCommand) {
+  for (let index = startIndex; index < session.todo.length; index++) {
+    await applyInteractiveRebaseItem({
+      session,
+      item: session.todo[index],
+      index,
+      runCommand,
+    });
+  }
+
+  return finishInteractiveRebaseReplay(session, runCommand);
+}
+
+async function continueInteractiveRebaseSession({
+  session,
+  runCommand,
+}) {
+  if (session.editPause) {
+    const status = await runCommand({
+      cmd: "git",
+      args: ["status", "--porcelain"],
+      cwd: session.graph.path,
+      capture: true,
+      silent: true,
+    });
+
+    if (status.trim()) {
+      throw createInteractiveRebaseDirtyPauseError({
+        session,
+        output: status,
+      });
+    }
+
+    const pause = session.editPause;
+    const hash = await getCurrentGraphHeadHash(session.graph, runCommand);
+    const message = await getGraphCommitMessage({
+      graph: session.graph,
+      hash,
+      runCommand,
+    });
+
+    setInteractiveRebaseRewrite(session, pause.commit, hash);
+    session.currentGroupOriginalHashes = [pause.commit];
+    session.currentGroupMessage = message;
+    delete session.editPause;
+
+    return replayInteractiveRebase(session, pause.index + 1, runCommand);
+  }
+
+  if (!session.conflictCommit) {
+    const error = new Error("No interactive rebase stop is waiting to continue.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const { graph, conflictCommit, conflictIndex } = session;
+  const item = session.todo[conflictIndex];
+  const conflictFiles = session.conflictFiles || [];
+  const markerFiles = await getGraphConflictMarkerFiles(graph, conflictFiles);
+
+  if (markerFiles.length) {
+    throw createRebaseConflictError({
+      session,
+      conflictCommit,
+      conflictIndex,
+      conflictFiles,
+      displayFiles: markerFiles,
+      markerFiles,
+      cause: new Error("Conflict markers are still present."),
+      reason: "conflict-markers",
+    });
+  }
+
+  if (conflictFiles.length) {
+    await runCommand({
+      cmd: "git",
+      args: ["add", "-A", "--", ...conflictFiles],
+      cwd: graph.path,
+      silent: true,
+    });
+  }
+
+  const remainingConflicts = await getGraphConflictFiles(graph, runCommand);
+
+  if (remainingConflicts.length) {
+    throw createRebaseConflictError({
+      session,
+      conflictCommit,
+      conflictIndex,
+      conflictFiles: remainingConflicts,
+      cause: new Error("Conflicted files are still unresolved."),
+    });
+  }
+
+  delete session.conflictCommit;
+  delete session.conflictIndex;
+  delete session.conflictFiles;
+
+  await commitInteractiveRebaseItem({
+    session,
+    item,
+    index: conflictIndex,
+    runCommand,
+  });
+
+  return replayInteractiveRebase(session, conflictIndex + 1, runCommand);
+}
+
+export async function startInteractiveRebase({
+  graph,
+  graphIndex = null,
+  hash,
+  preferredBranch = "",
+  items = [],
+  runCommand = run,
+}) {
+  ensureKnownGraphCommit(graph, hash);
+  await ensureCleanGraph(graph, runCommand);
+
+  const checkoutBase = await getCurrentGraphBase(graph, runCommand);
+  const plan = await getInteractiveRebasePlan({
+    graph,
+    hash,
+    preferredBranch,
+    runCommand,
+  });
+  const todo = normalizeInteractiveRebaseTodo({
+    items,
+    planCommits: plan.commits,
+  });
+  const stackCommits = plan.commits.map((commit) => commit.hash);
+  const stackBranchRefs = await getRebaseStackBranches({
+    graph,
+    stackCommits,
+    selectedHash: hash,
+    selectedCommitRefs: await getLocalBranchesAtCommit(graph, hash, runCommand),
+    runCommand,
+  });
+  const session = {
+    kind: "interactive-rebase",
+    graph,
+    graphIndex,
+    checkoutBase,
+    base: {
+      branch: "",
+      hash: plan.base,
+    },
+    hash,
+    branch: plan.branch,
+    mode: "interactive",
+    stackCommits,
+    stackBranchRefs,
+    todo,
+    tryRunIdentityByHash: await getRebaseTryRunIdentityByHash({
+      graph,
+      stackCommits,
+      runCommand,
+    }),
+    rewrittenCommits: [],
+    skippedMainCommits: [],
+    skippedReplayedCommits: [],
+    currentGroupOriginalHashes: [],
+    currentGroupMessage: "",
+  };
+  let replayStarted = false;
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["switch", "--detach", plan.base],
+      cwd: graph.path,
+      silent: true,
+    });
+    replayStarted = true;
+
+    return await replayInteractiveRebase(session, 0, runCommand);
+  } catch (error) {
+    if (error?.rebaseConflict) {
+      throw error;
+    }
+
+    if (replayStarted) {
+      await resetGraphReplayState(graph, runCommand);
+      await restoreGraphCheckout(graph, checkoutBase, runCommand);
+    }
+    throw error;
+  }
+}
+
 async function replayRebaseCommits(session, startIndex, runCommand) {
   const { graph, stackCommits, rewrittenCommits } = session;
 
@@ -3177,9 +4166,15 @@ async function replayRebaseCommits(session, startIndex, runCommand) {
       continue;
     }
 
+    const rewrittenHash = await amendReplayedCommitTryRunIdentity({
+      session,
+      commit,
+      runCommand,
+    });
+
     rewrittenCommits.push({
       originalHash: commit,
-      hash: await getCurrentGraphHeadHash(graph, runCommand),
+      hash: rewrittenHash,
     });
   }
 
@@ -3190,6 +4185,13 @@ export async function continueRebaseCommit({
   session,
   runCommand = run,
 }) {
+  if (session?.kind === "interactive-rebase") {
+    return continueInteractiveRebaseSession({
+      session,
+      runCommand,
+    });
+  }
+
   if (!session?.conflictCommit) {
     const error = new Error("No rebase conflict is waiting to continue.");
     error.statusCode = 404;
@@ -3241,9 +4243,15 @@ export async function continueRebaseCommit({
       cwd: graph.path,
       silent: true,
     });
+    const rewrittenHash = await amendReplayedCommitTryRunIdentity({
+      session,
+      commit: conflictCommit,
+      runCommand,
+    });
+
     session.rewrittenCommits.push({
       originalHash: conflictCommit,
-      hash: await getCurrentGraphHeadHash(graph, runCommand),
+      hash: rewrittenHash,
     });
   } catch (error) {
     if (!isEmptyCherryPickError(error)) {
@@ -3263,6 +4271,228 @@ export async function continueRebaseCommit({
   delete session.conflictFiles;
 
   return replayRebaseCommits(session, conflictIndex + 1, runCommand);
+}
+
+function hasStackBranch(stackBranchRefs = [], branch = "") {
+  return Boolean(branch) &&
+    stackBranchRefs.some((entry) => entry.branches.includes(branch));
+}
+
+function choosePruneResultBranch({
+  stackBranchRefs = [],
+  candidateBranch = "",
+  currentBranch = "",
+  preferredBranch = "",
+  selectedBranches = [],
+} = {}) {
+  if (hasStackBranch(stackBranchRefs, currentBranch)) {
+    return currentBranch;
+  }
+
+  if (hasStackBranch(stackBranchRefs, preferredBranch)) {
+    return preferredBranch;
+  }
+
+  if (hasStackBranch(stackBranchRefs, candidateBranch)) {
+    return candidateBranch;
+  }
+
+  const selectedBranch = selectedBranches.find((branch) =>
+    hasStackBranch(stackBranchRefs, branch)
+  );
+
+  if (selectedBranch) {
+    return selectedBranch;
+  }
+
+  if (currentBranch && (
+    currentBranch === candidateBranch ||
+    selectedBranches.includes(currentBranch)
+  )) {
+    return currentBranch;
+  }
+
+  if (preferredBranch && (
+    preferredBranch === candidateBranch ||
+    selectedBranches.includes(preferredBranch)
+  )) {
+    return preferredBranch;
+  }
+
+  return candidateBranch || selectedBranches[0] || "";
+}
+
+async function pruneCommitFromBranchStack({
+  graph,
+  hash,
+  parent,
+  currentBranch,
+  containingBranches = [],
+  branchRefs = "",
+  selectedBranches = [],
+  preferredBranch = "",
+  runCommand = run,
+}) {
+  const base = {
+    branch: currentBranch,
+    hash: await getCurrentGraphHeadHash(graph, runCommand),
+  };
+  const stackCandidate = chooseRebaseStackCandidate({
+    candidates: await Promise.all(
+      containingBranches.map((candidateBranch) =>
+        getRebaseStackCandidate(graph, hash, candidateBranch, runCommand),
+      ),
+    ),
+    currentBranch,
+    hash,
+    preferredBranch,
+  });
+  const selectedTipBranches = selectedBranches.filter((branch) =>
+    parseBranchRefs(branchRefs).includes(branch)
+  );
+  const stackCommits = uniqueCommits(stackCandidate.commits);
+  const stackBranchRefs = await getRebaseStackBranches({
+    graph,
+    stackCommits,
+    selectedHash: hash,
+    selectedCommitRefs: selectedTipBranches.join("\n"),
+    runCommand,
+  });
+  const resultBranch = choosePruneResultBranch({
+    stackBranchRefs,
+    candidateBranch: stackCandidate.branch,
+    currentBranch,
+    preferredBranch,
+    selectedBranches,
+  });
+  const descendants = stackCommits.slice(1);
+  const rewrittenCommits = [];
+  const branchUpdates = [];
+  const replaySession = {
+    graph,
+    tryRunIdentityByHash: await getRebaseTryRunIdentityByHash({
+      graph,
+      stackCommits: descendants,
+      runCommand,
+    }),
+  };
+  let replayStarted = false;
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["switch", "--detach", parent],
+      cwd: graph.path,
+      silent: true,
+    });
+    replayStarted = true;
+
+    for (const commit of descendants) {
+      await runCommand({
+        cmd: "git",
+        args: ["cherry-pick", "--no-commit", commit],
+        cwd: graph.path,
+        silent: true,
+      });
+      await runCommand({
+        cmd: "git",
+        args: ["commit", "-C", commit],
+        cwd: graph.path,
+        silent: true,
+      });
+      const rewrittenHash = await amendReplayedCommitTryRunIdentity({
+        session: replaySession,
+        commit,
+        runCommand,
+      });
+
+      rewrittenCommits.push({
+        originalHash: commit,
+        hash: rewrittenHash,
+      });
+    }
+  } catch (error) {
+    if (replayStarted) {
+      await resetGraphReplayState(graph, runCommand);
+      await restoreGraphCheckout(graph, base, runCommand);
+    }
+    throw error;
+  }
+
+  const rewrittenHashByOriginalHash = new Map(
+    rewrittenCommits.map((commit) => [commit.originalHash, commit.hash]),
+  );
+
+  for (const { hash: originalHash, branches } of stackBranchRefs) {
+    const rewrittenHash = originalHash === hash
+      ? parent
+      : rewrittenHashByOriginalHash.get(originalHash);
+
+    if (!rewrittenHash) {
+      continue;
+    }
+
+    for (const branchName of branches) {
+      await runCommand({
+        cmd: "git",
+        args: ["branch", "-f", branchName, rewrittenHash],
+        cwd: graph.path,
+        silent: true,
+      });
+      branchUpdates.push({
+        branch: branchName,
+        originalHash,
+        hash: rewrittenHash,
+      });
+    }
+  }
+
+  let currentHash = rewrittenCommits.at(-1)?.hash || parent;
+
+  if (resultBranch && !branchUpdates.some((update) => update.branch === resultBranch)) {
+    await runCommand({
+      cmd: "git",
+      args: ["branch", "-f", resultBranch, currentHash],
+      cwd: graph.path,
+      silent: true,
+    });
+    branchUpdates.push({
+      branch: resultBranch,
+      originalHash: stackCommits.at(-1),
+      hash: currentHash,
+    });
+  }
+
+  if (resultBranch) {
+    await runCommand({
+      cmd: "git",
+      args: ["switch", resultBranch],
+      cwd: graph.path,
+      silent: true,
+    });
+    currentHash = await getCurrentGraphHeadHash(graph, runCommand);
+    graph.branch = resultBranch;
+  } else {
+    graph.branch = "(detached)";
+  }
+
+  const updatedBranches = Array.from(new Set(
+    branchUpdates.map((update) => update.branch),
+  ));
+
+  return {
+    action: "prune",
+    label: graph.label,
+    path: graph.path,
+    hash,
+    branches: updatedBranches,
+    branchUpdates,
+    parent,
+    currentHash,
+    branch: graph.branch,
+    detached: !resultBranch,
+    message: `${graph.label} pruned ${hash.slice(0, 12)} from ${updatedBranches.length === 1 ? "branch" : "branches"} ${updatedBranches.join(", ")}.`,
+  };
 }
 
 export async function rebaseCommit({
@@ -3300,7 +4530,14 @@ export async function rebaseCommit({
   const stackCandidate =
     mode === GRAPH_REBASE_MODE_SELECTED
       ? {
-          branch: chooseCheckoutBranch(branchRefs, preferredBranch || base.branch),
+          branch: await chooseSelectedRebaseResultBranch({
+            graph,
+            hash,
+            branchRefs,
+            currentBranch: base.branch,
+            preferredBranch,
+            runCommand,
+          }),
           commits: [hash],
         }
       : chooseRebaseStackCandidate({
@@ -3328,7 +4565,11 @@ export async function rebaseCommit({
     graph,
     stackCommits,
     selectedHash: hash,
-    selectedCommitRefs: branchRefs,
+    selectedCommitRefs: mode === GRAPH_REBASE_MODE_SELECTED && stackCandidate.branch
+      ? `${stackCandidate.branch}\n`
+      : mode === GRAPH_REBASE_MODE_SELECTED
+        ? ""
+        : branchRefs,
     runCommand,
   });
   const branch = chooseRebaseResultBranch({
@@ -3375,6 +4616,11 @@ export async function rebaseCommit({
     stackCommits,
     stackBranchRefs,
     skippedMainCommits,
+    tryRunIdentityByHash: await getRebaseTryRunIdentityByHash({
+      graph,
+      stackCommits,
+      runCommand,
+    }),
     rewrittenCommits: [],
     skippedReplayedCommits: [],
   };
@@ -3406,6 +4652,7 @@ export async function rebaseCommit({
 export async function pruneCommitBranches({
   graph,
   hash,
+  preferredBranch = "",
   runCommand = run,
 }) {
   ensureKnownGraphCommit(graph, hash);
@@ -3438,6 +4685,7 @@ export async function pruneCommitBranches({
     containingRefs: containingBranchRefs,
     tipRefs: branchRefs,
     currentBranch,
+    preferredBranch,
   });
   const containingToolRefNames = parseBranchRefs(containingToolRefs);
   const toolRefs = choosePruneRefs({
@@ -3590,38 +4838,17 @@ export async function pruneCommitBranches({
     throw error;
   }
 
-  for (const branch of branches) {
-    await runCommand({
-      cmd: "git",
-      args: ["rebase", "--onto", parent, hash, branch],
-      cwd: graph.path,
-      silent: true,
-    });
-  }
-
-  const [newBranch, currentHash] = await Promise.all([
-    getCurrentGraphBranch(graph, runCommand),
-    runCommand({
-      cmd: "git",
-      args: ["rev-parse", "HEAD"],
-      cwd: graph.path,
-      capture: true,
-      silent: true,
-    }),
-  ]);
-  graph.branch = newBranch.trim() || "(detached)";
-
-  return {
-    action: "prune",
-    label: graph.label,
-    path: graph.path,
+  return pruneCommitFromBranchStack({
+    graph,
     hash,
-    branches,
     parent,
-    currentHash: currentHash.trim(),
-    branch: graph.branch,
-    message: `${graph.label} pruned ${hash.slice(0, 12)} from ${branches.length === 1 ? "branch" : "branches"} ${branches.join(", ")}.`,
-  };
+    currentBranch,
+    containingBranches,
+    branchRefs,
+    selectedBranches: branches,
+    preferredBranch,
+    runCommand,
+  });
 }
 
 export async function createBranchForCommit({
@@ -3770,7 +4997,12 @@ export async function runGraphCommitAction({
         return discardWorkingTreeChanges({ graph, hash, runCommand });
       }
 
-      return pruneCommitBranches({ graph, hash, runCommand });
+      return pruneCommitBranches({
+        graph,
+        hash,
+        preferredBranch,
+        runCommand,
+      });
     default: {
       const error = new Error(`Unknown graph action: ${action}`);
       error.statusCode = 400;

@@ -1,5 +1,9 @@
 import { run } from "../../lib/utils.mjs";
 import defaultPhab from "../../lib/phab.mjs";
+import {
+  ensureTbToolsIdInCommitMessage,
+  installTbToolsCommitMsgHook,
+} from "../../lib/commit-message.mjs";
 import { getGitAddAllArgs } from "./data.mjs";
 
 const DEFAULT_REVIEWER_LIMIT = 30;
@@ -174,7 +178,9 @@ export function buildGraphCommitMessage({
   const prefix = getGraphCommitPrefix({ branch, bugId });
   const reviewerText = normalizeGraphCommitReviewers(reviewers).join(",");
 
-  return `${prefix} - ${text}. r=${reviewerText}`;
+  return ensureTbToolsIdInCommitMessage(
+    `${prefix} - ${text}. r=${reviewerText}`,
+  ).message;
 }
 
 function getUserFields(item = {}) {
@@ -433,6 +439,13 @@ export async function createGraphCommit({
     summary: options.summary,
     reviewers: options.reviewers,
   });
+
+  if (runCommand === run) {
+    await installTbToolsCommitMsgHook({
+      cwd: graph.path,
+      runCommand,
+    }).catch(() => {});
+  }
 
   await runCommand({
     cmd: "git",

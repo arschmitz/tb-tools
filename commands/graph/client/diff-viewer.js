@@ -327,9 +327,34 @@ export function createTryRunStatus(tryRuns = []) {
   return group;
 }
 
+function mergeTryRuns(primary = [], fallback = []) {
+  const seen = new Set();
+  const runs = [];
+
+  for (const tryRun of [...primary, ...fallback]) {
+    if (!tryRun?.url) {
+      continue;
+    }
+
+    const key = tryRun.id || tryRun.url;
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    runs.push(tryRun);
+  }
+
+  return runs;
+}
+
 export function renderCommitIntegrationStatus(container, result, { index, commit }) {
   const badges = [];
-  const tryRunStatus = createTryRunStatus(result.tryRuns || commit.tryRuns);
+  const tryRunStatus = createTryRunStatus(mergeTryRuns(
+    Array.isArray(result.tryRuns) ? result.tryRuns : [],
+    Array.isArray(commit.tryRuns) ? commit.tryRuns : [],
+  ));
 
   if (tryRunStatus) {
     badges.push(tryRunStatus);

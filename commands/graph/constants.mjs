@@ -33,6 +33,7 @@ export const GRAPH_CLIENT_SCRIPTS = [
   { output: "graph-client/diff-viewer.js", source: "diff-viewer.js" },
   { output: "graph-client/command-sessions.js", source: "command-sessions.js" },
   { output: "graph-client/rebase-dialog.js", source: "rebase-dialog.js" },
+  { output: "graph-client/interactive-rebase-dialog.js", source: "interactive-rebase-dialog.js" },
   { output: "graph-client/commit-actions.js", source: "commit-actions.js" },
   { output: "graph-client/commit-dialog.js", source: "commit-dialog.js" },
   { output: "graph-client/landing-dialog.js", source: "landing-dialog.js" },

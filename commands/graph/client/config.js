@@ -60,6 +60,13 @@ export const rebaseOutput = rebaseDialog.querySelector(".rebase-output");
 export const rebaseError = rebaseDialog.querySelector(".rebase-error");
 export const rebaseClose = rebaseDialog.querySelector(".rebase-close");
 export const rebaseContinue = rebaseDialog.querySelector(".rebase-continue");
+export const interactiveRebaseDialog = document.getElementById("interactive-rebase-dialog");
+export const interactiveRebaseForm = interactiveRebaseDialog.querySelector(".interactive-rebase-form");
+export const interactiveRebaseStatus = interactiveRebaseDialog.querySelector(".interactive-rebase-status");
+export const interactiveRebaseEnd = interactiveRebaseDialog.querySelector(".interactive-rebase-end");
+export const interactiveRebaseTodo = interactiveRebaseDialog.querySelector(".interactive-rebase-todo");
+export const interactiveRebaseError = interactiveRebaseDialog.querySelector(".interactive-rebase-error");
+export const interactiveRebaseSubmit = interactiveRebaseDialog.querySelector(".interactive-rebase-submit");
 export const amendDialog = document.getElementById("amend-dialog");
 export const amendForm = amendDialog.querySelector(".amend-form");
 export const amendMessage = amendDialog.querySelector(".amend-message");
@@ -165,6 +172,7 @@ export const uiState = {
   patchPollTimer: null,
   testPollTimer: null,
   tryPollTimer: null,
+  interactiveRebaseDialogState: null,
   commandStatusStartedAt: 0,
   commandElapsedTimer: null,
   originMainStatusLoading: false,

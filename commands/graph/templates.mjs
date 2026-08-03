@@ -196,6 +196,7 @@ ${testOutputTab}</nav>
     <button type="button" role="menuitem" data-action="rebase" data-rebase-mode="children">Rebase + Children</button>
     <button type="button" role="menuitem" data-action="rebase" data-rebase-mode="descendants">Rebase + Descendants</button>
     <button type="button" role="menuitem" data-action="rebase" data-rebase-mode="stack">Rebase Whole Stack</button>
+    <button type="button" role="menuitem" data-action="interactive-rebase">Interactive Rebase</button>
     <button type="button" role="menuitem" data-action="branch">Branch</button>
     <button type="button" role="menuitem" data-action="prune">Prune</button>
   </div>
@@ -218,6 +219,24 @@ ${testOutputTab}</nav>
         <button class="rebase-continue" type="button">Continue Rebase</button>
       </div>
     </div>
+  </dialog>
+  <dialog class="interactive-rebase-dialog" id="interactive-rebase-dialog">
+    <form class="interactive-rebase-form">
+      <h2 class="interactive-rebase-title">Interactive Rebase</h2>
+      <p class="interactive-rebase-status" role="status"></p>
+      <div class="interactive-rebase-range">
+        <label>Editable range ends at
+          <select class="interactive-rebase-end"></select>
+        </label>
+      </div>
+      <div class="interactive-rebase-todo" aria-label="Interactive rebase todo"></div>
+      <p class="interactive-rebase-help">Later descendants stay in order and replay as pick.</p>
+      <p class="interactive-rebase-error" role="alert"></p>
+      <div class="interactive-rebase-actions">
+        <button class="interactive-rebase-close" type="button">Cancel</button>
+        <button class="interactive-rebase-submit" type="submit">Start Rebase</button>
+      </div>
+    </form>
   </dialog>
   <dialog class="amend-dialog" id="amend-dialog">
     <form class="amend-form">
