@@ -39,7 +39,7 @@ function pushConsoleSection(lines) {
     "Use the console to:",
     "",
     "- inspect live comm and Firefox branch graphs with the current checkout, uncommitted changes, branch labels, and tracked try runs",
-    "- click commits for full commit messages, Bugzilla and Phabricator links, integration status, change totals, and GitHub-style syntax-highlighted diffs",
+    "- click commits for full commit messages, Bugzilla, Phabricator, and linked Notion story badges, integration status, change totals, and GitHub-style syntax-highlighted diffs",
     "- create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, blocking-review toggles, and a durable `TB-Tools-Id` trailer for console metadata",
     "- checkout, rebase, interactively reorder/squash/fixup/drop local commit ranges, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit",
     "- update both repositories, update and rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches",
@@ -93,7 +93,7 @@ export default async function (optionList, subOptions) {
     "`npm install -g https://github.com/arschmitz/tb-tools`",
     "## Configuration",
     "TB Tools uses a configuration `.tb.json` file in your user's home directory to enable some features.",
-    "This file currently contains credentials for phabricator and bugzilla, plus optional defaults for Lando. The Lando CLI itself reads credentials from `~/.mozbuild/lando.toml` or its documented environment variables.",
+    "This file currently contains credentials for phabricator, bugzilla, and optional Notion story lookups, plus optional defaults for Lando. The Lando CLI itself reads credentials from `~/.mozbuild/lando.toml` or its documented environment variables.",
     "### Sample Configuration",
     `\`\`\`json
 {
@@ -107,9 +107,18 @@ export default async function (optionList, subOptions) {
   },
   "lando": {
     "repo": "thunderbird-desktop-main"
+  },
+  "notion": {
+    "token": "secret_xxx",
+    "dataSourceId": "2f26ee68-df30-4251-aad4-8ddc420cba3d",
+    "bugProperty": "Bug",
+    "titleProperty": "Name",
+    "statusProperty": "Status"
   }
 }
 \`\`\``,
+    "",
+    "For Notion, share the story data source with your Notion connection. The console looks up stories by the configured bug-id property and shows matching page links on selected patches.",
     "",
   ];
 

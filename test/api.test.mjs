@@ -3,11 +3,19 @@ import { afterEach, test } from "node:test";
 import { getBugs } from "../lib/bugzilla.mjs";
 import config from "../lib/config.mjs";
 import { readJsonResponse } from "../lib/http.mjs";
+import {
+  buildNotionBugFilter,
+  getNotionStoriesByBugId,
+  NOTION_VERSION,
+} from "../lib/notion.mjs";
 import phab, { clearPhabricatorRequestState } from "../lib/phab.mjs";
 
 const originalFetch = global.fetch;
 const originalPhabricatorConfig = config.phabricator
   ? { ...config.phabricator }
+  : undefined;
+const originalNotionConfig = config.notion
+  ? { ...config.notion }
   : undefined;
 
 afterEach(() => {
@@ -18,6 +26,12 @@ afterEach(() => {
     config.phabricator = { ...originalPhabricatorConfig };
   } else {
     delete config.phabricator;
+  }
+
+  if (originalNotionConfig) {
+    config.notion = { ...originalNotionConfig };
+  } else {
+    delete config.notion;
   }
 });
 
@@ -220,4 +234,132 @@ test("phab skips a cooled-down route after a rate limit", async () => {
   );
 
   assert.equal(calls, 1);
+});
+
+test("buildNotionBugFilter matches supported bug property types", () => {
+  assert.deepEqual(
+    buildNotionBugFilter({
+      bugId: "123456",
+      property: { name: "Bug", id: "bug", type: "number" },
+    }),
+    {
+      property: "bug",
+      number: { equals: 123456 },
+    },
+  );
+  assert.deepEqual(
+    buildNotionBugFilter({
+      bugId: "123456",
+      property: { name: "Bug", type: "rich_text" },
+    }),
+    {
+      property: "Bug",
+      rich_text: { contains: "123456" },
+    },
+  );
+});
+
+test("getNotionStoriesByBugId queries the configured data source by bug id", async () => {
+  const requests = [];
+  const notionConfig = {
+    notion: {
+      token: "secret-notion-token",
+      dataSourceId: "data-source-id",
+      bugProperty: "Bug",
+      titleProperty: "Name",
+      statusProperty: "Status",
+    },
+  };
+
+  const result = await getNotionStoriesByBugId({
+    bugId: "123456",
+    config: notionConfig,
+    fetchImpl: async (url, options) => {
+      requests.push({
+        url: String(url),
+        method: options.method,
+        headers: options.headers,
+        body: options.body ? JSON.parse(options.body) : undefined,
+      });
+
+      assert.equal(options.headers.Authorization, "Bearer secret-notion-token");
+      assert.equal(options.headers["Notion-Version"], NOTION_VERSION);
+
+      if (String(url).endsWith("/data_sources/data-source-id")) {
+        return new Response(JSON.stringify({
+          properties: {
+            Bug: { id: "bug", type: "number" },
+            Name: { id: "title", type: "title" },
+            Status: { id: "status", type: "status" },
+          },
+        }), { status: 200 });
+      }
+
+      assert.equal(
+        String(url),
+        "https://api.notion.com/v1/data_sources/data-source-id/query",
+      );
+      assert.deepEqual(JSON.parse(options.body).filter, {
+        property: "bug",
+        number: { equals: 123456 },
+      });
+
+      return new Response(JSON.stringify({
+        results: [
+          {
+            id: "page-id",
+            url: "https://www.notion.so/story",
+            last_edited_time: "2026-08-05T12:00:00.000Z",
+            properties: {
+              Bug: { type: "number", number: 123456 },
+              Name: {
+                type: "title",
+                title: [{ plain_text: "Fix account setup" }],
+              },
+              Status: {
+                type: "status",
+                status: { name: "In progress" },
+              },
+            },
+          },
+        ],
+      }), { status: 200 });
+    },
+  });
+
+  assert.deepEqual(
+    requests.map((request) => [request.method, request.url]),
+    [
+      ["GET", "https://api.notion.com/v1/data_sources/data-source-id"],
+      ["POST", "https://api.notion.com/v1/data_sources/data-source-id/query"],
+    ],
+  );
+  assert.deepEqual(result, {
+    bugId: "123456",
+    dataSourceId: "data-source-id",
+    bugProperty: "Bug",
+    stories: [
+      {
+        id: "page-id",
+        url: "https://www.notion.so/story",
+        title: "Fix account setup",
+        bug: "123456",
+        status: "In progress",
+        lastEditedTime: "2026-08-05T12:00:00.000Z",
+        inTrash: false,
+      },
+    ],
+  });
+});
+
+test("getNotionStoriesByBugId is disabled when Notion is not configured", async () => {
+  const result = await getNotionStoriesByBugId({
+    bugId: "123456",
+    config: {},
+    fetchImpl: async () => {
+      throw new Error("Notion should not be queried.");
+    },
+  });
+
+  assert.equal(result, null);
 });

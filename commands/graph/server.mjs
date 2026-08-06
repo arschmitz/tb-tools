@@ -10,6 +10,7 @@ import {
   getBugs as defaultGetBugs,
   updateBug as defaultUpdateBug,
 } from "../../lib/bugzilla.mjs";
+import { getNotionStoriesByBugId as defaultGetNotionStoriesByBugId } from "../../lib/notion.mjs";
 import defaultPhab, { comment as defaultComment } from "../../lib/phab.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
 import {
@@ -83,6 +84,7 @@ import {
 } from "./testing.mjs";
 
 const REVIEWER_RATE_LIMIT_COOLDOWN_MS = 60_000;
+const DEFAULT_NOTION_STORY_CACHE_MS = 10 * 60 * 1000;
 const INTERACTIVE_SERVER_CLOSE_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
 
 async function readRequestJson(request) {
@@ -161,6 +163,7 @@ export async function startInteractiveGraphServer({
   getAttachments = defaultGetAttachments,
   getBug = defaultGetBug,
   updateBug = defaultUpdateBug,
+  getNotionStoriesByBugId = defaultGetNotionStoriesByBugId,
   phab = defaultPhab,
   postComment = defaultComment,
   pushCommits = defaultPushCommits,
@@ -187,6 +190,8 @@ export async function startInteractiveGraphServer({
   const reviewerSearchCache = new Map();
   const reviewerSearchInflight = new Map();
   const reviewerSearchRouteCooldowns = new Map();
+  const notionStoryCache = new Map();
+  const notionStoryInflight = new Map();
   const sockets = new Set();
   const browserClients = new Map();
   const browserShutdownWaiters = new Set();
@@ -626,6 +631,57 @@ export async function startInteractiveGraphServer({
     return promise;
   }
 
+  function getNotionStoryCacheMs() {
+    const cacheMs = Number(appConfig?.notion?.cacheMs);
+
+    return Number.isFinite(cacheMs) ? Math.max(0, cacheMs) : DEFAULT_NOTION_STORY_CACHE_MS;
+  }
+
+  async function getServerNotionStoriesByBugId({ bugId }) {
+    const normalizedBugId = String(bugId || "").trim();
+
+    if (!normalizedBugId) {
+      return null;
+    }
+
+    const now = Date.now();
+    const cached = notionStoryCache.get(normalizedBugId);
+
+    if (cached && now - cached.checkedAt < getNotionStoryCacheMs()) {
+      return cached.result;
+    }
+
+    if (notionStoryInflight.has(normalizedBugId)) {
+      return notionStoryInflight.get(normalizedBugId);
+    }
+
+    const promise = Promise.resolve(
+      getNotionStoriesByBugId({
+        bugId: normalizedBugId,
+        config: appConfig,
+      }),
+    )
+      .then((result) => result || null)
+      .catch((error) => ({
+        bugId: normalizedBugId,
+        error: String(error?.message || error),
+      }))
+      .then((result) => {
+        notionStoryCache.set(normalizedBugId, {
+          checkedAt: Date.now(),
+          result,
+        });
+
+        return result;
+      })
+      .finally(() => {
+        notionStoryInflight.delete(normalizedBugId);
+      });
+
+    notionStoryInflight.set(normalizedBugId, promise);
+    return promise;
+  }
+
   const server = serverFactory(async (request, response) => {
     try {
       const url = new URL(request.url, `http://${request.headers.host}`);
@@ -854,6 +910,7 @@ export async function startInteractiveGraphServer({
           runCommand,
           getBug,
           phab,
+          getNotionStoriesByBugId: getServerNotionStoriesByBugId,
         });
         sendJson(response, 200, { ok: true, ...integration });
         return;
@@ -897,6 +954,7 @@ export async function startInteractiveGraphServer({
           getBug,
           updateBug,
           phab,
+          getNotionStoriesByBugId: getServerNotionStoriesByBugId,
         });
         sendJson(response, 200, { ok: true, ...result });
         return;

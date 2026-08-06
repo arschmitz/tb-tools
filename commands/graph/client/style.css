@@ -583,6 +583,11 @@ body.is-resizing-panes {
   background: #ddf4ff;
   color: #0969da;
 }
+.status-badge.notion {
+  border-color: #1f7a8c;
+  background: #e6fffb;
+  color: #006d75;
+}
 .status-badge.open .status-value,
 .status-badge.open .status-detail {
   color: #116329;
@@ -604,6 +609,10 @@ body.is-resizing-panes {
 .status-badge.try .status-value,
 .status-badge.try .status-detail {
   color: #0969da;
+}
+.status-badge.notion .status-value,
+.status-badge.notion .status-detail {
+  color: #006d75;
 }
 .try-run-group {
   align-items: start;
@@ -3049,6 +3058,11 @@ body.is-resizing-panes {
     border-color: #4b9eff;
     color: #79c0ff;
   }
+  .status-badge.notion {
+    background: #062f35;
+    border-color: #2fb6c7;
+    color: #9beef7;
+  }
   .status-badge.open .status-value,
   .status-badge.open .status-detail {
     color: #7ee787;
@@ -3070,6 +3084,10 @@ body.is-resizing-panes {
   .status-badge.try .status-value,
   .status-badge.try .status-detail {
     color: #79c0ff;
+  }
+  .status-badge.notion .status-value,
+  .status-badge.notion .status-detail {
+    color: #9beef7;
   }
   .try-run-toggle {
     background: #191d23;

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { run } from "../../lib/utils.mjs";
 import { getBug as defaultGetBug, updateBug as defaultUpdateBug } from "../../lib/bugzilla.mjs";
+import { getNotionStoriesByBugId as defaultGetNotionStoriesByBugId } from "../../lib/notion.mjs";
 import defaultPhab, { comment as defaultComment } from "../../lib/phab.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
 import {
@@ -1935,12 +1936,31 @@ async function getPhabricatorStatus({
   }
 }
 
+async function getNotionStoryStatus({
+  bugId,
+  getNotionStoriesByBugId = defaultGetNotionStoriesByBugId,
+}) {
+  if (!bugId) {
+    return null;
+  }
+
+  try {
+    return await getNotionStoriesByBugId({ bugId });
+  } catch (error) {
+    return {
+      bugId,
+      error: String(error?.message || error),
+    };
+  }
+}
+
 export async function getGraphCommitIntegrationStatus({
   graph,
   hash,
   runCommand = run,
   getBug = defaultGetBug,
   phab = defaultPhab,
+  getNotionStoriesByBugId = defaultGetNotionStoriesByBugId,
 }) {
   if (!graph) {
     const error = new Error("Unknown graph checkout.");
@@ -1973,11 +1993,17 @@ export async function getGraphCommitIntegrationStatus({
     effectiveBug = await getBugzillaStatus({ bugId, getBug });
   }
 
+  const notion = await getNotionStoryStatus({
+    bugId,
+    getNotionStoriesByBugId,
+  });
+
   return {
     bugId,
     phabRevision,
     bug: effectiveBug,
     phabricator,
+    notion,
     tryRuns,
   };
 }
@@ -1990,6 +2016,7 @@ export async function markGraphBugForCheckin({
   getBug = defaultGetBug,
   updateBug = defaultUpdateBug,
   phab = defaultPhab,
+  getNotionStoriesByBugId = defaultGetNotionStoriesByBugId,
 }) {
   const before = await getGraphCommitIntegrationStatus({
     graph,
@@ -1997,6 +2024,7 @@ export async function markGraphBugForCheckin({
     runCommand,
     getBug,
     phab,
+    getNotionStoriesByBugId,
   });
   const targetBugId = String(bugId || before.bugId || before.bug?.id || "").trim();
 
@@ -2028,6 +2056,7 @@ export async function markGraphBugForCheckin({
       runCommand,
       getBug,
       phab,
+      getNotionStoriesByBugId,
     });
 
   if (integration.bug && String(integration.bug.id) === targetBugId) {

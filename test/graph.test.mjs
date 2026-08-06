@@ -1881,6 +1881,7 @@ test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", as
         ],
       };
     },
+    getNotionStoriesByBugId: async () => null,
   });
 
   assert.deepEqual(
@@ -1916,6 +1917,70 @@ test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", as
     status: "status-review",
     statusName: "Needs Review",
     title: "Bug 123456 - Fix thing",
+  });
+});
+
+test("getGraphCommitIntegrationStatus includes Notion stories by bug id", async () => {
+  const notionCalls = [];
+  const result = await getGraphCommitIntegrationStatus({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      commits: [
+        {
+          hash: "abc123",
+          subject: "Bug 123456 - Fix thing",
+        },
+      ],
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+        return "Bug 123456 - Fix thing. r=#reviewers\n";
+      }
+
+      return "";
+    },
+    getBug: async (id) => ({
+      bugs: [
+        {
+          id,
+          status: "ASSIGNED",
+          resolution: "---",
+          summary: "Fix thing",
+          is_open: true,
+          keywords: [],
+        },
+      ],
+    }),
+    phab: async () => ({ result: [] }),
+    getNotionStoriesByBugId: async ({ bugId }) => {
+      notionCalls.push(bugId);
+      return {
+        bugId,
+        stories: [
+          {
+            id: "notion-page",
+            url: "https://www.notion.so/story",
+            title: "Fix thing story",
+            status: "In progress",
+          },
+        ],
+      };
+    },
+  });
+
+  assert.deepEqual(notionCalls, ["123456"]);
+  assert.deepEqual(result.notion, {
+    bugId: "123456",
+    stories: [
+      {
+        id: "notion-page",
+        url: "https://www.notion.so/story",
+        title: "Fix thing story",
+        status: "In progress",
+      },
+    ],
   });
 });
 
@@ -1976,6 +2041,7 @@ test("getGraphCommitIntegrationStatus keeps subject-matched legacy try runs", as
     phab: async () => {
       throw new Error("Phabricator should not be queried.");
     },
+    getNotionStoriesByBugId: async () => null,
   });
 
   assert.deepEqual(
@@ -2034,6 +2100,7 @@ test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected 
         },
       ],
     }),
+    getNotionStoriesByBugId: async () => null,
   });
 
   assert.deepEqual(
@@ -2104,6 +2171,7 @@ test("markGraphBugForCheckin refuses patches that are not accepted", async () =>
           },
         ],
       }),
+      getNotionStoriesByBugId: async () => null,
     }),
     /Only accepted Phabricator patches/,
   );
@@ -7325,6 +7393,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(style, /\.integration-status \{/);
   assert.match(style, /\.status-badge \{/);
   assert.match(style, /\.status-badge\.try/);
+  assert.match(style, /\.status-badge\.notion/);
   assert.match(style, /\.try-run-current \{/);
   assert.match(style, /\.try-run-toggle/);
   assert.match(style, /\.try-run-history\[hidden\]/);
@@ -7427,6 +7496,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function loadSelectedCommitIntegrationStatus/);
   assert.match(client, /function renderCommitIntegrationStatus/);
   assert.match(client, /function createTryRunStatus/);
+  assert.match(client, /function createNotionStoryStatus/);
   assert.match(client, /function clearIntegrationStatus/);
   assert.match(client, /function isAcceptedPhabricatorStatus/);
   assert.match(client, /function markBugForCheckin/);
@@ -8120,6 +8190,17 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
         },
       ],
     }),
+    getNotionStoriesByBugId: async ({ bugId }) => ({
+      bugId,
+      stories: [
+        {
+          id: "notion-page",
+          url: "https://www.notion.so/story",
+          title: "Fix the thing story",
+          status: "In progress",
+        },
+      ],
+    }),
     getRustUpstreamStatus: async () => ({
       type: "rust-upstream",
       label: "rust",
@@ -8236,6 +8317,8 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.equal(integration.bug.hasCheckinNeeded, false);
   assert.equal(integration.phabricator.statusName, "Accepted");
   assert.equal(integration.phabricator.title, "Bug 123456 - Fix the thing");
+  assert.equal(integration.notion.stories[0].url, "https://www.notion.so/story");
+  assert.equal(integration.notion.stories[0].title, "Fix the thing story");
 
   const checkinResponse = await fetch(
     new URL("api/bugzilla/checkin", serverInfo.url),

@@ -349,6 +349,33 @@ function mergeTryRuns(primary = [], fallback = []) {
   return runs;
 }
 
+export function createNotionStoryStatus(notion) {
+  if (!notion) {
+    return [];
+  }
+
+  if (notion.error) {
+    return [createStatusBadge({
+      label: "Notion",
+      status: "Unavailable",
+      detail: notion.error,
+      className: "error",
+    })];
+  }
+
+  const stories = Array.isArray(notion.stories)
+    ? notion.stories.filter((story) => story && story.url)
+    : [];
+
+  return stories.map((story, index) => createStatusBadge({
+    label: stories.length > 1 ? "Notion " + (index + 1) : "Notion",
+    url: story.url,
+    status: story.status || "",
+    detail: story.title || "",
+    className: "notion",
+  }));
+}
+
 export function renderCommitIntegrationStatus(container, result, { index, commit }) {
   const badges = [];
   const tryRunStatus = createTryRunStatus(mergeTryRuns(
@@ -377,6 +404,8 @@ export function renderCommitIntegrationStatus(container, result, { index, commit
       }));
     }
   }
+
+  badges.push(...createNotionStoryStatus(result.notion));
 
   if (result.phabricator) {
     badges.push(createStatusBadge({
@@ -409,7 +438,7 @@ export async function loadSelectedCommitIntegrationStatus(index, commit, contain
   }
 
   container.hidden = false;
-  container.textContent = "Loading linked Bugzilla and Phabricator status...";
+  container.textContent = "Loading linked Bugzilla, Phabricator, and Notion status...";
 
   try {
     const response = await fetch(
