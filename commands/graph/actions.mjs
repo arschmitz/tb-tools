@@ -481,6 +481,33 @@ async function getLocalBranchesAtCommit(graph, hash, runCommand) {
   });
 }
 
+async function getLocalBranchTips(graph, runCommand) {
+  const output = await runCommand({
+    cmd: "git",
+    args: [
+      "for-each-ref",
+      "--sort=refname",
+      "--format=%(refname:short)%00%(objectname)",
+      "refs/heads",
+    ],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+
+  return output
+    .split(/\r?\n/)
+    .map((line) => {
+      const [branch, hash] = line.split("\0");
+
+      return {
+        branch: branch?.trim(),
+        hash: hash?.trim(),
+      };
+    })
+    .filter(({ branch, hash }) => branch && hash);
+}
+
 async function getLocalBranchesContainingCommit(graph, hash, runCommand) {
   return runCommand({
     cmd: "git",
@@ -882,6 +909,67 @@ async function getRebaseStackBranches({
               await getLocalBranchesAtCommit(graph, hash, runCommand),
             ),
     });
+  }
+
+  const stackEntriesByTbToolsId = new Map();
+  const stackEntriesBySubject = new Map();
+
+  for (const entry of entries) {
+    const message = await getGraphCommitMessage({
+      graph,
+      hash: entry.hash,
+      runCommand,
+    });
+    const tbToolsId = getTbToolsIdFromCommitMessage(message);
+    const subject = getCommitSubjectFromMessage(message, entry.hash);
+
+    if (tbToolsId) {
+      const matchingEntries = stackEntriesByTbToolsId.get(tbToolsId) || [];
+      matchingEntries.push(entry);
+      stackEntriesByTbToolsId.set(tbToolsId, matchingEntries);
+    }
+
+    const matchingEntries = stackEntriesBySubject.get(subject) || [];
+    matchingEntries.push({ entry, tbToolsId });
+    stackEntriesBySubject.set(subject, matchingEntries);
+  }
+
+  for (const { branch, hash } of await getLocalBranchTips(graph, runCommand)) {
+    if (branch === DEFAULT_BRANCH || entries.some((entry) => entry.hash === hash)) {
+      continue;
+    }
+
+    const message = await getGraphCommitMessage({
+      graph,
+      hash,
+      runCommand,
+    });
+    const tbToolsId = getTbToolsIdFromCommitMessage(message);
+    const subject = getCommitSubjectFromMessage(message, hash);
+    const matchingById = tbToolsId
+      ? stackEntriesByTbToolsId.get(tbToolsId) || []
+      : [];
+    const matchingBySubject = tbToolsId
+      ? []
+      : (stackEntriesBySubject.get(subject) || []).filter(
+          (candidate) => !candidate.tbToolsId,
+        );
+    const matchingEntry = matchingById.length === 1
+      ? matchingById[0]
+      : matchingBySubject.length === 1
+        ? matchingBySubject[0].entry
+        : null;
+
+    if (
+      !matchingEntry ||
+      await isCommitReachableFromMain(graph, hash, runCommand)
+    ) {
+      continue;
+    }
+
+    matchingEntry.branches = Array.from(
+      new Set([...matchingEntry.branches, branch]),
+    ).sort();
   }
 
   return entries;

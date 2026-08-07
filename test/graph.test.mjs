@@ -3181,6 +3181,13 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
         "origin/main..abc123",
       ],
       ["merge-base", "--is-ancestor", "abc123", "origin/main"],
+      ["log", "-1", "--format=%B", "abc123"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)%00%(objectname)",
+        "refs/heads",
+      ],
       ["switch", "--detach", "base123"],
       ["cherry-pick", "--no-commit", "abc123"],
       ["commit", "-C", "abc123"],
@@ -3263,6 +3270,13 @@ test("rebaseCommit rebases a selected commit onto the current checkout without a
         "origin/main..abc123",
       ],
       ["merge-base", "--is-ancestor", "abc123", "origin/main"],
+      ["log", "-1", "--format=%B", "abc123"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)%00%(objectname)",
+        "refs/heads",
+      ],
       ["switch", "--detach", "base123"],
       ["cherry-pick", "--no-commit", "abc123"],
       ["commit", "-C", "abc123"],
@@ -3386,6 +3400,15 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
         "--format=%(refname:short)",
         "--points-at",
         "ghi789",
+        "refs/heads",
+      ],
+      ["log", "-1", "--format=%B", "abc123"],
+      ["log", "-1", "--format=%B", "def456"],
+      ["log", "-1", "--format=%B", "ghi789"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)%00%(objectname)",
         "refs/heads",
       ],
       ["switch", "--detach", "base123"],
@@ -5386,6 +5409,14 @@ test("updateGraphCheckout rebases local branch commits onto origin main", async 
     main: "main-old",
     "Bug-1": "root111",
     topic: "child222",
+    "stale-root": "old-root",
+    "stale-child": "old-child",
+  };
+  const messages = {
+    root111: "Bug 1 - Root patch.\n",
+    child222: "Bug 1 - Child patch.\n\nTB-Tools-Id: child-id\n",
+    "old-root": "Bug 1 - Root patch.\n",
+    "old-child": "Bug 1 - Child patch.\n\nTB-Tools-Id: child-id\n",
   };
   const rewritten = {
     root111: "root-new",
@@ -5424,6 +5455,12 @@ test("updateGraphCheckout rebases local branch commits onto origin main", async 
       }
 
       if (command.args[0] === "merge-base") {
+        if (["old-root", "old-child"].includes(command.args[2])) {
+          const error = new Error("not an ancestor");
+          error.code = 1;
+          throw error;
+        }
+
         return "";
       }
 
@@ -5433,6 +5470,12 @@ test("updateGraphCheckout rebases local branch commits onto origin main", async 
       }
 
       if (command.args[0] === "for-each-ref") {
+        if (!command.args.includes("--points-at")) {
+          return `${Object.entries(refs)
+            .map(([name, hash]) => `${name}\0${hash}`)
+            .join("\n")}\n`;
+        }
+
         const pointsAt = command.args[command.args.indexOf("--points-at") + 1];
         const names = Object.entries(refs)
           .filter(([, hash]) => hash === pointsAt)
@@ -5440,6 +5483,10 @@ test("updateGraphCheckout rebases local branch commits onto origin main", async 
           .sort();
 
         return `${names.join("\n")}${names.length ? "\n" : ""}`;
+      }
+
+      if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+        return messages[command.args.at(-1)] || "";
       }
 
       if (command.args[0] === "switch" && command.args[1] === "--detach") {
@@ -5490,9 +5537,13 @@ test("updateGraphCheckout rebases local branch commits onto origin main", async 
     main: "origin-new",
     "Bug-1": "root-new",
     topic: "child-new",
+    "stale-root": "root-new",
+    "stale-child": "child-new",
   });
   assert.deepEqual(result.branchUpdates, [
     { branch: "Bug-1", originalHash: "root111", hash: "root-new" },
+    { branch: "stale-root", originalHash: "root111", hash: "root-new" },
+    { branch: "stale-child", originalHash: "child222", hash: "child-new" },
     { branch: "topic", originalHash: "child222", hash: "child-new" },
   ]);
   assert.equal(
@@ -6516,6 +6567,14 @@ test("pruneCommitBranches drops a commit from the current branch history", async
         "child456",
         "refs/heads",
       ],
+      ["log", "-1", "--format=%B", "abc123"],
+      ["log", "-1", "--format=%B", "child456"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)%00%(objectname)",
+        "refs/heads",
+      ],
       ["switch", "--detach", "parent123"],
       ["cherry-pick", "--no-commit", "child456"],
       ["commit", "-C", "child456"],
@@ -6632,6 +6691,13 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
         "--topo-order",
         "--ancestry-path",
         "abc123..main",
+      ],
+      ["log", "-1", "--format=%B", "abc123"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)%00%(objectname)",
+        "refs/heads",
       ],
       ["switch", "--detach", "parent123"],
       ["branch", "-f", "main", "parent123"],
@@ -6776,6 +6842,14 @@ test("pruneCommitBranches removes a branch-per-commit stack commit in one pass",
         "--format=%(refname:short)",
         "--points-at",
         "c333",
+        "refs/heads",
+      ],
+      ["log", "-1", "--format=%B", "b222"],
+      ["log", "-1", "--format=%B", "c333"],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)%00%(objectname)",
         "refs/heads",
       ],
       ["switch", "--detach", "a111"],
