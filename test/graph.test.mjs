@@ -5382,6 +5382,18 @@ test("updateGraphCheckout switches to updated main for plain updates", async () 
 
 test("updateGraphCheckout rebases local branch commits onto origin main", async () => {
   const calls = [];
+  const refs = {
+    main: "main-old",
+    "Bug-1": "root111",
+    topic: "child222",
+  };
+  const rewritten = {
+    root111: "root-new",
+    child222: "child-new",
+  };
+  let branch = "topic";
+  let head = "child222";
+  let pendingCherryPick = "";
   const graph = {
     label: "comm",
     path: "/repo/comm",
@@ -5393,16 +5405,73 @@ test("updateGraphCheckout rebases local branch commits onto origin main", async 
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch") {
-        return "topic\n";
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return branch ? `${branch}\n` : "";
       }
 
       if (command.args[0] === "rev-list") {
         return "root111\nchild222\n";
       }
 
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        if (command.args[2] === "refs/remotes/origin/main") {
+          return "origin-new\n";
+        }
+
+        if (command.args[2] === "refs/heads/main") {
+          return `${refs.main}\n`;
+        }
+      }
+
+      if (command.args[0] === "merge-base") {
+        return "";
+      }
+
+      if (command.args[0] === "update-ref") {
+        refs.main = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        const pointsAt = command.args[command.args.indexOf("--points-at") + 1];
+        const names = Object.entries(refs)
+          .filter(([, hash]) => hash === pointsAt)
+          .map(([name]) => name)
+          .sort();
+
+        return `${names.join("\n")}${names.length ? "\n" : ""}`;
+      }
+
+      if (command.args[0] === "switch" && command.args[1] === "--detach") {
+        branch = "";
+        head = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "cherry-pick") {
+        pendingCherryPick = command.args.at(-1);
+        return "";
+      }
+
+      if (command.args[0] === "commit" && command.args[1] === "-C") {
+        head = rewritten[pendingCherryPick];
+        pendingCherryPick = "";
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "-f") {
+        refs[command.args[2]] = command.args[3];
+        return "";
+      }
+
+      if (command.args[0] === "switch") {
+        branch = command.args[1];
+        head = refs[branch];
+        return "";
+      }
+
       if (command.args[0] === "rev-parse") {
-        return "rebased333\n";
+        return `${head}\n`;
       }
 
       return "";
@@ -5416,21 +5485,44 @@ test("updateGraphCheckout rebases local branch commits onto origin main", async 
   assert.equal(result.branch, "topic");
   assert.equal(result.rebasedCount, 2);
   assert.deepEqual(result.commits, ["root111", "child222"]);
-  assert.deepEqual(
-    calls.map((call) => call.args),
-    [
-      ["fetch", "origin", "main"],
-      ["branch", "--show-current"],
-      ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
-      ["rebase", "--update-refs", "origin/main", "topic"],
-      ["branch", "--show-current"],
-      ["rev-parse", "HEAD"],
-    ],
+  assert.equal(result.currentHash, "child-new");
+  assert.deepEqual(refs, {
+    main: "origin-new",
+    "Bug-1": "root-new",
+    topic: "child-new",
+  });
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-1", originalHash: "root111", hash: "root-new" },
+    { branch: "topic", originalHash: "child222", hash: "child-new" },
+  ]);
+  assert.equal(
+    calls.some((call) => call.args[0] === "rebase"),
+    false,
+  );
+  assert.equal(
+    calls.some((call) =>
+      call.args[0] === "update-ref" &&
+      call.args[1] === "refs/heads/main" &&
+      call.args[2] === "origin-new" &&
+      call.args[3] === "main-old"
+    ),
+    true,
   );
 });
 
 test("updateGraphCheckout rebases the containing branch for a detached checkout", async () => {
   const calls = [];
+  const refs = {
+    main: "main-old",
+    topic: "child222",
+  };
+  const rewritten = {
+    current123: "current-new",
+    child222: "child-new",
+  };
+  let branch = "";
+  let head = "current123";
+  let pendingCherryPick = "";
   const graph = {
     label: "comm",
     path: "/repo/comm",
@@ -5442,24 +5534,77 @@ test("updateGraphCheckout rebases the containing branch for a detached checkout"
     runCommand: async (command) => {
       calls.push(command);
 
-      if (command.args[0] === "branch") {
-        return calls.filter((call) => call.args[0] === "branch").length === 1
-          ? ""
-          : "topic\n";
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return branch ? `${branch}\n` : "";
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        if (command.args[2] === "refs/remotes/origin/main") {
+          return "origin-new\n";
+        }
+
+        if (command.args[2] === "refs/heads/main") {
+          return `${refs.main}\n`;
+        }
       }
 
       if (command.args[0] === "rev-parse") {
-        return calls.filter((call) => call.args[0] === "rev-parse").length === 1
-          ? "current123\n"
-          : "rebased333\n";
+        return `${head}\n`;
       }
 
       if (command.args[0] === "for-each-ref") {
-        return "topic\n";
+        if (command.args.includes("--contains")) {
+          return "topic\n";
+        }
+
+        const pointsAt = command.args[command.args.indexOf("--points-at") + 1];
+        const names = Object.entries(refs)
+          .filter(([, hash]) => hash === pointsAt)
+          .map(([name]) => name)
+          .sort();
+
+        return `${names.join("\n")}${names.length ? "\n" : ""}`;
       }
 
       if (command.args[0] === "rev-list") {
         return "current123\nchild222\n";
+      }
+
+      if (command.args[0] === "merge-base") {
+        return "";
+      }
+
+      if (command.args[0] === "update-ref") {
+        refs.main = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "switch" && command.args[1] === "--detach") {
+        branch = "";
+        head = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "cherry-pick") {
+        pendingCherryPick = command.args.at(-1);
+        return "";
+      }
+
+      if (command.args[0] === "commit" && command.args[1] === "-C") {
+        head = rewritten[pendingCherryPick];
+        pendingCherryPick = "";
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "-f") {
+        refs[command.args[2]] = command.args[3];
+        return "";
+      }
+
+      if (command.args[0] === "switch") {
+        branch = command.args[1];
+        head = refs[branch];
+        return "";
       }
 
       return "";
@@ -5469,25 +5614,14 @@ test("updateGraphCheckout rebases the containing branch for a detached checkout"
   assert.equal(result.branch, "topic");
   assert.equal(result.rebasedCount, 2);
   assert.deepEqual(result.commits, ["current123", "child222"]);
-  assert.deepEqual(
-    calls.map((call) => call.args),
-    [
-      ["fetch", "origin", "main"],
-      ["branch", "--show-current"],
-      ["rev-parse", "HEAD"],
-      [
-        "for-each-ref",
-        "--sort=refname",
-        "--format=%(refname:short)",
-        "--contains",
-        "current123",
-        "refs/heads",
-      ],
-      ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
-      ["rebase", "--update-refs", "origin/main", "topic"],
-      ["branch", "--show-current"],
-      ["rev-parse", "HEAD"],
-    ],
+  assert.equal(result.currentHash, "child-new");
+  assert.deepEqual(refs, {
+    main: "origin-new",
+    topic: "child-new",
+  });
+  assert.equal(
+    calls.some((call) => call.args[0] === "rebase"),
+    false,
   );
 });
 
@@ -5500,7 +5634,24 @@ test("updateGraphCheckout keeps try runs on commits rewritten by update rebase",
     path: "/repo/comm",
     branch: "topic",
   };
-  let rebaseComplete = false;
+  const refs = {
+    main: "main-old",
+    topic: "old222",
+  };
+  const messages = {
+    old111: "Bug 123 - Patch one. r=#reviewers\n\nTB-Tools-Id: patch-one-id\n",
+    old222: "Bug 123 - Patch two. r=#reviewers\n\nTB-Tools-Id: patch-two-id\n",
+    new111: "Bug 123 - Patch one. r=#reviewers\n\nTB-Tools-Id: patch-one-id\n",
+    new222:
+      "Bug 123 - Patch two after upstream drift. r=#reviewers\n\nTB-Tools-Id: patch-two-id\n",
+  };
+  const rewritten = {
+    old111: "new111",
+    old222: "new222",
+  };
+  let branch = "topic";
+  let head = "old222";
+  let pendingCherryPick = "";
   const runCommand = async (command) => {
     calls.push(command);
 
@@ -5508,23 +5659,28 @@ test("updateGraphCheckout keeps try runs on commits rewritten by update rebase",
       return storePath;
     }
 
-    if (command.args[0] === "branch") {
-      return "topic\n";
+    if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+      return branch ? `${branch}\n` : "";
     }
 
     if (command.args[0] === "rev-list") {
-      return rebaseComplete ? "new111\nnew222\n" : "old111\nold222\n";
+      return "old111\nold222\n";
+    }
+
+    if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+      if (command.args[2] === "refs/remotes/origin/main") {
+        return "origin-new\n";
+      }
+
+      if (command.args[2] === "refs/heads/main") {
+        return `${refs.main}\n`;
+      }
     }
 
     if (command.args[0] === "log" && command.args.includes("--format=%B")) {
       const hash = command.args.at(-1);
-      if (hash === "old222") {
-        return "Bug 123 - Patch two. r=#reviewers\n\nTB-Tools-Id: patch-two-id\n";
-      }
 
-      return hash.endsWith("222")
-        ? "Bug 123 - Patch two after upstream drift. r=#reviewers\n\nTB-Tools-Id: patch-two-id\n"
-        : "Bug 123 - Patch one. r=#reviewers\n\nTB-Tools-Id: patch-one-id\n";
+      return messages[hash] || messages[head] || "";
     }
 
     if (command.cmd === "sh") {
@@ -5534,13 +5690,55 @@ test("updateGraphCheckout keeps try runs on commits rewritten by update rebase",
         : "patch-one 0000000000000000000000000000000000000000\n";
     }
 
-    if (command.args[0] === "rebase") {
-      rebaseComplete = true;
+    if (command.args[0] === "merge-base") {
+      return "";
+    }
+
+    if (command.args[0] === "update-ref") {
+      refs.main = command.args[2];
+      return "";
+    }
+
+    if (command.args[0] === "for-each-ref") {
+      const pointsAt = command.args[command.args.indexOf("--points-at") + 1];
+      const names = Object.entries(refs)
+        .filter(([, hash]) => hash === pointsAt)
+        .map(([name]) => name)
+        .sort();
+
+      return `${names.join("\n")}${names.length ? "\n" : ""}`;
+    }
+
+    if (command.args[0] === "switch" && command.args[1] === "--detach") {
+      branch = "";
+      head = command.args[2];
+      return "";
+    }
+
+    if (command.args[0] === "cherry-pick") {
+      pendingCherryPick = command.args.at(-1);
+      return "";
+    }
+
+    if (command.args[0] === "commit" && command.args[1] === "-C") {
+      head = rewritten[pendingCherryPick];
+      pendingCherryPick = "";
+      return "";
+    }
+
+    if (command.args[0] === "branch" && command.args[1] === "-f") {
+      refs[command.args[2]] = command.args[3];
+      return "";
+    }
+
+    if (command.args[0] === "switch") {
+      branch = command.args[1];
+      head = refs[branch];
       return "";
     }
 
     if (command.args[0] === "rev-parse") {
-      return "new222\n";
+      return `${head}\n`;
     }
 
     return "";
@@ -5570,17 +5768,11 @@ test("updateGraphCheckout keeps try runs on commits rewritten by update rebase",
   });
 
   assert.deepEqual(result.commits, ["old111", "old222"]);
-  assert.deepEqual(
-    calls
-      .filter((call) => call.cmd === "git" && call.args[0] === "rebase")
-      .map((call) => call.args),
-    [[
-      "rebase",
-      "--update-refs",
-      "origin/main",
-      "topic",
-    ]],
+  assert.equal(
+    calls.some((call) => call.cmd === "git" && call.args[0] === "rebase"),
+    false,
   );
+  assert.equal(refs.topic, "new222");
 
   const runs = await getGraphTryRunsForCommit({
     graph,
@@ -5708,6 +5900,17 @@ test("runGraphRepositoryUpdate can shelf dirty changes before updating", async (
 
 test("runGraphRepositoryUpdate can amend dirty changes before rebasing", async () => {
   const calls = [];
+  const refs = {
+    main: "main-old",
+    topic: "child222",
+  };
+  const rewritten = {
+    root111: "root-new",
+    child222: "child-new",
+  };
+  let branch = "topic";
+  let head = "child222";
+  let pendingCherryPick = "";
   const graphs = [
     {
       label: "comm",
@@ -5725,16 +5928,73 @@ test("runGraphRepositoryUpdate can amend dirty changes before rebasing", async (
         return " M file.txt\n";
       }
 
-      if (command.args[0] === "branch") {
-        return "topic\n";
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return branch ? `${branch}\n` : "";
       }
 
       if (command.args[0] === "rev-list") {
         return "root111\nchild222\n";
       }
 
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        if (command.args[2] === "refs/remotes/origin/main") {
+          return "origin-new\n";
+        }
+
+        if (command.args[2] === "refs/heads/main") {
+          return `${refs.main}\n`;
+        }
+      }
+
+      if (command.args[0] === "merge-base") {
+        return "";
+      }
+
+      if (command.args[0] === "update-ref") {
+        refs.main = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        const pointsAt = command.args[command.args.indexOf("--points-at") + 1];
+        const names = Object.entries(refs)
+          .filter(([, hash]) => hash === pointsAt)
+          .map(([name]) => name)
+          .sort();
+
+        return `${names.join("\n")}${names.length ? "\n" : ""}`;
+      }
+
+      if (command.args[0] === "switch" && command.args[1] === "--detach") {
+        branch = "";
+        head = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "cherry-pick") {
+        pendingCherryPick = command.args.at(-1);
+        return "";
+      }
+
+      if (command.args[0] === "commit" && command.args[1] === "-C") {
+        head = rewritten[pendingCherryPick];
+        pendingCherryPick = "";
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "-f") {
+        refs[command.args[2]] = command.args[3];
+        return "";
+      }
+
+      if (command.args[0] === "switch") {
+        branch = command.args[1];
+        head = refs[branch];
+        return "";
+      }
+
       if (command.args[0] === "rev-parse") {
-        return "rebased333\n";
+        return `${head}\n`;
       }
 
       return "";
@@ -5748,24 +6008,14 @@ test("runGraphRepositoryUpdate can amend dirty changes before rebasing", async (
   );
   assert.equal(result.results[0].rebasedCount, 2);
   assert.match(result.output, /\$ git commit --amend --no-edit/);
-  assert.match(
-    result.output,
-    /\$ git rebase --update-refs origin\/main topic/,
+  assert.match(result.output, /\$ git switch --detach origin-new/);
+  assert.match(result.output, /\$ git cherry-pick --no-commit root111/);
+  assert.equal(
+    calls.some((call) => call.args[0] === "rebase"),
+    false,
   );
-  assert.deepEqual(
-    calls.map((call) => call.args),
-    [
-      ["status", "--porcelain"],
-      ["add", "-A"],
-      ["commit", "--amend", "--no-edit"],
-      ["fetch", "origin", "main"],
-      ["branch", "--show-current"],
-      ["rev-list", "--reverse", "--topo-order", "origin/main..topic"],
-      ["rebase", "--update-refs", "origin/main", "topic"],
-      ["branch", "--show-current"],
-      ["rev-parse", "HEAD"],
-    ],
-  );
+  assert.equal(refs.main, "origin-new");
+  assert.equal(refs.topic, "child-new");
 });
 
 test("getGraphOriginMainStatus compares local origin main with remote origin main", async () => {

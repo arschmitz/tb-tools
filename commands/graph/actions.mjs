@@ -1220,6 +1220,106 @@ async function fastForwardGraphMain(graph, runCommand) {
   });
 }
 
+async function getGraphOriginMainHash(graph, runCommand) {
+  const hash = await runCommand({
+    cmd: "git",
+    args: ["rev-parse", "--verify", `refs/remotes/origin/${DEFAULT_BRANCH}`],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+
+  return hash.trim();
+}
+
+async function isGraphCommitAncestor(graph, ancestor, descendant, runCommand) {
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["merge-base", "--is-ancestor", ancestor, descendant],
+      cwd: graph.path,
+      silent: true,
+    });
+    return true;
+  } catch (error) {
+    if (error?.code === 1) {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+async function fastForwardLocalMainRef({
+  graph,
+  originMainHash,
+  currentBranch = "",
+  runCommand = run,
+}) {
+  if (currentBranch === DEFAULT_BRANCH) {
+    return {
+      updated: false,
+      skipped: true,
+      reason: "checked-out",
+    };
+  }
+
+  const mainRef = `refs/heads/${DEFAULT_BRANCH}`;
+  const localMainHash = await getOptionalGitRefHash({
+    cwd: graph.path,
+    ref: mainRef,
+    runCommand,
+  });
+
+  if (!localMainHash) {
+    await runCommand({
+      cmd: "git",
+      args: ["update-ref", mainRef, originMainHash],
+      cwd: graph.path,
+      silent: true,
+    });
+    return {
+      updated: true,
+      hash: originMainHash,
+    };
+  }
+
+  if (localMainHash === originMainHash) {
+    return {
+      updated: false,
+      hash: originMainHash,
+    };
+  }
+
+  if (
+    await isGraphCommitAncestor(
+      graph,
+      localMainHash,
+      originMainHash,
+      runCommand,
+    )
+  ) {
+    await runCommand({
+      cmd: "git",
+      args: ["update-ref", mainRef, originMainHash, localMainHash],
+      cwd: graph.path,
+      silent: true,
+    });
+    return {
+      updated: true,
+      oldHash: localMainHash,
+      hash: originMainHash,
+    };
+  }
+
+  return {
+    updated: false,
+    diverged: true,
+    oldHash: localMainHash,
+    hash: originMainHash,
+  };
+}
+
 async function getGraphRebaseWorkRef(graph, runCommand) {
   const branch = await getCurrentGraphBranch(graph, runCommand);
 
@@ -1260,6 +1360,73 @@ async function getGraphLocalCommitsOffMain(graph, ref, runCommand) {
   return output.trim().split(/\s+/).filter(Boolean);
 }
 
+async function replayGraphUpdateRebase({
+  graph,
+  workRef,
+  localCommits,
+  originMainHash,
+  mainUpdate,
+  runCommand = run,
+}) {
+  const base = await getCurrentGraphBase(graph, runCommand);
+  const session = {
+    graph,
+    base: {
+      branch: DEFAULT_BRANCH,
+      hash: originMainHash,
+    },
+    hash: localCommits[0] || workRef.ref,
+    branch: workRef.branch,
+    mode: GRAPH_UPDATE_MODE_REBASE,
+    stackCommits: localCommits,
+    stackBranchRefs: await getRebaseStackBranches({
+      graph,
+      stackCommits: localCommits,
+      runCommand,
+    }),
+    selectedParentAnchors: [],
+    skippedMainCommits: [],
+    tryRunIdentityByHash: await getRebaseTryRunIdentityByHash({
+      graph,
+      stackCommits: localCommits,
+      runCommand,
+    }),
+    rewrittenCommits: [],
+    skippedReplayedCommits: [],
+  };
+  let replayStarted = false;
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["switch", "--detach", originMainHash],
+      cwd: graph.path,
+      silent: true,
+    });
+    replayStarted = true;
+
+    const result = await replayRebaseCommits(session, 0, runCommand);
+    result.action = "update-rebase";
+    result.mode = GRAPH_UPDATE_MODE_REBASE;
+    result.commits = localCommits;
+    result.mainUpdate = mainUpdate;
+    result.message = `${graph.label} fetched origin/${DEFAULT_BRANCH} and rebased ${localCommits.length} local commit${localCommits.length === 1 ? "" : "s"}.`;
+
+    return result;
+  } catch (error) {
+    if (error?.rebaseConflict) {
+      throw error;
+    }
+
+    if (replayStarted) {
+      await resetGraphReplayState(graph, runCommand);
+      await restoreGraphCheckout(graph, base, runCommand);
+    }
+
+    throw error;
+  }
+}
+
 export async function updateGraphCheckout({
   graph,
   mode = GRAPH_UPDATE_MODE_UPDATE,
@@ -1280,31 +1447,22 @@ export async function updateGraphCheckout({
     const localCommits = await getGraphLocalCommitsOffMain(graph, workRef.ref, runCommand);
 
     if (localCommits.length) {
-      const rebaseArgs = workRef.branch
-        ? ["rebase", "--update-refs", `origin/${DEFAULT_BRANCH}`, workRef.branch]
-        : ["rebase", "--update-refs", `origin/${DEFAULT_BRANCH}`];
-
-      await runCommand({
-        cmd: "git",
-        args: rebaseArgs,
-        cwd: graph.path,
-        silent: true,
+      const originMainHash = await getGraphOriginMainHash(graph, runCommand);
+      const mainUpdate = await fastForwardLocalMainRef({
+        graph,
+        originMainHash,
+        currentBranch: workRef.branch,
+        runCommand,
       });
 
-      const base = await getCurrentGraphBase(graph, runCommand);
-      graph.branch = base.branch || "(detached)";
-
-      return {
-        action: "update-rebase",
-        mode: updateMode,
-        label: graph.label,
-        path: graph.path,
-        branch: graph.branch,
-        currentHash: base.hash,
-        commits: localCommits,
-        rebasedCount: localCommits.length,
-        message: `${graph.label} fetched origin/${DEFAULT_BRANCH} and rebased ${localCommits.length} local commit${localCommits.length === 1 ? "" : "s"}.`,
-      };
+      return replayGraphUpdateRebase({
+        graph,
+        workRef,
+        localCommits,
+        originMainHash,
+        mainUpdate,
+        runCommand,
+      });
     }
   }
 
