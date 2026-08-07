@@ -71,6 +71,7 @@ test("buildDiffHtml renders the shared diff view", () => {
   assert.match(html, /class="stat-additions">\+1<\/span>/);
   assert.match(html, /class="stat-deletions">-1<\/span>/);
   assert.match(html, /class="diff-table"/);
+  assert.match(html, /querySelectorAll\("\.collapsed-context"\)/);
   assert.match(html, /<span class="hljs-keyword">const<\/span>/);
   assert.match(html.replace(/\s+/g, " "), /\.diff-line \{ height: 24px/);
 });
@@ -100,7 +101,7 @@ test("diff command writes and opens a rendered git diff", async () => {
   assert.equal(outputPath, "/tmp/tb-diff.html");
   assert.deepEqual(calls[0], {
     cmd: "git",
-    args: ["diff", "--cached", "--", "mail/base/test/browser/browser_tree.js"],
+    args: ["diff", "--unified=20", "--cached", "--", "mail/base/test/browser/browser_tree.js"],
     cwd: "/repo/comm",
     capture: true,
     silent: true,

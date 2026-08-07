@@ -2724,6 +2724,34 @@ body.is-resizing-panes {
 .diff-line {
   height: 24px;
 }
+.diff-line.collapsed-context[hidden] {
+  display: none;
+}
+.diff-context-expander td {
+  background: var(--diff-hunk-bg);
+  padding: 0;
+}
+.diff-context-expander-button {
+  background: transparent;
+  border: 0;
+  color: var(--diff-hunk-code);
+  cursor: pointer;
+  display: block;
+  font:
+    600 12px/24px -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  min-height: 24px;
+  padding: 0 24px;
+  text-align: left;
+  width: 100%;
+}
+.diff-context-expander-button:hover,
+.diff-context-expander-button:focus-visible {
+  background: color-mix(in srgb, var(--diff-hunk-bg) 72%, var(--diff-hunk-code));
+  outline: none;
+}
 .line-number {
   background: var(--diff-gutter-bg);
   box-sizing: border-box;

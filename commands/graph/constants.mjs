@@ -1,6 +1,7 @@
 export const FIELD_SEPARATOR = "\x1f";
 export const RECORD_SEPARATOR = "\x1e";
 export const DEFAULT_MAX_DIFF_BYTES = 200000;
+export const DEFAULT_DIFF_CONTEXT_LINES = 20;
 export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_CLIENT_DISCONNECT_GRACE_MS = 4000;
 export const DEFAULT_BROWSER_SHUTDOWN_GRACE_MS = 750;
@@ -30,6 +31,7 @@ export const GRAPH_CLIENT_SCRIPTS = [
   { output: "graph-client/dom.js", source: "dom.js" },
   { output: "graph-client/pane-resizer.js", source: "pane-resizer.js" },
   { output: "graph-client/lane-renderer.js", source: "lane-renderer.js" },
+  { output: "graph-client/diff-context.js", source: "diff-context.js" },
   { output: "graph-client/diff-viewer.js", source: "diff-viewer.js" },
   { output: "graph-client/command-sessions.js", source: "command-sessions.js" },
   { output: "graph-client/rebase-dialog.js", source: "rebase-dialog.js" },

@@ -9,6 +9,7 @@ import {
   formatPrettyDiffHtml,
   getDiffChangeCounts,
 } from "./graph/diff-renderer.mjs";
+import { DEFAULT_DIFF_CONTEXT_LINES } from "./graph/constants.mjs";
 import { getGraphHtmlStyles } from "./graph/assets.mjs";
 import { run } from "../lib/utils.mjs";
 
@@ -73,6 +74,39 @@ export function getDiffOutputPath({
   return path.join(tmpdir, `tb-diff-${now()}.html`);
 }
 
+function getDiffContextExpansionScript() {
+  return `<script>
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+      const button = target && target.closest
+        ? target.closest(".diff-context-expander-button")
+        : null;
+
+      if (!button) {
+        return;
+      }
+
+      const contextGroup = button.dataset.contextGroup;
+      const body = button.closest("tbody");
+      if (!contextGroup || !body) {
+        return;
+      }
+
+      body.querySelectorAll(".collapsed-context").forEach((row) => {
+        if (row.dataset.contextGroup === contextGroup) {
+          row.hidden = false;
+          row.classList.remove("collapsed-context");
+        }
+      });
+      button.setAttribute("aria-expanded", "true");
+      const expander = button.closest(".diff-context-expander");
+      if (expander) {
+        expander.remove();
+      }
+    });
+  </script>`;
+}
+
 export function buildDiffHtml({
   diff = "",
   args = [],
@@ -109,6 +143,7 @@ ${getGraphHtmlStyles()}
       <div class="diff-body">${diffHtml || "<pre class=\"diff-placeholder\">No diff.</pre>"}</div>
     </aside>
   </main>
+  ${getDiffContextExpansionScript()}
 </body>
 </html>`;
 }
@@ -136,7 +171,7 @@ export function createDiffCommand({
     const workingDirectory = typeof cwd === "function" ? cwd() : cwd;
     const diffText = await runCommand({
       cmd: "git",
-      args: ["diff", ...options.args],
+      args: ["diff", `--unified=${DEFAULT_DIFF_CONTEXT_LINES}`, ...options.args],
       cwd: workingDirectory,
       capture: true,
       silent: true,

@@ -8,6 +8,7 @@ import {
 import { run } from "../../lib/utils.mjs";
 import { formatPrettyDiffHtml, getDiffChangeCounts } from "./diff-renderer.mjs";
 import {
+  DEFAULT_DIFF_CONTEXT_LINES,
   DEFAULT_MAX_DIFF_BYTES,
   FIELD_SEPARATOR,
   GRAPH_TRY_STORE_FILE,
@@ -200,6 +201,7 @@ function getGitShowArgs(hash) {
     "show",
     "--format=",
     "--patch",
+    `--unified=${DEFAULT_DIFF_CONTEXT_LINES}`,
     "--find-renames",
     "--no-ext-diff",
     "--no-color",
@@ -211,6 +213,7 @@ function getGitWorkingTreeDiffArgs() {
   return [
     "diff",
     "--patch",
+    `--unified=${DEFAULT_DIFF_CONTEXT_LINES}`,
     "--find-renames",
     "--no-ext-diff",
     "--no-color",
@@ -227,6 +230,7 @@ function getGitNoIndexDiffArgs(file) {
     "diff",
     "--no-index",
     "--patch",
+    `--unified=${DEFAULT_DIFF_CONTEXT_LINES}`,
     "--no-ext-diff",
     "--no-color",
     "--",

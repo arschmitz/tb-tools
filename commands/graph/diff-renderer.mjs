@@ -41,6 +41,8 @@ const HIGHLIGHT_LANGUAGE_BY_BASENAME = new Map([
   ["package-lock.json", "json"],
   ["package.json", "json"],
 ]);
+const CONTEXT_LINES_TO_KEEP = 3;
+const MIN_CONTEXT_LINES_TO_COLLAPSE = 8;
 
 function escapeHtml(value = "") {
   return String(value)
@@ -272,6 +274,94 @@ function escapeDiffHtml(value = "") {
     .replace(/\t/g, "    ");
 }
 
+function formatRenderedDiffLine({
+  className,
+  line,
+  newLine,
+  oldLine,
+  language,
+}, { contextGroup = "" } = {}) {
+  const collapsedClass = contextGroup ? " collapsed-context" : "";
+  const collapsedAttributes = contextGroup
+    ? ` hidden data-context-group="${contextGroup}"`
+    : "";
+
+  return `<tr class="diff-line ${className}${collapsedClass}"${collapsedAttributes}>
+          <td class="line-number old-line">${oldLine}</td>
+          <td class="line-number new-line">${newLine}</td>
+          <td class="line-code">${formatDiffLineContent(line, className, language)}</td>
+        </tr>`;
+}
+
+function formatDiffContextExpander(contextGroup, hiddenLineCount) {
+  const lineLabel = hiddenLineCount === 1 ? "line" : "lines";
+
+  return `<tr class="diff-context-expander" data-context-group="${contextGroup}">
+          <td colspan="3"><button class="diff-context-expander-button" type="button" data-context-group="${contextGroup}" aria-expanded="false">Expand ${hiddenLineCount} hidden ${lineLabel}</button></td>
+        </tr>`;
+}
+
+function formatDiffRows(lines, language, fileIndex) {
+  const lineNumberState = { oldLine: null, newLine: null };
+  const rows = lines.reduce((rendered, line) => {
+    if (!shouldRenderDiffLine(line, lineNumberState)) {
+      return rendered;
+    }
+
+    const { oldLine, newLine } = getDiffLineNumbers(line, lineNumberState);
+    const className = getDiffLineClass(line, lineNumberState);
+
+    rendered.push({
+      className,
+      language,
+      line,
+      newLine,
+      oldLine,
+    });
+    return rendered;
+  }, []);
+  const rendered = [];
+  let contextGroupIndex = 0;
+
+  for (let index = 0; index < rows.length;) {
+    if (rows[index].className !== "context") {
+      rendered.push(formatRenderedDiffLine(rows[index]));
+      index++;
+      continue;
+    }
+
+    let end = index + 1;
+    while (end < rows.length && rows[end].className === "context") {
+      end++;
+    }
+
+    const contextRows = rows.slice(index, end);
+    if (contextRows.length < MIN_CONTEXT_LINES_TO_COLLAPSE) {
+      rendered.push(...contextRows.map((row) => formatRenderedDiffLine(row)));
+      index = end;
+      continue;
+    }
+
+    const visibleBefore = contextRows.slice(0, CONTEXT_LINES_TO_KEEP);
+    const visibleAfter = contextRows.slice(-CONTEXT_LINES_TO_KEEP);
+    const hiddenRows = contextRows.slice(
+      CONTEXT_LINES_TO_KEEP,
+      -CONTEXT_LINES_TO_KEEP,
+    );
+    const contextGroup = `diff-context-${fileIndex}-${contextGroupIndex++}`;
+
+    rendered.push(...visibleBefore.map((row) => formatRenderedDiffLine(row)));
+    rendered.push(formatDiffContextExpander(contextGroup, hiddenRows.length));
+    rendered.push(...hiddenRows.map((row) => formatRenderedDiffLine(row, {
+      contextGroup,
+    })));
+    rendered.push(...visibleAfter.map((row) => formatRenderedDiffLine(row)));
+    index = end;
+  }
+
+  return rendered.join("\n");
+}
+
 export function formatPrettyDiffHtml(diff) {
   const files = splitPrettyDiffFiles(diff);
 
@@ -279,26 +369,11 @@ export function formatPrettyDiffHtml(diff) {
     return "";
   }
 
-  return Object.entries(files).map(([file, lines]) => {
+  return Object.entries(files).map(([file, lines], fileIndex) => {
     const { insertions, deletions } = countDiffChanges(lines);
     const changeCountLabel = formatChangeCountLabel(insertions, deletions);
     const language = getHighlightLanguage(file);
-    const lineNumberState = { oldLine: null, newLine: null };
-    const diffLines = lines.reduce((rendered, line) => {
-      if (!shouldRenderDiffLine(line, lineNumberState)) {
-        return rendered;
-      }
-
-      const { oldLine, newLine } = getDiffLineNumbers(line, lineNumberState);
-      const className = getDiffLineClass(line, lineNumberState);
-
-      rendered.push(`<tr class="diff-line ${className}">
-          <td class="line-number old-line">${oldLine}</td>
-          <td class="line-number new-line">${newLine}</td>
-          <td class="line-code">${formatDiffLineContent(line, className, language)}</td>
-        </tr>`);
-      return rendered;
-    }, []).join("\n");
+    const diffLines = formatDiffRows(lines, language, fileIndex);
 
     return `<section class="pretty-file">
       <h3>

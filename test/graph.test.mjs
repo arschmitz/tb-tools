@@ -92,6 +92,7 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "dom.js", output: "graph-client/dom.js" },
   { source: "pane-resizer.js", output: "graph-client/pane-resizer.js" },
   { source: "lane-renderer.js", output: "graph-client/lane-renderer.js" },
+  { source: "diff-context.js", output: "graph-client/diff-context.js" },
   { source: "diff-viewer.js", output: "graph-client/diff-viewer.js" },
   { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
   { source: "rebase-dialog.js", output: "graph-client/rebase-dialog.js" },
@@ -1622,6 +1623,36 @@ test("formatPrettyDiffHtml renders pretty-diff style markup", () => {
   );
   assert.match(html, /data-path="file.txt"/);
 
+  const collapsedContextHtml = formatPrettyDiffHtml(
+    [
+      "diff --git a/context.txt b/context.txt",
+      "@@ -1,11 +1,11 @@",
+      "-old value",
+      "+new value",
+      " context 1",
+      " context 2",
+      " context 3",
+      " context 4",
+      " context 5",
+      " context 6",
+      " context 7",
+      " context 8",
+      " context 9",
+      " context 10",
+    ].join("\n"),
+  );
+
+  assert.match(
+    collapsedContextHtml,
+    /<button class="diff-context-expander-button" type="button" data-context-group="diff-context-0-0" aria-expanded="false">Expand 4 hidden lines<\/button>/,
+  );
+  assert.match(
+    collapsedContextHtml,
+    /<tr class="diff-line context collapsed-context" hidden data-context-group="diff-context-0-0">/,
+  );
+  assert.match(collapsedContextHtml, /class="line-number old-line">2<\/td>/);
+  assert.match(collapsedContextHtml, /class="line-number old-line">11<\/td>/);
+
   const newFileHtml = formatPrettyDiffHtml(
     [
       "diff --git a/new.txt b/new.txt",
@@ -1690,6 +1721,7 @@ test("getCommitDiffs collects git show output by commit hash", async () => {
   assert.equal(commands[0].cmd, "git");
   assert.equal(commands[0].cwd, "/repo/comm");
   assert.deepEqual(commands[0].args.slice(0, 2), ["show", "--format="]);
+  assert.equal(commands[0].args.includes("--unified=20"), true);
   assert.match(diffs.abc123.text, /diff --git/);
   assert.match(diffs.abc123.html, /pretty-file/);
   assert.equal(diffs.abc123.truncated, false);
@@ -2495,6 +2527,7 @@ test("amendCurrentCommit stages shown changes and amends with an edited message"
       [
         "diff",
         "--patch",
+        "--unified=20",
         "--find-renames",
         "--no-ext-diff",
         "--no-color",

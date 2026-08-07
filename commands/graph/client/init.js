@@ -121,6 +121,7 @@ import {
   submitInteractiveRebaseDialog,
   updateInteractiveRebaseRange,
 } from "./interactive-rebase-dialog.js";
+import { handleDiffContextClick } from "./diff-context.js";
 import { markBugForCheckin } from "./diff-viewer.js";
 import { hideCommitContextMenu } from "./lane-renderer.js";
 
@@ -247,6 +248,10 @@ document.addEventListener("click", (event) => {
   }
 
   if (handleTestOutputClick(event)) {
+    return;
+  }
+
+  if (handleDiffContextClick(event)) {
     return;
   }
 
