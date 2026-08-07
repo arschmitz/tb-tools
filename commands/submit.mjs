@@ -26,6 +26,10 @@ export function getSubmitLinksFromText(text = "", { tryLink = "" } = {}) {
   };
 }
 
+export function getMozPhabSubmitArgs() {
+  return ["submit", "--single"];
+}
+
 export function createSubmitCommand({
   checkChanges = checkForChanges,
   lint = defaultLint,
@@ -35,6 +39,9 @@ export function createSubmitCommand({
   postComment = defaultComment,
   getCommitMessage = defaultGetCommitMessage,
   runCommand = run,
+  getSubmitArgs = getMozPhabSubmitArgs,
+  beforeMozPhabSubmit = async () => undefined,
+  afterMozPhabSubmit = async () => {},
   createSpinner = (text) => new ora({ text }).start(),
 } = {}) {
   return async function submit(options, tryOptions) {
@@ -79,7 +86,13 @@ export function createSubmitCommand({
       }
     }
 
-    const submitOutput = await runCommand({ cmd: 'moz-phab', args: ["submit"], capture: true });
+    const submitContext = await beforeMozPhabSubmit({ options });
+    const submitOutput = await runCommand({
+      cmd: "moz-phab",
+      args: getSubmitArgs(options),
+      capture: true,
+    });
+    await afterMozPhabSubmit({ options, output: submitOutput, context: submitContext });
     const commitMessage = await getCommitMessage().catch(() => "");
     Object.assign(result, getSubmitLinksFromText(`${submitOutput || ""}\n${commitMessage || ""}`));
 

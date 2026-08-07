@@ -468,7 +468,7 @@ tb run-update
 <br/><br/>
 ### submit
 ---
-Submits to phabricator.
+Submits the current commit to phabricator as a single moz-phab revision.
 Optionally:
 * Check for changes
   * Prompt to amend current commit

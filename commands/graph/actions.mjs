@@ -2812,6 +2812,248 @@ async function checkGraphSubmitChanges({
   }
 }
 
+async function prepareGraphSubmitDescendantReplay({
+  graph,
+  runCommand = run,
+}) {
+  const base = await getCurrentGraphBase(graph, runCommand);
+  const [branchRefs, containingBranchRefs] = await Promise.all([
+    getLocalBranchesAtCommit(graph, base.hash, runCommand),
+    getLocalBranchesContainingCommit(graph, base.hash, runCommand),
+  ]);
+  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const stackCandidate = chooseRebaseStackCandidate({
+    candidates: await Promise.all(
+      containingBranches.map((candidateBranch) =>
+        getRebaseStackCandidate(graph, base.hash, candidateBranch, runCommand),
+      ),
+    ),
+    currentBranch: base.branch,
+    hash: base.hash,
+  });
+  const rawStackCommits = uniqueCommits(stackCandidate.commits.slice(1));
+  const { kept: stackCommits, skipped: skippedMainCommits } =
+    await filterRebaseCommitsOnMain(graph, rawStackCommits, runCommand);
+
+  return {
+    graph,
+    base,
+    hash: base.hash,
+    branchRefs: parseBranchRefs(branchRefs),
+    mode: "submit",
+    stackCommits,
+    stackBranchRefs: await getRebaseStackBranches({
+      graph,
+      stackCommits,
+      runCommand,
+    }),
+    skippedMainCommits,
+    tryRunIdentityByHash: await getRebaseTryRunIdentityByHash({
+      graph,
+      stackCommits,
+      runCommand,
+    }),
+    rewrittenCommits: [],
+    skippedReplayedCommits: [],
+  };
+}
+
+async function updateSubmitBaseBranches({
+  graph,
+  branches = [],
+  hash,
+  runCommand = run,
+}) {
+  for (const branch of branches) {
+    await runCommand({
+      cmd: "git",
+      args: ["branch", "-f", branch, hash],
+      cwd: graph.path,
+      silent: true,
+    });
+  }
+}
+
+async function replayGraphSubmitDescendants({
+  graph,
+  session,
+  plan,
+  runCommand = run,
+}) {
+  if (!plan?.base?.hash) {
+    return null;
+  }
+
+  const submittedBase = await getCurrentGraphBase(graph, runCommand);
+
+  if (submittedBase.hash === plan.base.hash) {
+    graph.branch = submittedBase.branch || "(detached)";
+    return {
+      action: "submit-replay",
+      rebasedCount: 0,
+      branch: graph.branch,
+      currentHash: submittedBase.hash,
+      rewrittenCommits: [],
+      branchUpdates: [],
+    };
+  }
+
+  const submitReplaySession = {
+    ...plan,
+    graph,
+    base: submittedBase,
+  };
+  const branchUpdates = [];
+  let replayStarted = false;
+
+  try {
+    await runCommand({
+      cmd: "git",
+      args: ["switch", "--detach", submittedBase.hash],
+      cwd: graph.path,
+      silent: true,
+    });
+    replayStarted = true;
+
+    await updateSubmitBaseBranches({
+      graph,
+      branches: plan.branchRefs,
+      hash: submittedBase.hash,
+      runCommand,
+    });
+
+    for (const branch of plan.branchRefs) {
+      branchUpdates.push({
+        branch,
+        originalHash: plan.base.hash,
+        hash: submittedBase.hash,
+      });
+    }
+
+    for (const commit of plan.stackCommits) {
+      try {
+        await runCommand({
+          cmd: "git",
+          args: ["cherry-pick", "--no-commit", commit],
+          cwd: graph.path,
+          silent: true,
+        });
+      } catch (error) {
+        if (isEmptyCherryPickError(error)) {
+          await resetGraphReplayState(graph, runCommand);
+          recordSkippedRebaseCommit(
+            submitReplaySession,
+            commit,
+            await getCurrentGraphHeadHash(graph, runCommand),
+          );
+          continue;
+        }
+
+        throw error;
+      }
+
+      try {
+        await runCommand({
+          cmd: "git",
+          args: ["commit", "-C", commit],
+          cwd: graph.path,
+          silent: true,
+        });
+      } catch (error) {
+        if (!isEmptyCherryPickError(error)) {
+          throw error;
+        }
+
+        await resetGraphReplayState(graph, runCommand);
+        recordSkippedRebaseCommit(
+          submitReplaySession,
+          commit,
+          await getCurrentGraphHeadHash(graph, runCommand),
+        );
+        continue;
+      }
+
+      const rewrittenHash = await amendReplayedCommitTryRunIdentity({
+        session: submitReplaySession,
+        commit,
+        runCommand,
+      });
+
+      submitReplaySession.rewrittenCommits.push({
+        originalHash: commit,
+        hash: rewrittenHash,
+      });
+    }
+
+    const rewrittenHashByOriginalHash = new Map(
+      submitReplaySession.rewrittenCommits.map((commit) => [
+        commit.originalHash,
+        commit.hash,
+      ]),
+    );
+    const skippedHashByOriginalHash = new Map(
+      submitReplaySession.skippedReplayedCommits.map((commit) => [
+        commit.originalHash,
+        commit.hash,
+      ]),
+    );
+
+    for (const { hash: originalHash, branches } of plan.stackBranchRefs) {
+      const rewrittenHash =
+        rewrittenHashByOriginalHash.get(originalHash) ||
+        skippedHashByOriginalHash.get(originalHash);
+
+      if (!rewrittenHash) {
+        continue;
+      }
+
+      for (const branch of branches) {
+        await runCommand({
+          cmd: "git",
+          args: ["branch", "-f", branch, rewrittenHash],
+          cwd: graph.path,
+          silent: true,
+        });
+        branchUpdates.push({
+          branch,
+          originalHash,
+          hash: rewrittenHash,
+        });
+      }
+    }
+
+    await restoreGraphCheckout(graph, submittedBase, runCommand);
+  } catch (error) {
+    if (replayStarted) {
+      await resetGraphReplayState(graph, runCommand);
+      await restoreGraphCheckout(graph, submittedBase, runCommand);
+    }
+    throw error;
+  }
+
+  const currentHash = await getCurrentGraphHeadHash(graph, runCommand);
+  graph.branch = submittedBase.branch || "(detached)";
+
+  if (submitReplaySession.rewrittenCommits.length) {
+    appendSubmitOutput(
+      session,
+      `Replayed ${submitReplaySession.rewrittenCommits.length} descendant commit${submitReplaySession.rewrittenCommits.length === 1 ? "" : "s"} onto submitted commit ${submittedBase.hash.slice(0, 12)}.\n`,
+    );
+  }
+
+  return {
+    action: "submit-replay",
+    branch: graph.branch,
+    currentHash,
+    originalHash: plan.base.hash,
+    submittedHash: submittedBase.hash,
+    skippedMainCommits: submitReplaySession.skippedMainCommits,
+    rewrittenCommits: submitReplaySession.rewrittenCommits,
+    branchUpdates,
+    rebasedCount: submitReplaySession.rewrittenCommits.length,
+  };
+}
+
 function createGraphSubmitRunner({
   graph,
   session,
@@ -2845,6 +3087,16 @@ function createGraphSubmitRunner({
     postComment,
     getCommitMessage: () => getGraphCurrentCommitMessage({ graph, runCommand }),
     runCommand: graphRunCommand,
+    beforeMozPhabSubmit: () => prepareGraphSubmitDescendantReplay({
+      graph,
+      runCommand,
+    }),
+    afterMozPhabSubmit: ({ context }) => replayGraphSubmitDescendants({
+      graph,
+      session,
+      plan: context,
+      runCommand,
+    }),
     createSpinner: (text) => createBrowserSubmitSpinner(session, text),
   });
 }

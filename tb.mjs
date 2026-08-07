@@ -363,7 +363,7 @@ const commands = {
     async run () { await update({ run: true }); },
   },
   submit: {
-    description: `Submits to phabricator.
+    description: `Submits the current commit to phabricator as a single moz-phab revision.
 Optionally:
 * Check for changes
   * Prompt to amend current commit

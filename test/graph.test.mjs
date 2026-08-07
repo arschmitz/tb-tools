@@ -11068,7 +11068,7 @@ test("interactive graph server submits current commit through browser prompts", 
   }
 
   assert.equal(session.status, "complete");
-  assert.match(session.output, /\$ moz-phab submit/);
+  assert.match(session.output, /\$ moz-phab submit --single/);
   assert.match(
     session.output,
     /Submitted https:\/\/phabricator\.services\.mozilla\.com\/D123456/,
@@ -11114,6 +11114,237 @@ test("interactive graph server submits current commit through browser prompts", 
         call.cmd.endsWith("mach") &&
         call.cwd === "/repo/comm" &&
         call.args.join(" ") === "try auto --artifact",
+    ),
+    true,
+  );
+
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
+  await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret" }),
+  });
+  await closePromise;
+});
+
+test("interactive graph submit replays descendant branches after moz-phab amends current commit", async (t) => {
+  const calls = [];
+  let branch = "Bug-1";
+  let head = "old111";
+  let pendingCherryPick = "";
+  let rewrittenChildIndex = 0;
+  const refs = {
+    "Bug-1": "old111",
+    "Bug-2": "child111",
+  };
+  const parents = {
+    old111: "main000",
+    new111: "main000",
+    child111: "old111",
+  };
+  const messages = {
+    old111: "Bug 1 - Part 1. r=#reviewers\n",
+    new111:
+      "Bug 1 - Part 1. r=#reviewers\n\nDifferential Revision: https://phabricator.services.mozilla.com/D123456\n",
+    child111: "Bug 2 - Part 2. r=#reviewers\n",
+  };
+  const isAncestor = (ancestor, tip) => {
+    for (let current = tip; current; current = parents[current]) {
+      if (current === ancestor) {
+        return true;
+      }
+    }
+
+    return false;
+  };
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "Bug-1",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cmd === "moz-phab") {
+        refs["Bug-1"] = "new111";
+        head = "new111";
+        messages.new111 =
+          "Bug 1 - Part 1. r=#reviewers\n\nDifferential Revision: https://phabricator.services.mozilla.com/D123456\n";
+        return "Submitted https://phabricator.services.mozilla.com/D123456\n";
+      }
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return branch ? `${branch}\n` : "";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "-f") {
+        refs[command.args[2]] = command.args[3];
+        return "";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        const pointsAtIndex = command.args.indexOf("--points-at");
+        const containsIndex = command.args.indexOf("--contains");
+        const pointsAt = pointsAtIndex === -1 ? "" : command.args[pointsAtIndex + 1];
+        const contains = containsIndex === -1 ? "" : command.args[containsIndex + 1];
+        const matchingRefs = Object.entries(refs)
+          .filter(([, value]) => {
+            if (pointsAt) {
+              return value === pointsAt;
+            }
+
+            return isAncestor(contains, value);
+          })
+          .map(([name]) => name)
+          .sort();
+
+        return `${matchingRefs.join("\n")}${matchingRefs.length ? "\n" : ""}`;
+      }
+
+      if (command.args[0] === "rev-list") {
+        const range = command.args.at(-1);
+        const [start, endRef] = range.split("..");
+        const end = refs[endRef] || endRef;
+
+        return isAncestor(start, end) && end === "child111" ? "child111\n" : "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw Object.assign(new Error("not ancestor"), { code: 1 });
+      }
+
+      if (command.args[0] === "switch" && command.args[1] === "--detach") {
+        branch = "";
+        head = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "switch") {
+        branch = command.args[1];
+        head = refs[branch];
+        return "";
+      }
+
+      if (command.args[0] === "cherry-pick") {
+        pendingCherryPick = command.args.at(-1);
+        return "";
+      }
+
+      if (command.args[0] === "commit" && command.args[1] === "-C") {
+        assert.equal(command.args[2], pendingCherryPick);
+        rewrittenChildIndex += 1;
+        const rewrittenHash = `child-new-${rewrittenChildIndex}`;
+
+        parents[rewrittenHash] = head;
+        messages[rewrittenHash] = messages[pendingCherryPick];
+        head = rewrittenHash;
+        pendingCherryPick = "";
+        return "";
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "HEAD") {
+        return `${head}\n`;
+      }
+
+      if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+        const hash = command.args.at(-1)?.startsWith("--") ? head : command.args.at(-1);
+
+        return messages[hash] || messages[head] || "";
+      }
+
+      if (command.args[0] === "log") {
+        return `\x1e${head}\x1f${parents[head] || ""}\x1fHEAD -> ${branch || "(detached)"}\x1fAlice\x1falice@example.com\x1f1710000000\x1f${messages[head]?.split("\n")[0] || "Submitted"}\n`;
+      }
+
+      if (command.cmd === "sh" || command.args[0] === "diff" || command.args[0] === "ls-files") {
+        return "";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const startResponse = await fetch(new URL("api/submit", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      graphIndex: 0,
+      hash: "old111",
+      snapshotLimit: 1,
+    }),
+  });
+  const start = await startResponse.json();
+  assert.equal(start.ok, true);
+
+  const sessionUrl = new URL(`api/submit/${start.id}?token=secret`, serverInfo.url);
+  let session = await waitForSubmitSession(
+    sessionUrl,
+    (item) => item.status === "prompt",
+  );
+
+  for (const answer of [false, false, false, false]) {
+    const answerResponse = await fetch(
+      new URL(`api/submit/${start.id}/answer`, serverInfo.url),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          token: "secret",
+          promptId: session.prompt.id,
+          answer,
+        }),
+      },
+    );
+    assert.equal(answerResponse.ok, true);
+    session = await waitForSubmitSession(
+      sessionUrl,
+      (item) =>
+        item.status === "prompt" ||
+        item.status === "complete" ||
+        item.status === "error",
+    );
+
+    if (session.status === "complete") {
+      break;
+    }
+  }
+
+  assert.equal(session.status, "complete");
+  assert.match(session.output, /\$ moz-phab submit --single/);
+  assert.match(session.output, /Replayed 1 descendant commit onto submitted commit new111/);
+  assert.equal(branch, "Bug-1");
+  assert.equal(head, "new111");
+  assert.equal(refs["Bug-1"], "new111");
+  assert.equal(refs["Bug-2"], "child-new-1");
+  assert.equal(parents["child-new-1"], "new111");
+  assert.equal(session.snapshot.branch, "Bug-1");
+  assert.equal(session.snapshot.commits[0].hash, "new111");
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.cmd === "moz-phab" &&
+        call.args.join(" ") === "submit --single",
     ),
     true,
   );

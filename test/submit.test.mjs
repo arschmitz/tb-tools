@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createSubmitCommand, getSubmitLinksFromText } from "../commands/submit.mjs";
+import {
+  createSubmitCommand,
+  getMozPhabSubmitArgs,
+  getSubmitLinksFromText,
+} from "../commands/submit.mjs";
 
 function promptsFrom(answers) {
   return {
@@ -52,7 +56,7 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
       headless: true,
       pattern: "mail/**/browser_*.js",
     }],
-    ["run", { cmd: "moz-phab", args: ["submit"], capture: true }],
+    ["run", { cmd: "moz-phab", args: ["submit", "--single"], capture: true }],
     ["try", {
       comment: false,
       flavor: "browser",
@@ -70,6 +74,10 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
     phabUrl: "https://phabricator.services.mozilla.com/D123456",
     tryUrl: "https://treeherder.mozilla.org/jobs?repo=try&revision=abc",
   });
+});
+
+test("submit command uses moz-phab single-commit submit by default", () => {
+  assert.deepEqual(getMozPhabSubmitArgs(), ["submit", "--single"]);
 });
 
 test("submit command throws a lint failure when the user declines to continue", async () => {
