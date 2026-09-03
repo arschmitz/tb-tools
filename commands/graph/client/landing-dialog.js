@@ -458,7 +458,7 @@ export async function pollGraphLandSession() {
 
     renderGraphLandSession(result);
 
-    if (result.status === "running") {
+    if (result.status === "running" || result.status === "prompt") {
       uiState.landPollTimer = window.setTimeout(pollGraphLandSession, 500);
     }
   } catch (error) {
@@ -595,7 +595,7 @@ export async function startGraphLandSession() {
     };
     renderGraphLandSession(result);
 
-    if (result.status === "running") {
+    if (result.status === "running" || result.status === "prompt") {
       uiState.landPollTimer = window.setTimeout(pollGraphLandSession, 500);
     }
   } catch (error) {
@@ -648,7 +648,7 @@ export async function answerLandPrompt(answer) {
 
     renderGraphLandSession(result);
 
-    if (result.status === "running") {
+    if (result.status === "running" || result.status === "prompt") {
       uiState.landPollTimer = window.setTimeout(pollGraphLandSession, 500);
     }
   } catch (error) {

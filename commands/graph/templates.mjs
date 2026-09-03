@@ -34,15 +34,53 @@ function getOriginMainDisplayLabel(label) {
   return label || "origin/main";
 }
 
+export function buildInteractiveGraphLauncherHtml({
+  consolePath,
+  tabName,
+}) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Opening Thunderbird Desktop Console</title>
+</head>
+<body>
+  <p id="status">Opening Thunderbird Desktop Console...</p>
+  <script>
+    const consolePath = ${safeScriptJson(consolePath)};
+    const tabName = ${safeScriptJson(tabName)};
+    const consoleTab = window.open(consolePath, tabName);
+
+    if (consoleTab) {
+      consoleTab.focus();
+      document.getElementById("status").textContent =
+        "Thunderbird Desktop Console opened in a new tab.";
+      window.setTimeout(() => window.close(), 100);
+    } else {
+      window.location.replace(consolePath);
+    }
+  </script>
+</body>
+</html>`;
+}
+
 export function buildGraphHtml({
   graphs,
   interactive = { enabled: false },
   stylesheetHref = DEFAULT_GRAPH_STYLESHEET_HREF,
   scriptSrcs = DEFAULT_GRAPH_SCRIPT_SRCS,
 }) {
+  const aiEnabled = interactive.aiEnabled === true;
   const tabButtons = graphs.map((graph, index) => (
     `<button class="tab${index === 0 ? " active" : ""}" data-index="${index}">${escapeHtml(graph.label)}</button>`
   )).join("\n");
+  const dashboardTab = interactive.enabled
+    ? `<button class="tab dashboard-tab" type="button">Dashboard</button>`
+    : "";
+  const metaBoardsTab = interactive.enabled
+    ? `<button class="tab meta-boards-tab" type="button">Meta Boards</button>`
+    : "";
   const testOutputTab = `<button class="tab test-output-tab" type="button" hidden>Test Output</button>`;
   const originMainStatus = interactive.enabled
     ? `<div class="origin-main-status" role="status" aria-label="origin/main freshness">
@@ -60,6 +98,14 @@ export function buildGraphHtml({
         <div class="graph-options-menu" id="graph-options-menu" role="menu" aria-label="More actions" hidden>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="build">Build</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="commit">Commit</button>
+          <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="phabricator-auth">Authenticate Phabricator...</button>
+          <div class="graph-menu-submenu" role="none">
+            <button class="graph-menu-command graph-submenu-trigger" type="button" role="menuitem" aria-haspopup="true" aria-expanded="false" data-menu-action="meta-boards">Meta Boards</button>
+            <div class="graph-submenu" role="menu" aria-label="Meta board options">
+              <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="meta-boards-add">Add Meta Bug Board...</button>
+              <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="meta-boards-manage">Manage Boards...</button>
+            </div>
+          </div>
           <div class="graph-menu-submenu" role="none">
             <button class="graph-menu-command graph-submenu-trigger" type="button" role="menuitem" aria-haspopup="true" aria-expanded="false" data-menu-action="lint">Lint</button>
             <div class="graph-submenu" role="menu" aria-label="Lint options">
@@ -164,6 +210,304 @@ export function buildGraphHtml({
       </section>
       <pre class="test-output-log" aria-label="Test output"></pre>
     </section>`;
+  const dashboardPanel = interactive.enabled
+    ? `<section class="dashboard-panel" hidden aria-label="Patch and bug dashboard">
+        <div class="dashboard-header">
+          <div class="dashboard-heading">
+            <p class="dashboard-eyebrow">Work queues</p>
+            <h2>Patch Dashboard</h2>
+            <p class="dashboard-status" role="status">Open the dashboard to load your open patches and assigned bugs.</p>
+          </div>
+          <button class="dashboard-refresh" type="button">Refresh</button>
+        </div>
+        <div class="dashboard-errors" role="alert" hidden></div>
+        <div class="dashboard-workspace">
+          <div class="dashboard-sections">
+            <section class="dashboard-column">
+              <h3 class="dashboard-column-heading">Your Patches</h3>
+              <div class="dashboard-column-sections">
+                <section class="dashboard-section dashboard-updates" data-dashboard-section="own-needs-revision">
+                  <div class="dashboard-section-heading">
+                    <div>
+                      <p class="dashboard-section-kicker">Your patches</p>
+                      <h3>Patches waiting for update</h3>
+                      <p class="dashboard-section-description">Waiting the longest first</p>
+                    </div>
+                    <span class="dashboard-count"></span>
+                  </div>
+                  <div class="dashboard-rows"></div>
+                </section>
+                <section class="dashboard-section dashboard-awaiting-review" data-dashboard-section="own-needs-review">
+                  <div class="dashboard-section-heading">
+                    <div>
+                      <p class="dashboard-section-kicker">Your patches</p>
+                      <h3>Patches waiting for review</h3>
+                      <p class="dashboard-section-description">Waiting the longest first</p>
+                    </div>
+                    <span class="dashboard-count"></span>
+                  </div>
+                  <div class="dashboard-rows"></div>
+                </section>
+              </div>
+            </section>
+            <section class="dashboard-column">
+              <h3 class="dashboard-column-heading">Needs Review</h3>
+              <div class="dashboard-column-sections">
+                <section class="dashboard-section dashboard-direct-review" data-dashboard-section="direct-review">
+                  <div class="dashboard-section-heading">
+                    <div>
+                      <p class="dashboard-section-kicker">Assigned directly to you</p>
+                      <h3>Waiting for review</h3>
+                      <p class="dashboard-section-description">Waiting the longest first</p>
+                    </div>
+                    <span class="dashboard-count"></span>
+                  </div>
+                  <div class="dashboard-rows"></div>
+                </section>
+                <section class="dashboard-section dashboard-group-review" data-dashboard-section="group-first-review">
+                  <div class="dashboard-section-heading">
+                    <div>
+                      <p class="dashboard-section-kicker">Review group</p>
+                      <h3>Waiting for review</h3>
+                      <p class="dashboard-section-description">Waiting the longest first</p>
+                    </div>
+                    <span class="dashboard-count"></span>
+                  </div>
+                  <div class="dashboard-rows"></div>
+                </section>
+              </div>
+            </section>
+          </div>
+          <aside class="dashboard-bug-sidebar" aria-label="Assigned bug queues">
+            <h3 class="dashboard-column-heading">Bugzilla</h3>
+            <div class="dashboard-bug-sections">
+              <section class="dashboard-section dashboard-needinfo" data-dashboard-section="needinfo-bugs">
+                <div class="dashboard-section-heading">
+                  <div>
+                    <p class="dashboard-section-kicker">Action required</p>
+                    <h3>Need info bugs</h3>
+                    <p class="dashboard-section-description">Oldest request first</p>
+                  </div>
+                  <span class="dashboard-count"></span>
+                </div>
+                <div class="dashboard-rows"></div>
+              </section>
+              <section class="dashboard-section dashboard-in-progress" data-dashboard-section="in-progress-bugs">
+                <div class="dashboard-section-heading">
+                  <div>
+                    <p class="dashboard-section-kicker">Bugzilla</p>
+                    <h3>In progress bugs</h3>
+                    <p class="dashboard-section-description">Open bugs with patches</p>
+                  </div>
+                  <span class="dashboard-count"></span>
+                </div>
+                <div class="dashboard-rows"></div>
+              </section>
+              <section class="dashboard-section dashboard-bugs" data-dashboard-section="assigned-bugs">
+                <div class="dashboard-section-heading">
+                  <div>
+                    <p class="dashboard-section-kicker">Bugzilla</p>
+                    <h3>Assigned bugs without patches</h3>
+                    <p class="dashboard-section-description">Newest bugs first</p>
+                  </div>
+                  <span class="dashboard-count"></span>
+                </div>
+                <div class="dashboard-rows"></div>
+              </section>
+            </div>
+          </aside>
+        </div>
+      </section>`
+    : "";
+  const patchUpdateDialog = interactive.enabled
+    ? `<dialog class="patch-update-dialog" id="patch-update-dialog">
+        <div class="patch-update-panel">
+          <header class="patch-update-header">
+            <div>
+              ${aiEnabled ? '<p class="patch-update-kicker">Patch update</p>' : ""}
+              <h2 class="patch-update-title">Update patch</h2>
+            </div>
+            <button class="patch-update-close" type="button" aria-label="Close">&times;</button>
+          </header>
+          <p class="patch-update-status" role="status">Preparing update...</p>
+          <section class="patch-update-activity" hidden aria-label="Codex activity">
+            <div class="patch-update-activity-heading">
+              <h3>Codex activity</h3>
+              <span class="patch-update-activity-count"></span>
+            </div>
+            <ol class="patch-update-activity-list"></ol>
+          </section>
+          <pre class="patch-update-output" hidden aria-label="Patch update output"></pre>
+          <section class="patch-update-workspace">
+          ${aiEnabled ? `<section class="patch-update-comment" hidden aria-label="Review comment">
+            <div class="patch-update-comment-heading">
+              <div>
+                <strong class="patch-update-comment-author"></strong>
+                <p class="patch-update-comment-kind"></p>
+              </div>
+              <a class="patch-update-comment-link" hidden>Open in Phabricator</a>
+            </div>
+            <div class="patch-update-reviewer-context">
+              <p class="patch-update-comment-location" hidden></p>
+              <section class="patch-update-reviewer-feedback">
+                <h3 class="patch-update-feedback-heading">Reviewer feedback</h3>
+                <pre class="patch-update-comment-content"></pre>
+              </section>
+              <section class="patch-update-suggestion" hidden>
+                <h3>Reviewer code suggestion</h3>
+                <pre class="patch-update-code-suggestion"></pre>
+              </section>
+            </div>
+            <div class="patch-update-analysis" hidden>
+              <h3>Codex recommendation</h3>
+              <p class="patch-update-recommendation"></p>
+              <h4>What Codex found</h4>
+              <p class="patch-update-assessment"></p>
+              <section class="patch-update-rationale" hidden>
+                <h4>Why</h4>
+                <p class="patch-update-rationale-text"></p>
+              </section>
+              <section class="patch-update-change-plan" hidden>
+                <h4>Planned source change</h4>
+                <p class="patch-update-change-summary"></p>
+              </section>
+              <section class="patch-update-proposed-diff" hidden>
+                <div class="patch-update-proposed-diff-heading">
+                  <h4>Suggested source diff</h4>
+                  <span>Preview only</span>
+                </div>
+                <div class="patch-update-proposed-diff-content"></div>
+              </section>
+              <label class="patch-update-instruction-label">Feedback or instruction for Codex
+                <textarea class="patch-update-instruction" rows="3" placeholder="Ask Codex to reconsider, explain, or revise its proposed change."></textarea>
+              </label>
+              <label class="patch-update-reply-label">Draft reply
+                <textarea class="patch-update-reply" rows="4"></textarea>
+              </label>
+            </div>
+          </section>
+          </section>
+          <div class="patch-update-actions">
+            <button class="patch-update-output-toggle" type="button" hidden>Output</button>
+            <button class="patch-update-feedback" type="button" hidden>Send to Codex</button>
+            <button class="patch-update-apply" type="button" hidden>Apply Change</button>
+            <button class="patch-update-post" type="button" hidden>Save Reply Draft</button>
+            <button class="patch-update-handled" type="button" hidden>Mark Handled</button>
+            <button class="patch-update-submit" type="button" hidden>Submit Patch</button>
+          </div>` : `<div class="patch-update-actions">
+            <button class="patch-update-output-toggle" type="button" hidden>Output</button>
+          </div>`}
+        </div>
+      </dialog>`
+    : "";
+  const metaBoardsPanel = interactive.enabled
+    ? `<section class="meta-boards-panel" hidden aria-label="Meta bug boards">
+        <div class="meta-boards-header">
+          <div>
+            <h2>Meta Bug Boards</h2>
+            <p class="meta-boards-status" role="status">Create and manage boards from the Meta Boards menu.</p>
+          </div>
+        </div>
+        <div class="meta-board-controls" hidden>
+          <label>Board
+            <select class="meta-board-select"></select>
+          </label>
+          <div class="meta-board-root-links"></div>
+          <label>Assignee
+            <select class="meta-board-assignee-filter"><option value="">All assignees</option></select>
+          </label>
+          <label>Child meta
+            <select class="meta-board-meta-filter"><option value="">All child metas</option></select>
+          </label>
+          <div class="meta-board-control-actions">
+            <label>Sprint
+              <select class="meta-board-sprint-select"><option value="">Open a sprint...</option></select>
+            </label>
+            <button class="meta-board-new-sprint" type="button">New Sprint</button>
+            <button class="meta-board-refresh" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="meta-boards-error" role="alert" hidden></div>
+        <div class="meta-board-empty">No meta bug boards yet. Add one from the Meta Boards menu.</div>
+        <section class="meta-board-kanban" hidden aria-label="Meta bug story board">
+          <section class="meta-board-column" data-meta-board-column="backlog"><header><h3>Backlog</h3><span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="ready"><header><h3>Ready</h3><span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="assigned"><header><h3>Assigned</h3><span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="in-progress"><header><h3>In Progress</h3><span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="in-review"><header><h3>In Review</h3><span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="complete"><header><h3>Complete</h3><span></span></header><div class="meta-board-cards"></div></section>
+        </section>
+      </section>`
+    : "";
+  const sprintPanel = interactive.enabled
+    ? `<section class="sprint-panel" hidden aria-label="Sprint planning">
+        <div class="sprint-header">
+          <div class="sprint-heading">
+            <button class="sprint-back-to-board" type="button">Meta Board</button>
+            <p class="sprint-status" role="status">Loading sprint...</p>
+          </div>
+          <div class="sprint-header-actions">
+            <button class="sprint-refresh" type="button">Refresh</button>
+            <a class="sprint-bugzilla-link" target="_blank" rel="noreferrer" hidden>Bugzilla</a>
+          </div>
+        </div>
+        <div class="sprint-error" role="alert" hidden></div>
+        <section class="sprint-details" aria-label="Sprint details">
+          <label>Sprint name
+            <input class="sprint-name-input" required>
+          </label>
+          <label>Start date
+            <output class="sprint-start-date"></output>
+          </label>
+          <label>End date
+            <input class="sprint-deadline-input" type="date" required>
+          </label>
+          <button class="sprint-save-details" type="button">Save Sprint</button>
+        </section>
+        <nav class="sprint-view-tabs" aria-label="Sprint view">
+          <button class="sprint-view-tab active" type="button" data-sprint-view="overview">Overview</button>
+          <button class="sprint-view-tab" type="button" data-sprint-view="planning">Planning</button>
+        </nav>
+        <section class="sprint-overview" aria-label="Sprint overview">
+          <div class="sprint-metrics">
+            <section><span>Total points</span><strong class="sprint-total-points"></strong></section>
+            <section><span>Remaining</span><strong class="sprint-remaining-points"></strong></section>
+            <section><span>In progress</span><strong class="sprint-in-progress-points"></strong></section>
+            <section><span>Complete</span><strong class="sprint-complete-points"></strong></section>
+            <section><span>People</span><strong class="sprint-people-count"></strong></section>
+            <section><span>Days left</span><strong class="sprint-days-remaining"></strong></section>
+          </div>
+          <section class="sprint-burndown-section">
+            <header><h3>Burndown</h3><span class="sprint-burndown-caption"></span></header>
+            <div class="sprint-burndown" role="img" aria-label="Sprint burndown chart"></div>
+          </section>
+          <section class="sprint-people-section">
+            <h3>Assigned points</h3>
+            <div class="sprint-people"></div>
+          </section>
+          <section class="sprint-overview-stories">
+            <header><h3>Sprint stories</h3><span class="sprint-overview-story-points"></span></header>
+            <div class="sprint-overview-story-groups"></div>
+          </section>
+        </section>
+        <section class="sprint-planning" hidden aria-label="Sprint planning board">
+          <div class="sprint-planning-filters">
+            <label>Assignee
+              <select class="sprint-assignee-filter"><option value="">All assignees</option></select>
+            </label>
+            <label>Child meta
+              <select class="sprint-meta-filter"><option value="">All child metas</option></select>
+            </label>
+          </div>
+          <div class="sprint-planning-columns">
+            <section class="sprint-column" data-sprint-column="ready"><header><h3>Ready</h3><span></span></header><div class="sprint-cards"></div></section>
+            <section class="sprint-column" data-sprint-column="backlog"><header><h3>Backlog</h3><span></span></header><div class="sprint-cards"></div></section>
+            <section class="sprint-column" data-sprint-column="assigned"><header><h3>Assigned or Greater</h3><span></span></header><div class="sprint-cards"></div></section>
+            <section class="sprint-column sprint-members-column" data-sprint-column="sprint"><header><h3>Sprint</h3><span></span></header><div class="sprint-cards"></div></section>
+          </div>
+        </section>
+      </section>`
+    : "";
 
   return `<!doctype html>
 <html>
@@ -183,11 +527,17 @@ export function buildGraphHtml({
     </div>
     <div class="toolbar-row">
       <nav class="tabs">${tabButtons}
+${dashboardTab}
+${metaBoardsTab}
 ${testOutputTab}</nav>
       ${updateActions}
     </div>
   </header>
   <main>${tabPanels}
+    ${dashboardPanel}
+    ${patchUpdateDialog}
+    ${metaBoardsPanel}
+    ${sprintPanel}
     ${testOutputPanel}</main>
   <div class="context-menu" id="commit-context-menu" hidden role="menu" aria-label="Commit actions">
     <div class="context-menu-title"></div>
@@ -200,6 +550,135 @@ ${testOutputTab}</nav>
     <button type="button" role="menuitem" data-action="branch">Branch</button>
     <button type="button" role="menuitem" data-action="prune">Prune</button>
   </div>
+  <dialog class="meta-board-manager-dialog" id="meta-board-manager-dialog">
+    <form class="meta-board-manager-form">
+      <header class="meta-board-manager-header">
+        <h2>Manage Meta Bug Boards</h2>
+        <button class="meta-board-manager-close" type="button" aria-label="Close board management">&times;</button>
+      </header>
+      <label for="meta-board-manager-id">Meta bug
+        <input id="meta-board-manager-id" class="meta-board-manager-id" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="Bug ID" required>
+      </label>
+      <p class="meta-board-manager-status" role="status"></p>
+      <div class="meta-board-manager-actions">
+        <button class="meta-board-add" type="submit">Add Board</button>
+      </div>
+      <section class="meta-board-manager-list" aria-label="Saved meta bug boards"></section>
+      <div class="meta-board-manager-actions">
+        <button class="meta-board-manager-cancel" type="button">Close</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="meta-board-dialog" id="meta-board-dialog">
+    <form class="meta-board-detail-form">
+      <header class="meta-board-detail-header">
+        <div>
+          <h2 class="meta-board-detail-title">Bug</h2>
+          <div class="meta-board-detail-links"></div>
+        </div>
+        <div class="meta-board-detail-header-actions">
+          <div class="meta-board-detail-bugzilla"></div>
+          <button class="meta-board-detail-close" type="button" aria-label="Close bug details">&times;</button>
+        </div>
+      </header>
+      <p class="meta-board-detail-status" role="status"></p>
+      <div class="meta-board-detail-grid">
+        <label>Title
+          <input class="meta-board-detail-summary" required>
+        </label>
+        <label>Story points
+          <input class="meta-board-detail-points" inputmode="decimal" type="number" step="0.5" min="0">
+        </label>
+        <label>Assignee
+          <input class="meta-board-detail-assignee" type="email" list="meta-board-assignees" placeholder="name@example.com">
+          <datalist id="meta-board-assignees"></datalist>
+        </label>
+      </div>
+      <section class="meta-board-relations">
+        <div>
+          <h3>Blocked By</h3>
+          <div class="meta-board-detail-depends-links"></div>
+          <button class="meta-board-relation-add" type="button" data-relation="dependsOn">Add</button>
+        </div>
+        <div>
+          <h3>Blocks</h3>
+          <div class="meta-board-detail-blocks-links"></div>
+          <button class="meta-board-relation-add" type="button" data-relation="blocks">Add</button>
+        </div>
+      </section>
+      <section class="meta-board-description-section">
+        <div class="meta-board-description-header">
+          <h3>Description</h3>
+          <button class="meta-board-description-edit" type="button" aria-controls="meta-board-detail-description" aria-label="Edit description" aria-pressed="false" title="Edit description">
+            <span class="meta-board-description-edit-icon" data-mode="edit" aria-hidden="true">&#9998;</span>
+            <span class="meta-board-description-edit-icon" data-mode="render" aria-hidden="true" hidden>&#128065;</span>
+          </button>
+        </div>
+        <div class="meta-board-detail-description-rendered"></div>
+        <textarea id="meta-board-detail-description" class="meta-board-detail-description" rows="12" hidden></textarea>
+      </section>
+      <p class="meta-board-detail-error" role="alert"></p>
+      <footer class="meta-board-detail-actions">
+        <button class="meta-board-detail-cancel" type="button">Cancel</button>
+        <button class="meta-board-detail-save" type="submit">Save Changes</button>
+      </footer>
+    </form>
+  </dialog>
+  <dialog class="meta-board-relation-dialog" id="meta-board-relation-dialog">
+    <form class="meta-board-relation-add-form">
+      <header class="meta-board-relation-add-header">
+        <h2 class="meta-board-relation-add-title">Add relation</h2>
+        <button class="meta-board-relation-add-close" type="button" aria-label="Close add relation dialog">&times;</button>
+      </header>
+      <label>Bug number
+        <input class="meta-board-relation-add-id" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="123456" required>
+      </label>
+      <p class="meta-board-relation-add-error" role="alert"></p>
+      <footer class="meta-board-relation-add-actions">
+        <button class="meta-board-relation-add-cancel" type="button">Cancel</button>
+        <button class="meta-board-relation-add-submit" type="submit">Add</button>
+      </footer>
+    </form>
+  </dialog>
+  <dialog class="sprint-create-dialog" id="sprint-create-dialog">
+    <form class="sprint-create-form">
+      <header class="sprint-dialog-header">
+        <h2>New Sprint</h2>
+        <button class="sprint-create-close" type="button" aria-label="Close new sprint dialog">&times;</button>
+      </header>
+      <label>Sprint name
+        <input class="sprint-create-name" required autocomplete="off" placeholder="Sprint name">
+      </label>
+      <label>End date
+        <input class="sprint-create-deadline" type="date" required>
+      </label>
+      <p class="sprint-create-error" role="alert"></p>
+      <footer class="sprint-dialog-actions">
+        <button class="sprint-create-cancel" type="button">Cancel</button>
+        <button class="sprint-create-submit" type="submit">Create Sprint</button>
+      </footer>
+    </form>
+  </dialog>
+  <dialog class="sprint-rollover-dialog" id="sprint-rollover-dialog">
+    <form class="sprint-rollover-form">
+      <header class="sprint-dialog-header">
+        <h2>Close Previous Sprint</h2>
+        <button class="sprint-rollover-close" type="button" aria-label="Close sprint rollover dialog">&times;</button>
+      </header>
+      <p class="sprint-rollover-summary"></p>
+      <fieldset class="sprint-rollover-options">
+        <label><input type="radio" name="sprint-rollover" value="all" checked> Move all open stories to the new sprint</label>
+        <label><input type="radio" name="sprint-rollover" value="selected"> Choose stories to move</label>
+        <label><input type="radio" name="sprint-rollover" value="none"> Remove all open stories from the previous sprint</label>
+      </fieldset>
+      <div class="sprint-rollover-stories" hidden></div>
+      <p class="sprint-rollover-error" role="alert"></p>
+      <footer class="sprint-dialog-actions">
+        <button class="sprint-rollover-cancel" type="button">Cancel</button>
+        <button class="sprint-rollover-submit" type="submit">Close Previous Sprint</button>
+      </footer>
+    </form>
+  </dialog>
   <dialog class="rebase-dialog" id="rebase-dialog">
     <div class="rebase-dialog-body">
       <h2 class="rebase-title">Rebase Needs Attention</h2>
@@ -281,6 +760,20 @@ ${testOutputTab}</nav>
       </div>
     </form>
   </dialog>
+  <dialog class="phab-auth-dialog" id="phab-auth-dialog">
+    <section class="phab-auth-panel" aria-labelledby="phab-auth-title">
+      <h2 class="phab-auth-title" id="phab-auth-title">Phabricator Authentication</h2>
+      <p class="phab-auth-status" role="status">Checking Phabricator authentication...</p>
+      <p class="phab-auth-detail">Sign in through the dedicated browser window to load inline code suggestions. This is separate from your normal browser and Conduit login.</p>
+      <p class="phab-auth-error" role="alert"></p>
+      <div class="phab-auth-actions">
+        <button class="phab-auth-close" type="button">Close</button>
+        <button class="phab-auth-cancel" type="button" hidden>Cancel</button>
+        <button class="phab-auth-sign-out" type="button" hidden>Sign Out</button>
+        <button class="phab-auth-start" type="button">Authenticate</button>
+      </div>
+    </section>
+  </dialog>
   <dialog class="submit-dialog" id="submit-dialog">
     <div class="submit-panel">
       <h2 class="submit-title">Submit Current Commit</h2>
@@ -295,6 +788,7 @@ ${testOutputTab}</nav>
       <div class="submit-links" hidden></div>
       <pre class="submit-output" aria-label="Submit output"></pre>
       <div class="submit-actions">
+        <button class="submit-cancel" type="button" hidden>Cancel</button>
         <button class="submit-close" type="button">Close</button>
       </div>
     </div>
@@ -462,6 +956,7 @@ ${testOutputTab}</nav>
       pageSize: interactive.pageSize || 80,
       pollIntervalMs: interactive.pollIntervalMs || 3000,
       closeTabsOnShutdown: interactive.closeTabsOnShutdown !== false,
+      aiEnabled: interactive.aiEnabled === true,
       token: interactive.token,
     },
     originMainStatusCacheMs: DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS,

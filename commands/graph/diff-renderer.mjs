@@ -42,6 +42,7 @@ const HIGHLIGHT_LANGUAGE_BY_BASENAME = new Map([
   ["package.json", "json"],
 ]);
 const CONTEXT_LINES_TO_KEEP = 3;
+const CONTEXT_LINES_TO_EXPAND = 20;
 const MIN_CONTEXT_LINES_TO_COLLAPSE = 8;
 
 function escapeHtml(value = "") {
@@ -72,6 +73,16 @@ export function splitPrettyDiffFiles(diff) {
   }
 
   return Object.keys(files).length ? files : null;
+}
+
+function getDiffFilePaths(lines, fallback) {
+  const header = lines.find((line) => line.startsWith("diff --git ")) || "";
+  const match = /^diff --git a\/(\S+) b\/(\S+)$/.exec(header);
+
+  return {
+    newPath: match?.[2] || fallback,
+    oldPath: match?.[1] || fallback,
+  };
 }
 
 function parseDiffHunkHeader(line) {
@@ -176,7 +187,7 @@ function getDiffLineClass(line, state) {
 function shouldRenderDiffLine(line, state) {
   const inHunk = state.oldLine !== null && state.newLine !== null;
 
-  return inHunk || line.startsWith("@@") || !isDiffMetadataLine(line);
+  return !parseDiffHunkHeader(line) && (inHunk || !isDiffMetadataLine(line));
 }
 
 function countDiffChanges(lines) {
@@ -285,25 +296,66 @@ function formatRenderedDiffLine({
   const collapsedAttributes = contextGroup
     ? ` hidden data-context-group="${contextGroup}"`
     : "";
+  const lineAttributes = ` data-old-line="${oldLine || ""}" data-new-line="${newLine || ""}"`;
 
-  return `<tr class="diff-line ${className}${collapsedClass}"${collapsedAttributes}>
+  return `<tr class="diff-line ${className}${collapsedClass}"${lineAttributes}${collapsedAttributes}>
           <td class="line-number old-line">${oldLine}</td>
           <td class="line-number new-line">${newLine}</td>
           <td class="line-code">${formatDiffLineContent(line, className, language)}</td>
         </tr>`;
 }
 
-function formatDiffContextExpander(contextGroup, hiddenLineCount) {
+function formatDiffContextActionLabel({
+  hiddenLineCount,
+  position = "middle",
+  action = "next",
+}) {
   const lineLabel = hiddenLineCount === 1 ? "line" : "lines";
+  const positionLabel = position === "top"
+    ? " above"
+    : position === "bottom"
+      ? " below"
+      : "";
+  const count = action === "next"
+    ? Math.min(hiddenLineCount, CONTEXT_LINES_TO_EXPAND)
+    : hiddenLineCount;
+  const verb = action === "next" ? "Expand" : "Show all";
 
-  return `<tr class="diff-context-expander" data-context-group="${contextGroup}">
-          <td colspan="3"><button class="diff-context-expander-button" type="button" data-context-group="${contextGroup}" aria-expanded="false">Expand ${hiddenLineCount} hidden ${lineLabel}</button></td>
+  return `${verb} ${count} ${lineLabel}${positionLabel}`;
+}
+
+function formatDiffContextExpander(
+  contextGroup,
+  hiddenLineCount,
+  { position = "middle", direction = "start" } = {},
+) {
+  const nextLabel = formatDiffContextActionLabel({
+    hiddenLineCount,
+    position,
+  });
+  const allButton = hiddenLineCount > CONTEXT_LINES_TO_EXPAND
+    ? `<button class="diff-context-expander-button" type="button" data-context-group="${contextGroup}" data-context-position="${position}" data-expand-mode="all" aria-expanded="false">${formatDiffContextActionLabel({
+      hiddenLineCount,
+      position,
+      action: "all",
+    })}</button>`
+    : "";
+
+  return `<tr class="diff-context-expander" data-context-group="${contextGroup}" data-context-direction="${direction}">
+          <td colspan="3"><div class="diff-context-expander-actions"><button class="diff-context-expander-button" type="button" data-context-group="${contextGroup}" data-context-position="${position}" data-expand-mode="next" aria-expanded="false">${nextLabel}</button>${allButton}</div></td>
         </tr>`;
 }
 
 function formatDiffRows(lines, language, fileIndex) {
   const lineNumberState = { oldLine: null, newLine: null };
+  let nextRowStartsHunk = false;
   const rows = lines.reduce((rendered, line) => {
+    if (parseDiffHunkHeader(line)) {
+      getDiffLineNumbers(line, lineNumberState);
+      nextRowStartsHunk = true;
+      return rendered;
+    }
+
     if (!shouldRenderDiffLine(line, lineNumberState)) {
       return rendered;
     }
@@ -317,7 +369,9 @@ function formatDiffRows(lines, language, fileIndex) {
       line,
       newLine,
       oldLine,
+      startsHunk: nextRowStartsHunk,
     });
+    nextRowStartsHunk = false;
     return rendered;
   }, []);
   const rendered = [];
@@ -342,14 +396,46 @@ function formatDiffRows(lines, language, fileIndex) {
       continue;
     }
 
+    const isTopOfHunk = rows[index].startsHunk;
+    const isBottomOfHunk = end === rows.length || rows[end].startsHunk;
+    const edgeVisibleRows = CONTEXT_LINES_TO_KEEP;
     const visibleBefore = contextRows.slice(0, CONTEXT_LINES_TO_KEEP);
     const visibleAfter = contextRows.slice(-CONTEXT_LINES_TO_KEEP);
+    const contextGroup = `diff-context-${fileIndex}-${contextGroupIndex++}`;
+
+    if (isTopOfHunk) {
+      const hiddenRows = contextRows.slice(0, -edgeVisibleRows);
+
+      rendered.push(formatDiffContextExpander(contextGroup, hiddenRows.length, {
+        position: "top",
+        direction: "end",
+      }));
+      rendered.push(...hiddenRows.map((row) => formatRenderedDiffLine(row, {
+        contextGroup,
+      })));
+      rendered.push(...visibleAfter.map((row) => formatRenderedDiffLine(row)));
+      index = end;
+      continue;
+    }
+
+    if (isBottomOfHunk) {
+      const hiddenRows = contextRows.slice(edgeVisibleRows);
+
+      rendered.push(...visibleBefore.map((row) => formatRenderedDiffLine(row)));
+      rendered.push(formatDiffContextExpander(contextGroup, hiddenRows.length, {
+        position: "bottom",
+      }));
+      rendered.push(...hiddenRows.map((row) => formatRenderedDiffLine(row, {
+        contextGroup,
+      })));
+      index = end;
+      continue;
+    }
+
     const hiddenRows = contextRows.slice(
       CONTEXT_LINES_TO_KEEP,
       -CONTEXT_LINES_TO_KEEP,
     );
-    const contextGroup = `diff-context-${fileIndex}-${contextGroupIndex++}`;
-
     rendered.push(...visibleBefore.map((row) => formatRenderedDiffLine(row)));
     rendered.push(formatDiffContextExpander(contextGroup, hiddenRows.length));
     rendered.push(...hiddenRows.map((row) => formatRenderedDiffLine(row, {
@@ -370,12 +456,13 @@ export function formatPrettyDiffHtml(diff) {
   }
 
   return Object.entries(files).map(([file, lines], fileIndex) => {
+    const { oldPath, newPath } = getDiffFilePaths(lines, file);
     const { insertions, deletions } = countDiffChanges(lines);
     const changeCountLabel = formatChangeCountLabel(insertions, deletions);
     const language = getHighlightLanguage(file);
     const diffLines = formatDiffRows(lines, language, fileIndex);
 
-    return `<section class="pretty-file">
+    return `<section class="pretty-file" data-file-path="${escapeHtml(file)}" data-old-file-path="${escapeHtml(oldPath)}" data-new-file-path="${escapeHtml(newPath)}">
       <h3>
         <span class="file-heading">
           <span class="file-icon" aria-hidden="true"></span>
@@ -389,7 +476,7 @@ export function formatPrettyDiffHtml(diff) {
           <button class="copy-path" type="button" data-path="${escapeHtml(file)}">Copy path</button>
         </span>
       </h3>
-      <div class="file-diff"><table class="diff-table"><tbody>${diffLines}</tbody></table></div>
+      <div class="file-diff"><table class="diff-table"><colgroup><col class="diff-gutter-column"><col class="diff-gutter-column"><col></colgroup><tbody>${diffLines}</tbody></table></div>
     </section>`;
   }).join("\n");
 }

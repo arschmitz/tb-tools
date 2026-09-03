@@ -34,6 +34,10 @@ This file currently contains credentials for phabricator, bugzilla, and optional
 
 For Notion, share the story data source with your Notion connection. The console looks up stories by the configured bug-id property and shows matching page links on selected patches.
 
+Meta bug boards read story points from Bugzilla's `cf_fx_points` field by default. Set `bugzilla.storyPointsField` in `.tb.json` when a project uses a different custom field.
+
+The console's Phabricator Authentication menu item uses a separate private browser profile in `~/.tb-tools/phabricator-browser` for inline code suggestions. It is not stored in `.tb.json` or Git. Use Sign Out in the same dialog to remove that profile. If Chrome or Edge is unavailable, install Playwright Chromium with `npx playwright install chromium`.
+
 ## Thunderbird Desktop Console
 
 `tb console` starts a local browser-based control surface for day-to-day Thunderbird patch work. It keeps the comm checkout and the Firefox parent checkout visible together, updates while the server is running, and gives complex workflows a UI instead of forcing everything through prompts in the terminal.
@@ -42,10 +46,13 @@ Use the console to:
 
 - inspect live comm and Firefox branch graphs with the current checkout, uncommitted changes, branch labels, and tracked try runs
 - click commits for full commit messages, Bugzilla, Phabricator, and linked Notion story badges, integration status, change totals, and GitHub-style syntax-highlighted diffs
+- authenticate with Phabricator from the menu to display native inline code suggestions alongside reviewed diffs, including suggestions that also have prose comments
 - create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, blocking-review toggles, and a durable `TB-Tools-Id` trailer for console metadata
 - checkout, rebase, interactively reorder/squash/fixup/drop local commit ranges, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit
 - update both repositories, update and rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches
 - run modified tests or explicit path/glob patterns, including headless runs, with parsed final summaries and rerun actions for failures
+- create persistent Meta Bug boards: group dependent stories by child meta bug, filter by assignee or child meta, update story fields in place, and open linked bugs internally or in Bugzilla
+- create Bugzilla-backed sprints from a Meta Bug board, roll open stories forward while closing the prior sprint, plan source stories in four point-totalled columns, and track dates, burndown, and assigned-point totals
 - watch command progress in a slim status bar with elapsed time, cancellable running work, and toggleable output
 - monitor comm and Firefox `origin/main` freshness plus Rust dependency sync warnings before remote-build workflows like try and submit
 - close console browser tabs automatically when the local console process exits, with an opt-out for keeping tabs open
@@ -215,7 +222,7 @@ tb graph
 <br/><br/>
 ### console
 ---
-Starts the interactive Thunderbird Desktop Console with live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, Bugzilla/Phabricator status, tracked try runs, update/rebase controls, and build/run output.
+Starts the interactive Thunderbird Desktop Console with a Phabricator/Bugzilla dashboard, live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, tracked try runs, update/rebase controls, and build/run output.
 ```bash
 tb console
 ```
@@ -228,7 +235,7 @@ tb console
 |--firefox||Include the Firefox parent checkout tab|true|`tb console --firefox=false`
 |--maxDiffBytes||Maximum server-loaded diff bytes per commit|200000|`tb console --maxDiffBytes=200000`
 |--pageSize||Commit page size for infinite loading|80|`tb console --pageSize=80`
-|--port||Localhost port. Use 0 for a random free port|0|`tb console --port=0`
+|--port||Localhost port. Defaults to 4310 and falls back to a random free port when busy. Use 0 for a random free port|4310|`tb console --port=4310`
 
 <br/><br/>
 ### build-rebase

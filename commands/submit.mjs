@@ -26,8 +26,15 @@ export function getSubmitLinksFromText(text = "", { tryLink = "" } = {}) {
   };
 }
 
-export function getMozPhabSubmitArgs() {
-  return ["submit", "--single"];
+export function getMozPhabSubmitArgs({ message = "" } = {}) {
+  const args = ["submit", "--single"];
+  const updateMessage = String(message || "").trim();
+
+  if (updateMessage) {
+    args.push("--message", updateMessage);
+  }
+
+  return args;
 }
 
 export function createSubmitCommand({

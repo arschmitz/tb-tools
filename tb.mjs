@@ -147,7 +147,7 @@ const commands = {
     },
   },
   console: {
-    description: "Starts the interactive Thunderbird Desktop Console with live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, Bugzilla/Phabricator status, tracked try runs, update/rebase controls, and build/run output.",
+    description: "Starts the interactive Thunderbird Desktop Console with a Phabricator/Bugzilla dashboard, live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, tracked try runs, update/rebase controls, and build/run output.",
     header: "Console Options",
     options: [
       { name: "open", description: "Open the console in a browser", defaultValue: "true" },
@@ -156,7 +156,7 @@ const commands = {
       { name: "firefox", description: "Include the Firefox parent checkout tab", defaultValue: "true" },
       { name: "maxDiffBytes", description: "Maximum server-loaded diff bytes per commit", defaultValue: "200000" },
       { name: "pageSize", description: "Commit page size for infinite loading", defaultValue: "80" },
-      { name: "port", description: "Localhost port. Use 0 for a random free port", defaultValue: "0" },
+      { name: "port", description: "Localhost port. Defaults to 4310 and falls back to a random free port when busy. Use 0 for a random free port", defaultValue: "4310" },
     ],
     async run () {
       const options = mapBooleanOptions(args(commands.console.options, { argv }));

@@ -14,6 +14,7 @@ import {
   GRAPH_TRY_STORE_FILE,
   GRAPH_TRY_STORE_VERSION,
   GRAPH_WORKING_TREE_TRY_PREFIX,
+  FULL_FILE_DIFF_CONTEXT_LINES,
   RECORD_SEPARATOR,
   WORKING_TREE_AUTHOR,
   WORKING_TREE_CHANGES_HASH,
@@ -196,12 +197,20 @@ function getGitLogArgs(limit, offset = 0) {
   return args;
 }
 
-function getGitShowArgs(hash) {
+function getDiffContextArgument(fullFile = false) {
+  const contextLines = fullFile
+    ? FULL_FILE_DIFF_CONTEXT_LINES
+    : DEFAULT_DIFF_CONTEXT_LINES;
+
+  return `--unified=${contextLines}`;
+}
+
+function getGitShowArgs(hash, { fullFile = false } = {}) {
   return [
     "show",
     "--format=",
     "--patch",
-    `--unified=${DEFAULT_DIFF_CONTEXT_LINES}`,
+    getDiffContextArgument(fullFile),
     "--find-renames",
     "--no-ext-diff",
     "--no-color",
@@ -209,11 +218,11 @@ function getGitShowArgs(hash) {
   ];
 }
 
-function getGitWorkingTreeDiffArgs() {
+function getGitWorkingTreeDiffArgs({ fullFile = false } = {}) {
   return [
     "diff",
     "--patch",
-    `--unified=${DEFAULT_DIFF_CONTEXT_LINES}`,
+    getDiffContextArgument(fullFile),
     "--find-renames",
     "--no-ext-diff",
     "--no-color",
@@ -225,12 +234,12 @@ function getGitUntrackedArgs() {
   return ["ls-files", "--others", "--exclude-standard", "-z"];
 }
 
-function getGitNoIndexDiffArgs(file) {
+function getGitNoIndexDiffArgs(file, { fullFile = false } = {}) {
   return [
     "diff",
     "--no-index",
     "--patch",
-    `--unified=${DEFAULT_DIFF_CONTEXT_LINES}`,
+    getDiffContextArgument(fullFile),
     "--no-ext-diff",
     "--no-color",
     "--",
@@ -688,6 +697,7 @@ function parseNullSeparated(output = "") {
 
 async function getUntrackedDiff({
   cwd,
+  fullFile = false,
   runCommand = run,
 }) {
   const output = await runCommand({
@@ -703,7 +713,7 @@ async function getUntrackedDiff({
   for (const file of files) {
     const diff = await runDiffCommand({
       cmd: "git",
-      args: getGitNoIndexDiffArgs(file),
+      args: getGitNoIndexDiffArgs(file, { fullFile }),
       cwd,
       capture: true,
       silent: true,
@@ -719,27 +729,32 @@ async function getUntrackedDiff({
 
 export async function getRawWorkingTreeDiff({
   cwd,
+  fullFile = false,
   runCommand = run,
 }) {
   const diff = await runDiffCommand({
     cmd: "git",
-    args: getGitWorkingTreeDiffArgs(),
+    args: getGitWorkingTreeDiffArgs({ fullFile }),
     cwd,
     capture: true,
     silent: true,
   }, runCommand);
 
-  const untrackedDiff = await getUntrackedDiff({ cwd, runCommand });
+  const untrackedDiff = await getUntrackedDiff({ cwd, fullFile, runCommand });
 
   return [diff.trimEnd(), untrackedDiff].filter(Boolean).join("\n");
 }
 
 export async function getWorkingTreeDiff({
   cwd,
+  fullFile = false,
   maxDiffBytes = DEFAULT_MAX_DIFF_BYTES,
   runCommand = run,
 }) {
-  return truncateDiff(await getRawWorkingTreeDiff({ cwd, runCommand }), maxDiffBytes);
+  return truncateDiff(
+    await getRawWorkingTreeDiff({ cwd, fullFile, runCommand }),
+    maxDiffBytes,
+  );
 }
 
 export async function getWorkingTreeCommits({
@@ -887,12 +902,14 @@ export async function getCommitDiffs({
 export async function getCommitDiff({
   cwd,
   hash,
+  fullFile = false,
   maxDiffBytes = DEFAULT_MAX_DIFF_BYTES,
   runCommand = run,
 }) {
   if (isWorkingTreeCommitHash(hash)) {
     return getWorkingTreeDiff({
       cwd,
+      fullFile,
       maxDiffBytes,
       runCommand,
     });
@@ -900,7 +917,7 @@ export async function getCommitDiff({
 
   const diff = await runCommand({
     cmd: "git",
-    args: getGitShowArgs(hash),
+    args: getGitShowArgs(hash, { fullFile }),
     cwd,
     capture: true,
     silent: true,

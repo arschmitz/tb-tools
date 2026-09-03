@@ -5,6 +5,7 @@ import {
   amendMessage,
   amendSubmit,
   graphStates,
+  submitCancel,
   submitClose,
   submitDialog,
   submitLinks,
@@ -32,6 +33,10 @@ import {
   setDiffStats,
   setDiffText,
 } from "./diff-viewer.js";
+import {
+  fetchSelectedCommitReview,
+  renderSelectedCommitReview,
+} from "./review-viewer.js";
 import {
   applyGraphSnapshot,
   confirmRemoteBuildRustWarning,
@@ -92,6 +97,7 @@ export async function showDiff(graph, index, commit) {
     setDiffText(body, "Loading diff...");
     loadSelectedCommitMessage(index, commit, commitMessage);
     loadSelectedCommitIntegrationStatus(index, commit, integrationStatus);
+    const reviewPromise = fetchSelectedCommitReview(index, commit);
 
     try {
       const response = await fetch(
@@ -104,13 +110,25 @@ export async function showDiff(graph, index, commit) {
         throw new Error(result.error || response.statusText);
       }
 
+      if (graphStates[index].selectedHash !== commit.hash) {
+        return;
+      }
+
       setDiffStats(stats, result);
       if (result.html) {
         setDiffHtml(body, result.html);
       } else {
         setDiffText(body, result.text || "No diff for this commit.");
       }
+
+      renderSelectedCommitReview(index, commit, body, await reviewPromise);
     } catch (error) {
+      await reviewPromise;
+
+      if (graphStates[index].selectedHash !== commit.hash) {
+        return;
+      }
+
       setDiffStats(stats, null);
       setDiffText(body, error && error.message ? error.message : String(error));
     }
@@ -464,6 +482,18 @@ export function closeSubmitDialog() {
   submitDialog.close();
 }
 
+function isActiveSubmitSession(session) {
+  return session && (session.status === "running" || session.status === "prompt");
+}
+
+function scheduleSubmitSessionPoll() {
+  if (!uiState.submitDialogState || uiState.submitPollTimer) {
+    return;
+  }
+
+  uiState.submitPollTimer = window.setTimeout(pollSubmitSession, 500);
+}
+
 export function setSubmitLinkNodes(links) {
   submitLinks.replaceChildren();
 
@@ -485,9 +515,17 @@ export function setSubmitLinkNodes(links) {
 }
 
 export function renderSubmitSession(session) {
+  const active = isActiveSubmitSession(session);
+
+  if (uiState.submitDialogState) {
+    uiState.submitDialogState.status = session.status;
+  }
+
   submitStatus.textContent = session.message || session.status || "";
   submitStatus.classList.toggle("error", session.status === "error");
-  submitClose.disabled = session.status === "running" || session.status === "prompt";
+  submitClose.disabled = active;
+  submitCancel.hidden = !active;
+  submitCancel.disabled = false;
   submitOutput.textContent = session.output || "";
   submitOutput.scrollTop = submitOutput.scrollHeight;
 
@@ -514,6 +552,8 @@ export async function pollSubmitSession() {
     return;
   }
 
+  uiState.submitPollTimer = null;
+
   try {
     const response = await fetch(
       "/api/submit/" + encodeURIComponent(uiState.submitDialogState.sessionId) +
@@ -527,8 +567,8 @@ export async function pollSubmitSession() {
 
     renderSubmitSession(result);
 
-    if (result.status === "running") {
-      uiState.submitPollTimer = window.setTimeout(pollSubmitSession, 500);
+    if (isActiveSubmitSession(result)) {
+      scheduleSubmitSessionPoll();
     }
   } catch (error) {
     submitStatus.classList.add("error");
@@ -536,7 +576,7 @@ export async function pollSubmitSession() {
   }
 }
 
-export async function openSubmitDialog(button) {
+export async function openSubmitDialog(button, { patchUpdateSessionId = "" } = {}) {
   const graphIndex = Number(button.dataset.graphIndex);
   const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
 
@@ -560,6 +600,7 @@ export async function openSubmitDialog(button) {
         token: INTERACTIVE.token,
         graphIndex,
         hash: button.dataset.hash,
+        patchUpdateSessionId,
         snapshotLimit: getLoadedGitCommitLimit(graphStates[graphIndex]),
       }),
     });
@@ -574,6 +615,7 @@ export async function openSubmitDialog(button) {
       sessionId: result.id,
       promptId: "",
       appliedSnapshot: false,
+      status: result.status,
     };
     submitTitle.textContent = "Submit " + button.dataset.label + " current commit";
     submitPrompt.hidden = true;
@@ -602,6 +644,11 @@ export async function answerSubmitPrompt(answer) {
   submitStatus.textContent = "Running submit...";
   submitPrompt.hidden = true;
 
+  if (uiState.submitPollTimer) {
+    window.clearTimeout(uiState.submitPollTimer);
+    uiState.submitPollTimer = null;
+  }
+
   try {
     const response = await fetch(
       "/api/submit/" + encodeURIComponent(uiState.submitDialogState.sessionId) + "/answer",
@@ -622,8 +669,49 @@ export async function answerSubmitPrompt(answer) {
     }
 
     renderSubmitSession(result);
-    pollSubmitSession();
+    if (isActiveSubmitSession(result)) {
+      pollSubmitSession();
+    }
   } catch (error) {
+    submitStatus.classList.add("error");
+    submitStatus.textContent = error && error.message ? error.message : String(error);
+  }
+}
+
+export async function cancelSubmitSession() {
+  if (!uiState.submitDialogState || !isActiveSubmitSession(uiState.submitDialogState)) {
+    return;
+  }
+
+  const { sessionId } = uiState.submitDialogState;
+
+  submitCancel.disabled = true;
+  submitStatus.classList.remove("error");
+  submitStatus.textContent = "Canceling submit...";
+
+  if (uiState.submitPollTimer) {
+    window.clearTimeout(uiState.submitPollTimer);
+    uiState.submitPollTimer = null;
+  }
+
+  try {
+    const response = await fetch(
+      "/api/submit/" + encodeURIComponent(sessionId) + "/cancel",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: INTERACTIVE.token }),
+      }
+    );
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || response.statusText);
+    }
+
+    renderSubmitSession(result);
+  } catch (error) {
+    submitCancel.disabled = false;
     submitStatus.classList.add("error");
     submitStatus.textContent = error && error.message ? error.message : String(error);
   }

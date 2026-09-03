@@ -288,6 +288,16 @@ function showOnlyTestOutputTab() {
 
   document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
   document.querySelectorAll(".panel").forEach((panel) => panel.classList.remove("active"));
+  const dashboardPanel = document.querySelector(".dashboard-panel");
+
+  if (dashboardPanel) {
+    dashboardPanel.hidden = true;
+  }
+  const metaBoardsPanel = document.querySelector(".meta-boards-panel");
+
+  if (metaBoardsPanel) {
+    metaBoardsPanel.hidden = true;
+  }
   testOutputTab.hidden = false;
   testOutputTab.classList.add("active");
   testOutputPanel.hidden = false;

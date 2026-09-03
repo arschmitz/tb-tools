@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { getBugs } from "../lib/bugzilla.mjs";
+import {
+  getAssignedOpenBugs,
+  getBugHistoryByIds,
+  getBugs,
+  getBugsByIds,
+  getBugsWithAttachmentsByIds,
+  getNeedinfoOpenBugs,
+  getUsersByMatches,
+} from "../lib/bugzilla.mjs";
 import config from "../lib/config.mjs";
 import { readJsonResponse } from "../lib/http.mjs";
 import {
   buildNotionBugFilter,
   getNotionStoriesByBugId,
+  isNotionAuthenticationError,
   NOTION_VERSION,
 } from "../lib/notion.mjs";
 import phab, { clearPhabricatorRequestState } from "../lib/phab.mjs";
@@ -54,6 +63,94 @@ test("getBugs reads Bugzilla search results through fetch", async () => {
   assert.deepEqual(bugs, [{ id: 12345 }]);
   assert.match(requestedUrl, /bugzilla\.mozilla\.org\/rest\/bug\?/);
   assert.match(requestedUrl, /v1=checkin-needed-tb/);
+});
+
+test("dashboard Bugzilla queries limit results to open assigned bugs", async () => {
+  const requestedUrls = [];
+  global.fetch = async (url) => {
+    requestedUrls.push(new URL(String(url)));
+    return new Response(JSON.stringify({ bugs: [{ id: 12345 }] }), { status: 200 });
+  };
+
+  const assigned = await getAssignedOpenBugs({ assignedTo: "me@example.com" });
+  const needinfo = await getNeedinfoOpenBugs({ requestee: "me@example.com" });
+  const selected = await getBugsByIds([12345, 67890]);
+  const withAttachments = await getBugsWithAttachmentsByIds([12345]);
+
+  assert.deepEqual(assigned, [{ id: 12345 }]);
+  assert.deepEqual(needinfo, [{ id: 12345 }]);
+  assert.deepEqual(selected, [{ id: 12345 }]);
+  assert.deepEqual(withAttachments, [{ id: 12345 }]);
+  assert.equal(requestedUrls[0].searchParams.get("assigned_to"), "me@example.com");
+  assert.equal(requestedUrls[0].searchParams.get("resolution"), "---");
+  assert.deepEqual(requestedUrls[0].searchParams.getAll("bug_status"), [
+    "UNCONFIRMED",
+    "NEW",
+    "ASSIGNED",
+    "REOPENED",
+    "VERIFIED",
+  ]);
+  assert.equal(requestedUrls[1].searchParams.get("quicksearch"), "needinfo?me@example.com");
+  assert.equal(requestedUrls[1].searchParams.get("resolution"), "---");
+  assert.deepEqual(requestedUrls[1].searchParams.getAll("bug_status"), [
+    "UNCONFIRMED",
+    "NEW",
+    "ASSIGNED",
+    "REOPENED",
+    "VERIFIED",
+  ]);
+  assert.equal(
+    requestedUrls[1].searchParams.get("include_fields"),
+    "id,summary,status,resolution,is_open,product,component,last_change_time,flags",
+  );
+  assert.deepEqual(requestedUrls[2].searchParams.getAll("ids"), [
+    "12345",
+    "67890",
+  ]);
+  assert.equal(
+    requestedUrls[3].searchParams.get("include_fields"),
+    "id,attachments.id,attachments.file_name,attachments.content_type",
+  );
+});
+
+test("Bugzilla user lookup batches distinct match values", async () => {
+  let requestedUrl;
+  global.fetch = async (url) => {
+    requestedUrl = new URL(String(url));
+    return new Response(JSON.stringify({ users: [{ name: "reviewer@example.com" }] }), {
+      status: 200,
+    });
+  };
+
+  const users = await getUsersByMatches([
+    "Reviewer Name",
+    "reviewer",
+    "Reviewer Name",
+  ]);
+
+  assert.deepEqual(users, [{ name: "reviewer@example.com" }]);
+  assert.equal(requestedUrl.pathname, "/rest/user");
+  assert.deepEqual(requestedUrl.searchParams.getAll("match"), [
+    "Reviewer Name",
+    "reviewer",
+  ]);
+  assert.equal(requestedUrl.searchParams.get("include_fields"), "id,name,real_name,email");
+});
+
+test("Bugzilla history requests batch distinct bug IDs", async () => {
+  let requestedUrl;
+  global.fetch = async (url) => {
+    requestedUrl = new URL(String(url));
+    return new Response(JSON.stringify({
+      bugs: [{ id: 12345, history: [] }, { id: 67890, history: [] }],
+    }), { status: 200 });
+  };
+
+  const histories = await getBugHistoryByIds([12345, 67890, 12345]);
+
+  assert.deepEqual(histories.map((history) => history.id), [12345, 67890]);
+  assert.equal(requestedUrl.pathname, "/rest/bug/12345/history");
+  assert.deepEqual(requestedUrl.searchParams.getAll("ids"), ["67890"]);
 });
 
 test("readJsonResponse reports HTTP API failures with response detail", async () => {
@@ -146,6 +243,42 @@ test("phab coalesces identical read-only requests", async () => {
   assert.notEqual(first, second);
 });
 
+test("phab caches revision comment requests", async () => {
+  useTestPhabricatorToken();
+
+  let calls = 0;
+  global.fetch = async (url, options) => {
+    calls++;
+    assert.equal(
+      String(url),
+      "https://phabricator.services.mozilla.com/api/differential.getrevisioncomments",
+    );
+    assert.deepEqual(JSON.parse(options.body.get("params")), {
+      ids: [123],
+      inlines: true,
+      __conduit__: { token: "test-token" },
+    });
+
+    return new Response(JSON.stringify({
+      result: { 123: [] },
+    }), { status: 200 });
+  };
+
+  const first = await phab({
+    route: "differential.getrevisioncomments",
+    params: { ids: [123], inlines: true },
+  });
+  const second = await phab({
+    route: "differential.getrevisioncomments",
+    params: { ids: [123], inlines: true },
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(first, { result: { 123: [] } });
+  assert.deepEqual(second, { result: { 123: [] } });
+  assert.notEqual(first, second);
+});
+
 test("phab caches user query reviewer names by PHID", async () => {
   useTestPhabricatorToken();
 
@@ -192,7 +325,7 @@ test("phab caches user query reviewer names by PHID", async () => {
   ]);
 });
 
-test("phab skips a cooled-down route after a rate limit", async () => {
+test("phab applies a rate-limit cooldown across every route", async () => {
   useTestPhabricatorToken();
 
   let calls = 0;
@@ -225,7 +358,7 @@ test("phab skips a cooled-down route after a rate limit", async () => {
   };
 
   await assert.rejects(
-    phab({ route: "differential.query", params: { ids: [456] } }),
+    phab({ route: "project.search", params: { constraints: {} } }),
     (error) => {
       assert.equal(error.statusCode, 429);
       assert.match(error.message, /temporarily rate limited/);
@@ -362,4 +495,11 @@ test("getNotionStoriesByBugId is disabled when Notion is not configured", async 
   });
 
   assert.equal(result, null);
+});
+
+test("isNotionAuthenticationError recognizes invalid or unauthorized tokens", () => {
+  assert.equal(isNotionAuthenticationError({ statusCode: 401 }), true);
+  assert.equal(isNotionAuthenticationError({ status: 403 }), true);
+  assert.equal(isNotionAuthenticationError({ statusCode: 404 }), false);
+  assert.equal(isNotionAuthenticationError(new Error("Network failure")), false);
 });

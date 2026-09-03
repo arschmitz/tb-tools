@@ -912,13 +912,44 @@ export async function promptForPostUpdateMachAction() {
 
 export function formatDirtyCheckoutList(dirty) {
   return dirty
-    .map((item) => item.label + " (" + item.path + ")")
-    .join(", ");
+    .map((item) => {
+      const files = Array.isArray(item.files) ? item.files : [];
+      const visibleFiles = files.slice(0, 5);
+      const remaining = files.length - visibleFiles.length;
+      const detail = visibleFiles.length
+        ? "\n  " + visibleFiles.join("\n  ") +
+          (remaining ? "\n  ... and " + remaining + " more" : "")
+        : "";
+
+      return item.label + " (" + item.path + ")" + detail;
+    })
+    .join("\n\n");
+}
+
+function refreshDirtyCheckoutGraphs(dirty) {
+  for (const item of dirty) {
+    const index = Number(item?.index);
+    const state = graphStates[index];
+
+    if (!state) {
+      continue;
+    }
+
+    const loadedGitCommits = state.commits.filter(
+      (commit) => !isWorkingTreeCommit(commit),
+    ).length;
+    void refreshGraphFromServer(index, {
+      force: true,
+      limit: Math.max(1, loadedGitCommits),
+    });
+  }
 }
 
 export function promptForDirtyUpdateAction(dirty) {
+  refreshDirtyCheckoutGraphs(dirty);
   const answer = window.prompt(
-    "Uncommitted changes were found in " + formatDirtyCheckoutList(dirty) + ". Type 'shelf' to temporarily stash them for the update, type 'amend' to amend them into the current commit, or leave blank to cancel.",
+    "Uncommitted changes were found:\n\n" + formatDirtyCheckoutList(dirty) +
+      "\n\nThe matching Uncommitted changes row is being refreshed in the affected console tab. Type 'shelf' to temporarily stash them for the update, type 'amend' to amend them into the current commit, or leave blank to cancel.",
     "shelf"
   );
 
@@ -1088,7 +1119,10 @@ export function applyGraphSnapshot(index, snapshot, { force = false } = {}) {
   return true;
 }
 
-export async function refreshGraphFromServer(index, { force = false } = {}) {
+export async function refreshGraphFromServer(index, {
+  force = false,
+  limit = 0,
+} = {}) {
   const state = graphStates[index];
 
   if (!INTERACTIVE.enabled || state.loading || state.refreshing || state.graph.error) {
@@ -1098,8 +1132,12 @@ export async function refreshGraphFromServer(index, { force = false } = {}) {
   state.refreshing = true;
 
   try {
+    const snapshotLimit = Number(limit) > 0
+      ? Math.max(1, Number(limit))
+      : getLoadedGitCommitLimit(state);
     const response = await fetch(
-      "/api/graph/" + index + "/snapshot?limit=" + getLoadedGitCommitLimit(state) +
+      "/api/graph/" + index + "/snapshot?limit=" +
+        snapshotLimit +
         "&token=" + encodeURIComponent(INTERACTIVE.token)
     );
     const result = await response.json();

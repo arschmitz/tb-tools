@@ -9,7 +9,7 @@ import {
   formatPrettyDiffHtml,
   getDiffChangeCounts,
 } from "./graph/diff-renderer.mjs";
-import { DEFAULT_DIFF_CONTEXT_LINES } from "./graph/constants.mjs";
+import { FULL_FILE_DIFF_CONTEXT_LINES } from "./graph/constants.mjs";
 import { getGraphHtmlStyles } from "./graph/assets.mjs";
 import { run } from "../lib/utils.mjs";
 
@@ -76,6 +76,34 @@ export function getDiffOutputPath({
 
 function getDiffContextExpansionScript() {
   return `<script>
+    const contextLinesToExpand = 20;
+
+    function getContextActionLabel(button, hiddenLineCount) {
+      const lineLabel = hiddenLineCount === 1 ? "line" : "lines";
+      const position = button.dataset.contextPosition;
+      const positionLabel = position === "top"
+        ? " above"
+        : position === "bottom"
+          ? " below"
+          : "";
+      const count = button.dataset.expandMode === "all"
+        ? hiddenLineCount
+        : Math.min(hiddenLineCount, contextLinesToExpand);
+      const verb = button.dataset.expandMode === "all" ? "Show all" : "Expand";
+
+      return verb + " " + count + " " + lineLabel + positionLabel;
+    }
+
+    function updateContextExpander(expander, hiddenLineCount) {
+      expander.querySelectorAll(".diff-context-expander-button").forEach((button) => {
+        button.textContent = getContextActionLabel(button, hiddenLineCount);
+
+        if (button.dataset.expandMode === "all") {
+          button.hidden = hiddenLineCount <= contextLinesToExpand;
+        }
+      });
+    }
+
     document.addEventListener("click", (event) => {
       const target = event.target;
       const button = target && target.closest
@@ -88,21 +116,35 @@ function getDiffContextExpansionScript() {
 
       const contextGroup = button.dataset.contextGroup;
       const body = button.closest("tbody");
-      if (!contextGroup || !body) {
+      const expander = button.closest(".diff-context-expander");
+      if (!contextGroup || !body || !expander) {
         return;
       }
 
-      body.querySelectorAll(".collapsed-context").forEach((row) => {
-        if (row.dataset.contextGroup === contextGroup) {
-          row.hidden = false;
-          row.classList.remove("collapsed-context");
-        }
+      const collapsedRows = Array.from(body.querySelectorAll(".collapsed-context"))
+        .filter((row) => row.dataset.contextGroup === contextGroup);
+      const rowsToExpand = button.dataset.expandMode === "all"
+        ? collapsedRows
+        : expander.dataset.contextDirection === "end"
+          ? collapsedRows.slice(-contextLinesToExpand)
+          : collapsedRows.slice(0, contextLinesToExpand);
+      rowsToExpand.forEach((row) => {
+        row.hidden = false;
+        row.classList.remove("collapsed-context");
       });
-      button.setAttribute("aria-expanded", "true");
-      const expander = button.closest(".diff-context-expander");
-      if (expander) {
+
+      const remainingRows = collapsedRows.length - rowsToExpand.length;
+      if (!remainingRows) {
+        button.setAttribute("aria-expanded", "true");
         expander.remove();
+        return;
       }
+
+      const lastExpandedRow = rowsToExpand[rowsToExpand.length - 1];
+      if (lastExpandedRow) {
+        lastExpandedRow.after(expander);
+      }
+      updateContextExpander(expander, remainingRows);
     });
   </script>`;
 }
@@ -171,7 +213,7 @@ export function createDiffCommand({
     const workingDirectory = typeof cwd === "function" ? cwd() : cwd;
     const diffText = await runCommand({
       cmd: "git",
-      args: ["diff", `--unified=${DEFAULT_DIFF_CONTEXT_LINES}`, ...options.args],
+      args: ["diff", `--unified=${FULL_FILE_DIFF_CONTEXT_LINES}`, ...options.args],
       cwd: workingDirectory,
       capture: true,
       silent: true,

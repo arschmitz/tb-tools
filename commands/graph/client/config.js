@@ -84,6 +84,13 @@ export const commitReviewerList = commitDialog.querySelector(".commit-reviewer-l
 export const commitStatus = commitDialog.querySelector(".commit-status");
 export const commitClose = commitDialog.querySelector(".commit-close");
 export const commitSubmit = commitDialog.querySelector(".commit-submit");
+export const phabAuthDialog = document.getElementById("phab-auth-dialog");
+export const phabAuthStatus = phabAuthDialog.querySelector(".phab-auth-status");
+export const phabAuthError = phabAuthDialog.querySelector(".phab-auth-error");
+export const phabAuthClose = phabAuthDialog.querySelector(".phab-auth-close");
+export const phabAuthCancel = phabAuthDialog.querySelector(".phab-auth-cancel");
+export const phabAuthSignOut = phabAuthDialog.querySelector(".phab-auth-sign-out");
+export const phabAuthStart = phabAuthDialog.querySelector(".phab-auth-start");
 export const submitDialog = document.getElementById("submit-dialog");
 export const submitTitle = submitDialog.querySelector(".submit-title");
 export const submitStatus = submitDialog.querySelector(".submit-status");
@@ -91,6 +98,7 @@ export const submitPrompt = submitDialog.querySelector(".submit-prompt");
 export const submitQuestion = submitDialog.querySelector(".submit-question");
 export const submitLinks = submitDialog.querySelector(".submit-links");
 export const submitOutput = submitDialog.querySelector(".submit-output");
+export const submitCancel = submitDialog.querySelector(".submit-cancel");
 export const submitClose = submitDialog.querySelector(".submit-close");
 export const tryDialog = document.getElementById("try-dialog");
 export const tryForm = tryDialog.querySelector(".try-form");
@@ -151,6 +159,8 @@ export const uiState = {
   contextMenuState: null,
   amendDialogState: null,
   commitDialogState: null,
+  phabAuthState: "",
+  phabAuthPollTimer: null,
   submitDialogState: null,
   submitPollTimer: null,
   landDialogState: null,

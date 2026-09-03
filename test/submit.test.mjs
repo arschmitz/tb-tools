@@ -80,6 +80,13 @@ test("submit command uses moz-phab single-commit submit by default", () => {
   assert.deepEqual(getMozPhabSubmitArgs(), ["submit", "--single"]);
 });
 
+test("submit command passes a patch update response as the moz-phab update message", () => {
+  assert.deepEqual(
+    getMozPhabSubmitArgs({ message: "Addressed the review feedback." }),
+    ["submit", "--single", "--message", "Addressed the review feedback."],
+  );
+});
+
 test("submit command throws a lint failure when the user declines to continue", async () => {
   const lintError = new Error("lint failed");
   const submit = createSubmitCommand({

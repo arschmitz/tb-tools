@@ -2,11 +2,15 @@ export const FIELD_SEPARATOR = "\x1f";
 export const RECORD_SEPARATOR = "\x1e";
 export const DEFAULT_MAX_DIFF_BYTES = 200000;
 export const DEFAULT_DIFF_CONTEXT_LINES = 20;
+export const FULL_FILE_DIFF_CONTEXT_LINES = 2147483647;
 export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_CLIENT_DISCONNECT_GRACE_MS = 4000;
 export const DEFAULT_BROWSER_SHUTDOWN_GRACE_MS = 750;
 export const DEFAULT_SUBMIT_OUTPUT_LIMIT = 160000;
 export const DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS = 15 * 1000;
+export const DEFAULT_DASHBOARD_CACHE_MS = 5 * 60 * 1000;
+export const DEFAULT_META_BOARD_CACHE_MS = 2 * 60 * 1000;
+export const DEFAULT_CONSOLE_PORT = 4310;
 export const CHECKIN_NEEDED_KEYWORD = "checkin-needed-tb";
 export const GRAPH_UPDATE_MODE_UPDATE = "update";
 export const GRAPH_UPDATE_MODE_REBASE = "rebase";
@@ -32,12 +36,21 @@ export const GRAPH_CLIENT_SCRIPTS = [
   { output: "graph-client/pane-resizer.js", source: "pane-resizer.js" },
   { output: "graph-client/lane-renderer.js", source: "lane-renderer.js" },
   { output: "graph-client/diff-context.js", source: "diff-context.js" },
+  { output: "graph-client/review-viewer.js", source: "review-viewer.js" },
   { output: "graph-client/diff-viewer.js", source: "diff-viewer.js" },
   { output: "graph-client/command-sessions.js", source: "command-sessions.js" },
   { output: "graph-client/rebase-dialog.js", source: "rebase-dialog.js" },
   { output: "graph-client/interactive-rebase-dialog.js", source: "interactive-rebase-dialog.js" },
   { output: "graph-client/commit-actions.js", source: "commit-actions.js" },
   { output: "graph-client/commit-dialog.js", source: "commit-dialog.js" },
+  { output: "graph-client/view-router.js", source: "view-router.js" },
+  { output: "graph-client/patch-update-dialog.js", source: "patch-update-dialog.js" },
+  { output: "graph-client/dashboard.js", source: "dashboard.js" },
+  { output: "graph-client/meta-board-colors.js", source: "meta-board-colors.js" },
+  { output: "graph-client/markdown.js", source: "markdown.js" },
+  { output: "graph-client/meta-boards.js", source: "meta-boards.js" },
+  { output: "graph-client/sprints.js", source: "sprints.js" },
+  { output: "graph-client/phab-auth-dialog.js", source: "phab-auth-dialog.js" },
   { output: "graph-client/landing-dialog.js", source: "landing-dialog.js" },
   { output: "graph-client/new-patch-dialog.js", source: "new-patch-dialog.js" },
   { output: "graph-client/patch-dialog.js", source: "patch-dialog.js" },

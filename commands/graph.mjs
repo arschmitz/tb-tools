@@ -2,18 +2,27 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import openUrl from "open";
+import defaultConfig from "../lib/config.mjs";
 import { run } from "../lib/utils.mjs";
 import {
   DEFAULT_MAX_DIFF_BYTES,
+  DEFAULT_CONSOLE_PORT,
   GRAPH_CLIENT_SCRIPTS,
   GRAPH_CLIENT_STYLESHEETS,
 } from "./graph/constants.mjs";
 import { getCheckoutGraphData, getCheckoutGraphMetadata } from "./graph/data.mjs";
 import { getGraphOutputPath, writeGraphClientAssets } from "./graph/assets.mjs";
 import { startInteractiveGraphServer, waitForInteractiveServerClose } from "./graph/server.mjs";
-import { buildGraphHtml } from "./graph/templates.mjs";
+import {
+  buildGraphHtml,
+  buildInteractiveGraphLauncherHtml,
+} from "./graph/templates.mjs";
 
 export * from "./graph/data.mjs";
+export * from "./graph/dashboard.mjs";
+export * from "./graph/meta-boards.mjs";
+export * from "./graph/meta-board-store.mjs";
+export * from "./graph/sprints.mjs";
 export * from "./graph/actions.mjs";
 export * from "./graph/assets.mjs";
 export * from "./graph/branches.mjs";
@@ -21,6 +30,10 @@ export * from "./graph/commit.mjs";
 export * from "./graph/landing.mjs";
 export * from "./graph/new-patch.mjs";
 export * from "./graph/patching.mjs";
+export * from "./graph/patch-update.mjs";
+export * from "./graph/patch-update-memory.mjs";
+export * from "./graph/phab-auth.mjs";
+export * from "./graph/reviews.mjs";
 export * from "./graph/server.mjs";
 export * from "./graph/testing.mjs";
 
@@ -48,7 +61,7 @@ export function createGraphCommand({
     maxDiffBytes = DEFAULT_MAX_DIFF_BYTES,
     interactive = false,
     pageSize = 80,
-    port = 0,
+    port = forceInteractive ? DEFAULT_CONSOLE_PORT : 0,
     closeTabs = true,
   } = {}) {
     const count = Number(limit) || 80;
@@ -92,6 +105,7 @@ export function createGraphCommand({
         enabled: isInteractive,
         pageSize: commitPageSize,
         closeTabsOnShutdown,
+        aiEnabled: defaultConfig?.ai?.enabled === true,
         token,
       },
       stylesheetHref: isInteractive
@@ -101,17 +115,25 @@ export function createGraphCommand({
         isInteractive ? `/assets/${script.output}` : script.output
       )),
     });
+    const launcherHtml = isInteractive
+      ? buildInteractiveGraphLauncherHtml({
+        consolePath: "/",
+        tabName: `tb-tools-console-${token}`,
+      })
+      : undefined;
     const outputPath = getGraphOutputPath(output);
 
     if (isInteractive) {
       const graphServer = await startServer({
         html,
+        launcherHtml,
         graphs,
         token,
         pageSize: commitPageSize,
-        maxDiffBytes: diffByteLimit,
         port,
+        fallbackPort: forceInteractive && Number(port) === DEFAULT_CONSOLE_PORT ? 0 : undefined,
         closeBrowserTabsOnShutdown: closeTabsOnShutdown,
+        appConfig: defaultConfig,
         runCommand,
       });
 
@@ -121,7 +143,13 @@ export function createGraphCommand({
         : "Close the browser tab or press Ctrl-C to stop the server.");
 
       if (shouldOpen) {
-        await open(graphServer.url);
+        const launcherUrl = new URL("launch", graphServer.url);
+
+        // An OS-opened tab is browser-owned and cannot be closed with
+        // window.close(). The launcher creates the actual console tab, which
+        // the shutdown callback can close.
+        launcherUrl.searchParams.set("token", token);
+        await open(launcherUrl.href);
       }
 
       const closeReason = await waitForClose(graphServer.server);

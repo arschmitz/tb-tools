@@ -21,6 +21,10 @@ import {
   patchDialog,
   patchForm,
   patchRaw,
+  phabAuthCancel,
+  phabAuthClose,
+  phabAuthSignOut,
+  phabAuthStart,
   submitClose,
   submitDialog,
   testClose,
@@ -91,7 +95,20 @@ import {
   startGraphTestSession,
 } from "./test-dialog.js";
 import {
+  hideMetaBoards,
+  initializeMetaBoards,
+  openMetaBoardBugDetail,
+  openMetaBoardManager,
+  showMetaBoards,
+} from "./meta-boards.js";
+import {
+  hideSprints,
+  initializeSprints,
+  showSprint,
+} from "./sprints.js";
+import {
   answerSubmitPrompt,
+  cancelSubmitSession,
   checkoutSelectedCommit,
   closeAmendDialog,
   continueRebaseDialog,
@@ -99,6 +116,7 @@ import {
   openAmendDialog,
   openSubmitDialog,
   runCommitAction,
+  showDiff,
   submitAmendDialog,
 } from "./commit-actions.js";
 import {
@@ -110,6 +128,15 @@ import {
   scheduleCommitReviewerSearch,
   submitCommitDialog,
 } from "./commit-dialog.js";
+import { initializeDashboard, showDashboard } from "./dashboard.js";
+import { initializePatchUpdateDialog } from "./patch-update-dialog.js";
+import {
+  cancelPhabricatorAuthentication,
+  closePhabricatorAuthDialog,
+  openPhabricatorAuthDialog,
+  signOutOfPhabricator,
+  startPhabricatorAuthentication,
+} from "./phab-auth-dialog.js";
 import {
   closeRebaseDialog,
   handleRebaseDialogClick,
@@ -124,6 +151,41 @@ import {
 import { handleDiffContextClick } from "./diff-context.js";
 import { markBugForCheckin } from "./diff-viewer.js";
 import { hideCommitContextMenu } from "./lane-renderer.js";
+import { clearConsoleRoute, getConsoleRoute } from "./view-router.js";
+
+function openLinkInNewTab(link) {
+  if (!link?.hasAttribute("href")) {
+    return;
+  }
+
+  link.target = "_blank";
+  link.relList.add("noopener", "noreferrer");
+}
+
+function openLinksInNewTabs(root) {
+  if (root.matches?.("a[href]")) {
+    openLinkInNewTab(root);
+  }
+
+  root.querySelectorAll?.("a[href]").forEach(openLinkInNewTab);
+}
+
+openLinksInNewTabs(document);
+
+const linkTargetObserver = new MutationObserver((mutations) => {
+  mutations.forEach((mutation) => {
+    mutation.addedNodes.forEach(openLinksInNewTabs);
+  });
+});
+
+linkTargetObserver.observe(document.documentElement, {
+  childList: true,
+  subtree: true,
+});
+
+document.addEventListener("click", (event) => {
+  openLinkInNewTab(event.target.closest("a[href]"));
+}, true);
 
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".context-menu")) {
@@ -158,6 +220,18 @@ document.addEventListener("click", (event) => {
 
     if (menuAction === "commit") {
       openCommitDialog();
+    }
+
+    if (menuAction === "phabricator-auth") {
+      openPhabricatorAuthDialog();
+    }
+
+    if (menuAction === "meta-boards-add") {
+      openMetaBoardManager({ focusAdd: true });
+    }
+
+    if (menuAction === "meta-boards-manage") {
+      openMetaBoardManager();
     }
 
     if (menuAction === "lint-all" || menuAction === "lint-outgoing") {
@@ -336,7 +410,12 @@ commitReviewerList.addEventListener("mousedown", (event) => {
 commitReviewerPills.addEventListener("click", (event) => {
   handleCommitReviewerPillEvent(event);
 });
+phabAuthClose.addEventListener("click", closePhabricatorAuthDialog);
+phabAuthCancel.addEventListener("click", cancelPhabricatorAuthentication);
+phabAuthSignOut.addEventListener("click", signOutOfPhabricator);
+phabAuthStart.addEventListener("click", startPhabricatorAuthentication);
 submitClose.addEventListener("click", closeSubmitDialog);
+submitDialog.querySelector(".submit-cancel").addEventListener("click", cancelSubmitSession);
 submitDialog.querySelectorAll("button[data-answer]").forEach((button) => {
   button.addEventListener("click", () =>
     answerSubmitPrompt(button.dataset.answer === "true"),
@@ -513,10 +592,23 @@ export function renderGraph(index) {
   }
 }
 
+let lastGraphTabIndex = Number(
+  document.querySelector(".tab[data-index].active")?.dataset.index || 0,
+);
+
 export function showTab(index) {
+  lastGraphTabIndex = index;
+  clearConsoleRoute();
   document
     .querySelectorAll(".tab, .panel")
     .forEach((node) => node.classList.remove("active"));
+  const dashboardPanel = document.querySelector(".dashboard-panel");
+
+  if (dashboardPanel) {
+    dashboardPanel.hidden = true;
+  }
+  hideMetaBoards();
+  hideSprints();
   testOutputPanel.hidden = true;
   testOutputTab.classList.remove("active");
   document
@@ -534,12 +626,58 @@ document.querySelectorAll(".tab[data-index]").forEach((tab) => {
   tab.addEventListener("click", () => showTab(Number(tab.dataset.index)));
 });
 
+initializeDashboard();
+initializePatchUpdateDialog();
+initializeMetaBoards();
+initializeSprints({ openBugDetail: openMetaBoardBugDetail });
+
+function applyConsoleRoute() {
+  const route = getConsoleRoute();
+
+  if (route?.view === "dashboard") {
+    showDashboard({ updateLocation: false });
+    return;
+  }
+
+  if (route?.view === "meta-boards") {
+    showMetaBoards({ boardId: route.boardId, updateLocation: false });
+    return;
+  }
+
+  if (route?.view === "sprint") {
+    showSprint({
+      boardId: route.boardId,
+      sprintId: route.sprintId,
+      sprintView: route.sprintView,
+      updateLocation: false,
+    });
+    return;
+  }
+
+  if (!window.location.hash) {
+    showTab(lastGraphTabIndex);
+  }
+}
+
+window.addEventListener("hashchange", applyConsoleRoute);
+window.addEventListener("popstate", applyConsoleRoute);
+applyConsoleRoute();
+
 document.querySelectorAll(".pane-resizer").forEach((resizer) => {
   resizer.addEventListener("pointerdown", startPaneResize);
   resizer.addEventListener("keydown", resizePaneFromKeyboard);
 });
 
 window.addEventListener("scroll", trackScrollDirection, { passive: true });
+window.addEventListener("tb-phab-authenticated", () => {
+  graphStates.forEach((state, index) => {
+    const commit = state.commits.find((item) => item.hash === state.selectedHash);
+
+    if (commit) {
+      showDiff(state.graph, index, commit).catch(() => {});
+    }
+  });
+});
 window.addEventListener(
   "resize",
   () => {

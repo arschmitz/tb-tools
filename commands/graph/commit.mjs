@@ -5,6 +5,7 @@ import {
   installTbToolsCommitMsgHook,
 } from "../../lib/commit-message.mjs";
 import { getGitAddAllArgs } from "./data.mjs";
+import { getNextBugBranchName } from "./branches.mjs";
 
 const DEFAULT_REVIEWER_LIMIT = 30;
 export const MIN_REVIEWER_QUERY_LENGTH = 3;
@@ -56,12 +57,12 @@ export function getBugIdFromBranch(branch = "") {
   return match ? match[1] : "";
 }
 
-function normalizeBugId(bugId) {
+export function normalizeGraphCommitBugId(bugId) {
   const normalized = normalizeText(bugId);
 
   if (!/^\d{4,8}$/.test(normalized)) {
     throw createStatusError(
-      "A Bugzilla bug ID is required when the current branch is not a Bug branch.",
+      "A Bugzilla bug ID is required for a new commit.",
     );
   }
 
@@ -71,7 +72,7 @@ function normalizeBugId(bugId) {
 export function getGraphCommitPrefix({ branch = "", bugId = "" } = {}) {
   const branchBugId = getBugIdFromBranch(branch);
 
-  return `Bug ${branchBugId || normalizeBugId(bugId)}`;
+  return `Bug ${branchBugId || normalizeGraphCommitBugId(bugId)}`;
 }
 
 function getReviewerCandidateValue(reviewer) {
@@ -409,18 +410,44 @@ export async function getGraphCommitMetadata({ graph, runCommand = run } = {}) {
       silent: true,
     })
   ).trim();
-  const bugId = getBugIdFromBranch(branch);
-
   graph.branch = branch || "(detached)";
 
   return {
     label: graph.label,
     path: graph.path,
     branch: graph.branch,
-    bugId,
-    bugRequired: !bugId,
-    prefix: bugId ? `Bug ${bugId}` : "",
+    bugId: "",
+    bugRequired: true,
+    prefix: "",
   };
+}
+
+async function createGraphCommitBranch({
+  graph,
+  bugId,
+  runCommand,
+}) {
+  const branchData = await runCommand({
+    cmd: "git",
+    args: ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+  const branch = getNextBugBranchName(
+    branchData.split(/\r?\n/).map((name) => name.trim()).filter(Boolean),
+    bugId,
+  );
+
+  await runCommand({
+    cmd: "git",
+    args: ["switch", "-c", branch],
+    cwd: graph.path,
+    silent: true,
+  });
+
+  graph.branch = branch;
+  return branch;
 }
 
 export async function createGraphCommit({
@@ -432,10 +459,17 @@ export async function createGraphCommit({
     throw createStatusError("Unknown graph checkout.", 404);
   }
 
-  const metadata = await getGraphCommitMetadata({ graph, runCommand });
+  await getGraphCommitMetadata({ graph, runCommand });
+  const bugId = normalizeGraphCommitBugId(options.bugId);
+  const branch = await createGraphCommitBranch({
+    graph,
+    bugId,
+    runCommand,
+  });
+
   const commitMessage = buildGraphCommitMessage({
-    branch: metadata.branch,
-    bugId: options.bugId,
+    branch,
+    bugId,
     summary: options.summary,
     reviewers: options.reviewers,
   });
@@ -475,7 +509,7 @@ export async function createGraphCommit({
     action: "commit",
     label: graph.label,
     path: graph.path,
-    branch: metadata.branch,
+    branch,
     hash,
     commitMessage,
     output,

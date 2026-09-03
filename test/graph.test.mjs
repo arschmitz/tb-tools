@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -21,10 +22,13 @@ import {
   createBranchForCommit,
   createGraphCommit,
   createGraphCommand,
+  createPhabricatorWebSession,
   getGraphCommitMessage,
   getGraphCommitIntegrationStatus,
+  getGraphCommitReview,
   getGraphCommitMetadata,
   getGraphCurrentCommitMessage,
+  getGraphDirtyCheckouts,
   discardWorkingTreeChanges,
   getGraphOriginMainStatus,
   getGraphRustUpstreamStatus,
@@ -35,6 +39,7 @@ import {
   getCheckoutCommitPage,
   getCheckoutGraphData,
   getCheckoutGraphMetadata,
+  getCommitDiff,
   getCommitDiffs,
   getWorkingTreeCommits,
   getWorkingTreeDiff,
@@ -76,8 +81,12 @@ import {
   formatPrettyDiffHtml,
   splitPrettyDiffFiles,
 } from "../commands/graph/diff-renderer.mjs";
+import { expandDiffContext } from "../commands/graph/client/diff-context.js";
 import { DEFAULT_HEARTBEAT_TIMEOUT_MS } from "../commands/graph/constants.mjs";
-import { buildGraphHtml } from "../commands/graph/templates.mjs";
+import {
+  buildGraphHtml,
+  buildInteractiveGraphLauncherHtml,
+} from "../commands/graph/templates.mjs";
 import {
   ensureTbToolsIdInCommitMessage,
   installTbToolsCommitMsgHook,
@@ -93,12 +102,21 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "pane-resizer.js", output: "graph-client/pane-resizer.js" },
   { source: "lane-renderer.js", output: "graph-client/lane-renderer.js" },
   { source: "diff-context.js", output: "graph-client/diff-context.js" },
+  { source: "review-viewer.js", output: "graph-client/review-viewer.js" },
   { source: "diff-viewer.js", output: "graph-client/diff-viewer.js" },
   { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
   { source: "rebase-dialog.js", output: "graph-client/rebase-dialog.js" },
   { source: "interactive-rebase-dialog.js", output: "graph-client/interactive-rebase-dialog.js" },
   { source: "commit-actions.js", output: "graph-client/commit-actions.js" },
   { source: "commit-dialog.js", output: "graph-client/commit-dialog.js" },
+  { source: "view-router.js", output: "graph-client/view-router.js" },
+  { source: "patch-update-dialog.js", output: "graph-client/patch-update-dialog.js" },
+  { source: "dashboard.js", output: "graph-client/dashboard.js" },
+  { source: "meta-board-colors.js", output: "graph-client/meta-board-colors.js" },
+  { source: "markdown.js", output: "graph-client/markdown.js" },
+  { source: "meta-boards.js", output: "graph-client/meta-boards.js" },
+  { source: "sprints.js", output: "graph-client/sprints.js" },
+  { source: "phab-auth-dialog.js", output: "graph-client/phab-auth-dialog.js" },
   { source: "landing-dialog.js", output: "graph-client/landing-dialog.js" },
   { source: "new-patch-dialog.js", output: "graph-client/new-patch-dialog.js" },
   { source: "patch-dialog.js", output: "graph-client/patch-dialog.js" },
@@ -108,6 +126,20 @@ const GRAPH_CLIENT_TEST_ASSETS = [
 
 test("interactive graph server defaults to a 24 hour heartbeat timeout", () => {
   assert.equal(DEFAULT_HEARTBEAT_TIMEOUT_MS, 24 * 60 * 60 * 1000);
+});
+
+test("run streams captured output while a command is active", async () => {
+  const chunks = [];
+  const output = await run({
+    cmd: process.execPath,
+    args: ["-e", 'process.stdout.write("first\\nsecond\\n")'],
+    capture: true,
+    silent: true,
+    onStdout: (chunk) => chunks.push(chunk),
+  });
+
+  assert.equal(output, "first\nsecond\n");
+  assert.equal(chunks.join(""), output);
 });
 
 function readGraphClientScripts() {
@@ -1488,6 +1520,15 @@ test("runInteractiveSubmitCommand routes child yes/no prompts through submit ses
   );
 });
 
+test("getInteractiveYesNoPrompt detects a prompt appended to prior output", () => {
+  assert.equal(
+    getInteractiveYesNoPrompt(
+      "Tests completed successfully. Submit to https://phabricator.services.mozilla.com (YES/No/Always)? ",
+    ),
+    "Tests completed successfully. Submit to https://phabricator.services.mozilla.com (YES/No/Always)?",
+  );
+});
+
 test("runGraphMachActionSession keeps run active when mach exits but the process group remains", async (t) => {
   const originalKill = process.kill;
   const killChecks = [];
@@ -1538,6 +1579,78 @@ test("runGraphMachActionSession keeps run active when mach exits but the process
   assert.deepEqual(killChecks, [[-4321, 0]]);
   assert.match(session.output, /\$ \.\.\/mach build/);
   assert.match(session.output, /\$ \.\.\/mach run/);
+});
+
+test("expandDiffContext moves its controls after each revealed page", () => {
+  let expanderPosition;
+  const rows = Array.from({ length: 25 }, () => {
+    let collapsed = true;
+
+    return {
+      classList: {
+        remove(className) {
+          assert.equal(className, "collapsed-context");
+          collapsed = false;
+        },
+      },
+      dataset: { contextGroup: "context" },
+      get collapsed() {
+        return collapsed;
+      },
+      hidden: true,
+      after(node) {
+        expanderPosition = { node, row: this };
+      },
+    };
+  });
+  const allButton = {
+    dataset: {
+      contextPosition: "middle",
+      expandMode: "all",
+    },
+    hidden: false,
+    textContent: "",
+  };
+  const expander = {
+    dataset: { contextDirection: "start" },
+    querySelectorAll() {
+      return [button, allButton];
+    },
+  };
+  const body = {
+    querySelectorAll(selector) {
+      assert.equal(selector, ".collapsed-context");
+      return rows;
+    },
+  };
+  const button = {
+    dataset: {
+      contextGroup: "context",
+      contextPosition: "middle",
+      expandMode: "next",
+    },
+    closest(selector) {
+      if (selector === "tbody") {
+        return body;
+      }
+
+      if (selector === ".diff-context-expander") {
+        return expander;
+      }
+
+      return null;
+    },
+    setAttribute() {},
+    textContent: "",
+  };
+
+  expandDiffContext(button);
+
+  assert.equal(rows.slice(0, 20).every((row) => !row.collapsed), true);
+  assert.equal(rows.slice(20).every((row) => row.collapsed), true);
+  assert.deepEqual(expanderPosition, { node: expander, row: rows[19] });
+  assert.equal(button.textContent, "Expand 5 lines");
+  assert.equal(allButton.hidden, true);
 });
 
 test("splitPrettyDiffFiles groups patch output by file", () => {
@@ -1595,15 +1708,18 @@ test("formatPrettyDiffHtml renders pretty-diff style markup", () => {
   );
   assert.match(
     html,
-    /<div class="file-diff"><table class="diff-table"><tbody>/,
+    /<div class="file-diff"><table class="diff-table"><colgroup><col class="diff-gutter-column"><col class="diff-gutter-column"><col><\/colgroup><tbody>/,
   );
   assert.doesNotMatch(html, /diff --git/);
   assert.doesNotMatch(html, /index 123\.\.456/);
   assert.doesNotMatch(html, /--- a\/file\.txt/);
   assert.doesNotMatch(html, /\+\+\+ b\/file\.txt/);
-  assert.match(html, /class="diff-line info"/);
-  assert.match(html, /<span class="line-content">@@ -10,2 \+20,2 @@<\/span>/);
+  assert.doesNotMatch(html, /class="diff-line info"/);
+  assert.doesNotMatch(html, /@@ -10,2 \+20,2 @@/);
   assert.match(html, /class="diff-line context"/);
+  assert.match(html, /data-file-path="file.txt"/);
+  assert.match(html, /data-old-file-path="file.txt" data-new-file-path="file.txt"/);
+  assert.match(html, /data-old-line="10" data-new-line="20"/);
   assert.match(html, /class="line-number old-line">10<\/td>/);
   assert.match(html, /class="line-number new-line">20<\/td>/);
   assert.match(html, /<span class="line-content">unchanged<\/span>/);
@@ -1623,6 +1739,22 @@ test("formatPrettyDiffHtml renders pretty-diff style markup", () => {
   );
   assert.match(html, /data-path="file.txt"/);
 
+  const renamedFileHtml = formatPrettyDiffHtml(
+    [
+      "diff --git a/old-file.txt b/new-file.txt",
+      "similarity index 100%",
+      "rename from old-file.txt",
+      "rename to new-file.txt",
+      "@@ -1 +1 @@",
+      " unchanged",
+    ].join("\n"),
+  );
+
+  assert.match(
+    renamedFileHtml,
+    /data-old-file-path="old-file.txt" data-new-file-path="new-file.txt"/,
+  );
+
   const collapsedContextHtml = formatPrettyDiffHtml(
     [
       "diff --git a/context.txt b/context.txt",
@@ -1639,19 +1771,69 @@ test("formatPrettyDiffHtml renders pretty-diff style markup", () => {
       " context 8",
       " context 9",
       " context 10",
+      "-old final value",
+      "+new final value",
     ].join("\n"),
   );
 
   assert.match(
     collapsedContextHtml,
-    /<button class="diff-context-expander-button" type="button" data-context-group="diff-context-0-0" aria-expanded="false">Expand 4 hidden lines<\/button>/,
+    /<button class="diff-context-expander-button" type="button" data-context-group="diff-context-0-0" data-context-position="middle" data-expand-mode="next" aria-expanded="false">Expand 4 lines<\/button>/,
   );
+  assert.doesNotMatch(collapsedContextHtml, /data-expand-mode="all"/);
   assert.match(
     collapsedContextHtml,
-    /<tr class="diff-line context collapsed-context" hidden data-context-group="diff-context-0-0">/,
+    /<tr class="diff-line context collapsed-context" data-old-line="5" data-new-line="5" hidden data-context-group="diff-context-0-0">/,
   );
   assert.match(collapsedContextHtml, /class="line-number old-line">2<\/td>/);
   assert.match(collapsedContextHtml, /class="line-number old-line">11<\/td>/);
+
+  const edgeContextHtml = formatPrettyDiffHtml(
+    [
+      "diff --git a/edge-context.txt b/edge-context.txt",
+      "@@ -1,22 +1,22 @@",
+      " leading context 1",
+      " leading context 2",
+      " leading context 3",
+      " leading context 4",
+      " leading context 5",
+      " leading context 6",
+      " leading context 7",
+      " leading context 8",
+      " leading context 9",
+      " leading context 10",
+      "-old value",
+      "+new value",
+      " trailing context 1",
+      " trailing context 2",
+      " trailing context 3",
+      " trailing context 4",
+      " trailing context 5",
+      " trailing context 6",
+      " trailing context 7",
+      " trailing context 8",
+      " trailing context 9",
+      " trailing context 10",
+    ].join("\n"),
+  );
+
+  assert.match(edgeContextHtml, />Expand 7 lines above<\/button>/);
+  assert.match(edgeContextHtml, />Expand 7 lines below<\/button>/);
+
+  const largeContextHtml = formatPrettyDiffHtml(
+    [
+      "diff --git a/large-context.txt b/large-context.txt",
+      "@@ -1,32 +1,32 @@",
+      "-old value",
+      "+new value",
+      ...Array.from({ length: 30 }, (_, index) => ` context ${index + 1}`),
+      "-old final value",
+      "+new final value",
+    ].join("\n"),
+  );
+
+  assert.match(largeContextHtml, />Expand 20 lines<\/button>/);
+  assert.match(largeContextHtml, />Show all 24 lines<\/button>/);
 
   const newFileHtml = formatPrettyDiffHtml(
     [
@@ -1727,6 +1909,25 @@ test("getCommitDiffs collects git show output by commit hash", async () => {
   assert.equal(diffs.abc123.truncated, false);
   assert.equal(diffs.abc123.insertions, 1);
   assert.equal(diffs.abc123.deletions, 1);
+});
+
+test("getCommitDiff fetches full file context on request", async () => {
+  const commands = [];
+  const diff = await getCommitDiff({
+    cwd: "/repo/comm",
+    hash: "abc123",
+    fullFile: true,
+    maxDiffBytes: 0,
+    runCommand: async (command) => {
+      commands.push(command);
+      return "diff --git a/file.txt b/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    },
+  });
+
+  assert.equal(commands[0].cmd, "git");
+  assert.equal(commands[0].args.includes("--unified=2147483647"), true);
+  assert.equal(diff.truncated, false);
+  assert.match(diff.html, /pretty-file/);
 });
 
 test("getWorkingTreeCommits returns one uncommitted item for staged, unstaged, and untracked changes", async () => {
@@ -1952,6 +2153,526 @@ test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", as
   });
 });
 
+test("getGraphCommitReview returns regular comments and inline suggestions", async () => {
+  const calls = [];
+  const phabCalls = [];
+  const originalSource = Array.from(
+    { length: 100 },
+    (_, index) => index === 98 ? "const old = true;" : `line ${index + 1};`,
+  );
+  const revisedSource = originalSource.with(98, "const reviewed = true;");
+  const makeDiff = (id, dateCreated, source) => ({
+    dateCreated,
+    id,
+    changes: [{
+      currentPath: "comm/mail/base/content/example.js",
+      hunks: [{
+        newOffset: "1",
+        corpus: `${source.map((line) => `+${line}`).join("\n")}\n`,
+      }],
+    }],
+  });
+  const review = await getGraphCommitReview({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      commits: [{ hash: "abc123", subject: "Fix thing" }],
+    },
+    hash: "abc123",
+    runCommand: async (command) => {
+      calls.push(command);
+      return "Bug 123456 - Fix thing\n\nDifferential Revision: https://phabricator.services.mozilla.com/D987654\n";
+    },
+    phab: async (request) => {
+      phabCalls.push(request);
+
+      if (request.route === "user.query") {
+        return {
+          result: [{
+            phid: "PHID-USER-reviewer",
+            realName: "Reviewing Person",
+            userName: "reviewer",
+          }],
+        };
+      }
+
+      if (request.route === "differential.query") {
+        return { result: [{ authorPHID: "PHID-USER-author" }] };
+      }
+
+      if (request.route === "differential.getrevision") {
+        return {
+          result: {
+            diffs: {
+              42: makeDiff(42, 1710000000, originalSource),
+              43: makeDiff(43, 1710000003, revisedSource),
+            },
+          },
+        };
+      }
+
+      return {
+        result: {
+          data: [
+            {
+              id: "transaction-comment",
+              phid: "PHID-XACT-comment",
+              type: "comment",
+              authorPHID: "PHID-USER-reviewer",
+              dateCreated: 1710000000,
+              fields: {},
+              comments: [
+                {
+                  id: 100,
+                  phid: "PHID-XCMT-regular",
+                  authorPHID: "PHID-USER-reviewer",
+                  dateCreated: 1710000000,
+                  content: { raw: "Looks good overall." },
+                },
+              ],
+            },
+            {
+              id: "transaction-inline",
+              phid: "PHID-XACT-inline",
+              type: "inline",
+              authorPHID: "PHID-USER-reviewer",
+              dateCreated: 1710000001,
+              fields: {
+                diff: { id: 42 },
+                length: 2,
+                line: 42,
+                path: "comm/mail/base/content/example.js",
+              },
+              comments: [
+                {
+                  id: 101,
+                  phid: "PHID-XCMT-inline",
+                  authorPHID: "PHID-USER-reviewer",
+                  dateCreated: 1710000001,
+                  content: { raw: "```suggestion\nconst reviewed = true;\n```" },
+                },
+              ],
+            },
+            {
+              id: "transaction-code-suggestion",
+              phid: "PHID-XACT-code-suggestion",
+              type: "inline",
+              authorPHID: "PHID-USER-reviewer",
+              dateCreated: 1710000002,
+              fields: {
+                diff: { id: 42 },
+                length: 1,
+                line: 99,
+                path: "comm/mail/base/content/example.js",
+              },
+              comments: [
+                {
+                  id: 102,
+                  phid: "PHID-XCMT-code-suggestion",
+                  authorPHID: "PHID-USER-reviewer",
+                  dateCreated: 1710000002,
+                  content: { raw: "" },
+                },
+              ],
+            },
+            {
+              id: "transaction-request-changes",
+              phid: "PHID-XACT-request-changes",
+              type: "request-changes",
+              authorPHID: "PHID-USER-reviewer",
+              dateCreated: 1710000003,
+              fields: {},
+              comments: [],
+            },
+            {
+              id: "transaction-author-note",
+              phid: "PHID-XACT-author-note",
+              type: "comment",
+              authorPHID: "PHID-USER-author",
+              dateCreated: 1710000004,
+              fields: {},
+              comments: [{
+                id: 103,
+                phid: "PHID-XCMT-author-note",
+                authorPHID: "PHID-USER-author",
+                dateCreated: 1710000004,
+                content: { raw: "try: https://treeherder.mozilla.org/jobs?repo=try-comm-central" },
+              }],
+            },
+          ],
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [["log", "-1", "--format=%B", "abc123"]],
+  );
+  assert.deepEqual(phabCalls, [
+    {
+      route: "transaction.search",
+      params: { objectIdentifier: "D987654", limit: 100 },
+    },
+    {
+      route: "differential.query",
+      params: { ids: [987654] },
+    },
+    {
+      route: "user.query",
+      params: { phids: ["PHID-USER-reviewer"] },
+    },
+    {
+      route: "differential.getrevision",
+      params: { revision_id: 987654 },
+    },
+  ]);
+  assert.deepEqual(review.comments, [{
+    id: "PHID-XCMT-regular",
+    action: "comment",
+    author: "Reviewing Person",
+    authorPhid: "PHID-USER-reviewer",
+    content: "Looks good overall.",
+    dateCreated: 1710000000,
+    url: "https://phabricator.services.mozilla.com/D987654#inline-100",
+  }]);
+  assert.deepEqual(review.inlineComments, [{
+    id: "PHID-XCMT-inline",
+    action: "comment",
+    author: "Reviewing Person",
+    authorPhid: "PHID-USER-reviewer",
+    codeSuggestion: {
+      content: "const reviewed = true;",
+      url: "https://phabricator.services.mozilla.com/D987654#inline-101",
+    },
+    commentId: "PHID-XCMT-inline",
+    content: "",
+    dateCreated: 1710000001,
+    diffId: 42,
+    filePath: "comm/mail/base/content/example.js",
+    isNewFile: null,
+    lineLength: 2,
+    lineNumber: 42,
+    url: "https://phabricator.services.mozilla.com/D987654#inline-101",
+  }, {
+    id: "PHID-XCMT-code-suggestion",
+    action: "comment",
+    author: "Reviewing Person",
+    authorPhid: "PHID-USER-reviewer",
+    codeSuggestion: {
+      content: "const reviewed = true;",
+      url: "https://phabricator.services.mozilla.com/D987654#inline-102",
+    },
+    commentId: "PHID-XCMT-code-suggestion",
+    content: "",
+    dateCreated: 1710000002,
+    diffId: 42,
+    filePath: "comm/mail/base/content/example.js",
+    isNewFile: null,
+    lineLength: 1,
+    lineNumber: 99,
+    url: "https://phabricator.services.mozilla.com/D987654#inline-102",
+  }]);
+  assert.equal(review.revision, "D987654");
+});
+
+test("getGraphCommitReview uses the authenticated web session for a prose comment suggestion", async () => {
+  const webSuggestionCalls = [];
+  const review = await getGraphCommitReview({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      commits: [{ hash: "abc123", subject: "Fix thing" }],
+    },
+    hash: "abc123",
+    runCommand: async () => (
+      "Bug 123456 - Fix thing\n\nDifferential Revision: https://phabricator.services.mozilla.com/D290877\n"
+    ),
+    phab: async (request) => {
+      if (request.route === "user.query") {
+        return { result: [] };
+      }
+
+      return {
+        result: {
+          data: [{
+            id: "transaction-inline",
+            type: "inline",
+            fields: {
+              diff: { id: 42 },
+              length: 1,
+              line: 9,
+              path: "comm/mail/locales/en-US/messenger/selectAll.ftl",
+            },
+            comments: [{
+              id: 1668758,
+              content: {
+                raw: "Maybe refer to it by name so it is absolutely clear.",
+              },
+            }],
+          }],
+        },
+      };
+    },
+    getWebSuggestions: async (request) => {
+      webSuggestionCalls.push(request);
+      return new Map([[
+        "1668758",
+        {
+          content: "# The select-all-total-count span may or may not be visible forming",
+        },
+      ]]);
+    },
+  });
+
+  assert.deepEqual(webSuggestionCalls, [{
+    revision: "D290877",
+    inlineComments: [{ id: "1668758", diffId: 42 }],
+  }]);
+  assert.equal(review.inlineComments[0].content, "Maybe refer to it by name so it is absolutely clear.");
+  assert.deepEqual(review.inlineComments[0].codeSuggestion, {
+    content: "# The select-all-total-count span may or may not be visible forming",
+    url: "https://phabricator.services.mozilla.com/D290877#inline-1668758",
+  });
+});
+
+test("Phabricator web session authenticates and caches inline suggestions", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-auth-"));
+  const launches = [];
+  let signedIn = false;
+  let suggestionFetches = 0;
+  const restoredCookies = [];
+  const page = {
+    async goto(url) {
+      this.url = url;
+    },
+  };
+  const browser = {
+    async launchPersistentContext(profilePath, options) {
+      launches.push({ options, profilePath });
+      return {
+        pages: () => [page],
+        async newPage() {
+          return page;
+        },
+        async addCookies(cookies) {
+          restoredCookies.push(...cookies);
+        },
+        async close() {},
+        async storageState() {
+          return {
+            cookies: [{ name: "session", value: "authenticated" }],
+          };
+        },
+      };
+    },
+  };
+  const session = createPhabricatorWebSession({
+    browserLoader: async () => browser,
+    getPageAuthenticationState: async () => signedIn,
+    getPageSuggestions: async () => {
+      suggestionFetches++;
+      return {
+        1668758: {
+          content: "suggested replacement",
+        },
+      };
+    },
+    homeDirectory: directory,
+  });
+
+  t.after(async () => {
+    await session.close();
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  assert.equal((await session.getStatus()).state, "disconnected");
+  assert.equal((await session.startAuthentication()).state, "pending");
+
+  signedIn = true;
+  assert.equal((await session.getStatus()).state, "connected");
+
+  const first = await session.getSuggestions({
+    revision: "D290877",
+    inlineComments: [{ id: "1668758", diffId: 42 }],
+  });
+  const second = await session.getSuggestions({
+    revision: "D290877",
+    inlineComments: [{ id: "1668758", diffId: 42 }],
+  });
+
+  assert.deepEqual(first.get("1668758"), {
+    content: "suggested replacement",
+  });
+  assert.equal(second, first);
+  assert.equal(suggestionFetches, 1);
+  assert.equal(launches[0].options.headless, false);
+  assert.equal(launches.at(-1).options.headless, true);
+  assert.deepEqual(restoredCookies, [{ name: "session", value: "authenticated" }]);
+  assert.equal((await session.signOut()).state, "disconnected");
+});
+
+test("Phabricator web session keeps Bugzilla OAuth open until Phabricator confirms it", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-oauth-"));
+  const page = {
+    url: "",
+    async goto(url) {
+      this.url = url;
+    },
+  };
+  let contextClosed = false;
+  const browser = {
+    async launchPersistentContext() {
+      return {
+        pages: () => [page],
+        async newPage() {
+          return page;
+        },
+        async storageState() {
+          return { cookies: [] };
+        },
+        async close() {
+          contextClosed = true;
+        },
+      };
+    },
+  };
+  const session = createPhabricatorWebSession({
+    browserLoader: async () => browser,
+    getPageAuthenticationState: async (currentPage) => (
+      currentPage.url.startsWith("https://phabricator.services.mozilla.com/") &&
+      !currentPage.url.includes("/auth/login/") &&
+      !currentPage.url.includes("/auth/callback/")
+    ),
+    homeDirectory: directory,
+  });
+
+  t.after(async () => {
+    await session.close();
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  await session.startAuthentication();
+  page.url = "https://bugzilla.mozilla.org/login";
+
+  assert.equal((await session.getStatus()).state, "pending");
+  assert.equal(contextClosed, false);
+
+  page.url = "https://phabricator.services.mozilla.com/auth/callback/";
+  assert.equal((await session.getStatus()).state, "pending");
+  assert.equal(contextClosed, false);
+
+  page.url = "https://phabricator.services.mozilla.com/D290877";
+  assert.equal((await session.getStatus()).state, "connected");
+  assert.equal(contextClosed, true);
+  assert.equal(page.url, "https://phabricator.services.mozilla.com/settings/");
+});
+
+test("Phabricator web session fetches a missing suggestion from its revision diff", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-diff-"));
+  const page = {
+    async close() {},
+    async goto(url) {
+      this.url = url;
+    },
+  };
+  const browser = {
+    async launchPersistentContext() {
+      return {
+        pages: () => [page],
+        async newPage() {
+          return page;
+        },
+        async addCookies() {},
+        async close() {},
+        async storageState() {
+          return { cookies: [] };
+        },
+      };
+    },
+  };
+  const session = createPhabricatorWebSession({
+    browserLoader: async () => browser,
+    getPageAuthenticationState: async () => true,
+    getPageSuggestions: async (currentPage) => (
+      currentPage.url.includes("?id=42")
+        ? { 1668758: { content: "suggested replacement" } }
+        : {}
+    ),
+    homeDirectory: directory,
+  });
+
+  t.after(async () => {
+    await session.close();
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  await mkdir(path.join(directory, ".tb-tools", "phabricator-browser"), {
+    recursive: true,
+  });
+  const suggestions = await session.getSuggestions({
+    revision: "D290877",
+    inlineComments: [{ id: "1668758", diffId: 42 }],
+  });
+
+  assert.deepEqual(suggestions.get("1668758"), {
+    content: "suggested replacement",
+  });
+  assert.equal(page.url, "https://phabricator.services.mozilla.com/D290877?id=42");
+});
+
+test("Phabricator web session saves a reply draft with the revision form", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-draft-"));
+  const profilePath = path.join(directory, "profile");
+  let savedComment = "";
+  const page = {
+    async goto() {},
+    async evaluate(callback, value) {
+      if (String(callback).includes("new FormData")) {
+        savedComment = value;
+        return;
+      }
+
+      return savedComment;
+    },
+  };
+  const browser = {
+    async launchPersistentContext() {
+      return {
+        pages: () => [page],
+        async addCookies() {},
+        async close() {},
+        async newPage() {
+          return page;
+        },
+        async storageState() {
+          return { cookies: [] };
+        },
+      };
+    },
+  };
+  await mkdir(profilePath, { recursive: true });
+  const session = createPhabricatorWebSession({
+    browserLoader: async () => browser,
+    getPageAuthenticationState: async () => true,
+    homeDirectory: directory,
+    profilePath,
+  });
+
+  t.after(async () => {
+    await session.close();
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  const result = await session.saveRevisionDraft({
+    revision: "D123456",
+    draftBlock: "Draft reply",
+  });
+
+  assert.equal(result.comment, "Draft reply");
+  assert.equal(savedComment, "Draft reply");
+});
+
 test("getGraphCommitIntegrationStatus includes Notion stories by bug id", async () => {
   const notionCalls = [];
   const result = await getGraphCommitIntegrationStatus({
@@ -2014,6 +2735,76 @@ test("getGraphCommitIntegrationStatus includes Notion stories by bug id", async 
       },
     ],
   });
+});
+
+test("getGraphCommitIntegrationStatus hides Notion when its token is invalid", async () => {
+  const result = await getGraphCommitIntegrationStatus({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      commits: [{ hash: "abc123", subject: "Bug 123456 - Fix thing" }],
+    },
+    hash: "abc123",
+    runCommand: async (command) => (
+      command.args[0] === "log" && command.args.includes("--format=%B")
+        ? "Bug 123456 - Fix thing. r=#reviewers\n"
+        : ""
+    ),
+    getBug: async () => ({ bugs: [] }),
+    phab: async () => ({ result: [] }),
+    getNotionStoriesByBugId: async () => {
+      const error = new Error("Notion request failed (401 Unauthorized).");
+
+      error.statusCode = 401;
+      throw error;
+    },
+  });
+
+  assert.equal(result.notion, null);
+});
+
+test("interactive graph server disables Notion after an invalid token", async (t) => {
+  let notionCalls = 0;
+  const serverInfo = await startInteractiveGraphServer({
+    getBug: async () => ({ bugs: [] }),
+    getNotionStoriesByBugId: async () => {
+      notionCalls++;
+      const error = new Error("Notion request failed (403 Forbidden).");
+
+      error.statusCode = 403;
+      throw error;
+    },
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      commits: [{ hash: "abc123", subject: "Bug 123456 - Fix thing" }],
+    }],
+    html: "<!doctype html><p>graph</p>",
+    phab: async () => ({ result: [] }),
+    runCommand: async (command) => (
+      command.args[0] === "log" && command.args.includes("--format=%B")
+        ? "Bug 123456 - Fix thing. r=#reviewers\n"
+        : ""
+    ),
+    token: "secret",
+  });
+
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const endpoint = new URL(
+    "api/graph/0/integration/abc123?token=secret",
+    serverInfo.url,
+  );
+  const first = await (await fetch(endpoint)).json();
+  const second = await (await fetch(endpoint)).json();
+
+  assert.equal(first.notion, null);
+  assert.equal(second.notion, null);
+  assert.equal(notionCalls, 1);
 });
 
 test("getGraphCommitIntegrationStatus keeps subject-matched legacy try runs", async (t) => {
@@ -2400,8 +3191,10 @@ test("searchGraphCommitReviewers returns no suggestions when the group route is 
   assert.deepEqual(reviewers, []);
 });
 
-test("createGraphCommit stages changes and commits with generated message", async () => {
+test("createGraphCommit creates a new Bug branch from a patch branch", async () => {
   const calls = [];
+  const refs = new Map([["Bug-1234567_2", "base000"]]);
+  let branch = "Bug-1234567_2";
   const graph = {
     label: "comm",
     path: "/repo/comm",
@@ -2410,6 +3203,7 @@ test("createGraphCommit stages changes and commits with generated message", asyn
   const result = await createGraphCommit({
     graph,
     options: {
+      bugId: "7654321",
       summary: "Fix message list focus",
       reviewers: ["aleca", "#mail-reviewers"],
     },
@@ -2417,11 +3211,22 @@ test("createGraphCommit stages changes and commits with generated message", asyn
       calls.push(command);
 
       if (command.args.join(" ") === "branch --show-current") {
-        return "Bug-1234567_2\n";
+        return `${branch}\n`;
+      }
+
+      if (command.args.join(" ") === "for-each-ref --format=%(refname:short) refs/heads") {
+        return `${[...refs.keys()].join("\n")}\n`;
+      }
+
+      if (command.args.join(" ") === "switch -c Bug-7654321") {
+        branch = "Bug-7654321";
+        refs.set(branch, "base000");
+        return "";
       }
 
       if (command.args[0] === "commit" && command.args[1] === "-m") {
-        return "[Bug-1234567_2 def456] Bug 1234567 - Fix message list focus. r=aleca,#mail-reviewers\n";
+        refs.set(branch, "def4567890abcdef");
+        return "[Bug-7654321 def456] Bug 7654321 - Fix message list focus. r=aleca,#mail-reviewers\n";
       }
 
       if (command.args.join(" ") === "rev-parse HEAD") {
@@ -2434,39 +3239,196 @@ test("createGraphCommit stages changes and commits with generated message", asyn
 
   assert.deepEqual(calls.map((call) => call.args.slice(0, 2)), [
     ["branch", "--show-current"],
+    ["for-each-ref", "--format=%(refname:short)"],
+    ["switch", "-c"],
     ["add", "-A"],
     ["commit", "-m"],
     ["rev-parse", "HEAD"],
   ]);
   assert.match(
-    calls[2].args[2],
-    /^Bug 1234567 - Fix message list focus\. r=aleca,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
+    calls[4].args[2],
+    /^Bug 7654321 - Fix message list focus\. r=aleca,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
   );
   assert.equal(result.hash, "def4567890abcdef");
   assert.match(
     result.commitMessage,
-    /^Bug 1234567 - Fix message list focus\. r=aleca,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
+    /^Bug 7654321 - Fix message list focus\. r=aleca,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
   );
+  assert.equal(result.branch, "Bug-7654321");
   assert.equal(result.message, "comm created commit def4567890ab.");
 });
 
-test("getGraphCommitMetadata requires a bug input outside Bug branches", async () => {
+test("createGraphCommit creates and checks out a matching Bug branch", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-commit-branch-"));
+  const git = async (args) =>
+    (await run({
+      cmd: "git",
+      args,
+      cwd: tempDir,
+      capture: true,
+      silent: true,
+    })).trim();
+
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+
+  await git(["init", "-b", "main"]);
+  await git(["config", "user.name", "tb-tools"]);
+  await git(["config", "user.email", "tb-tools@example.invalid"]);
+  await writeFile(path.join(tempDir, "base.txt"), "base\n");
+  await git(["add", "base.txt"]);
+  await git(["commit", "-m", "base"]);
+  await git(["switch", "-c", "Bug-1234567"]);
+  await writeFile(path.join(tempDir, "first-patch.txt"), "first patch\n");
+  await git(["add", "first-patch.txt"]);
+  await git(["commit", "-m", "Bug 1234567 - First patch"]);
+  const previousPatch = await git(["rev-parse", "HEAD"]);
+  await writeFile(path.join(tempDir, "second-patch.txt"), "second patch\n");
+  const existingRefs = await git([
+    "for-each-ref",
+    "--format=%(refname:short) %(objectname)",
+    "refs/heads",
+  ]);
+
+  const graph = {
+    label: "comm",
+    path: tempDir,
+    branch: "Bug-1234567",
+  };
+  const result = await createGraphCommit({
+    graph,
+    options: {
+      bugId: "7654321",
+      summary: "Second patch",
+    },
+    // Use the real Git executable without installing a hook in the temp repo.
+    runCommand: (command) => run(command),
+  });
+
+  assert.equal(await git(["branch", "--show-current"]), "Bug-7654321");
+  assert.equal(graph.branch, "Bug-7654321");
+  assert.equal(result.branch, "Bug-7654321");
+  assert.equal(await git(["rev-parse", "Bug-1234567"]), previousPatch);
+  assert.equal(await git(["rev-parse", "Bug-7654321"]), result.hash);
+  assert.equal(
+    (await git([
+      "for-each-ref",
+      "--format=%(refname:short) %(objectname)",
+      "refs/heads",
+    ]))
+      .split("\n")
+      .filter((ref) => !ref.startsWith("Bug-7654321 "))
+      .join("\n"),
+    existingRefs,
+  );
+  assert.equal(
+    await git(["log", "-1", "--format=%s", "Bug-7654321"]),
+    "Bug 7654321 - Second patch. r=",
+  );
+});
+
+test("createGraphCommit creates a Bug branch before committing from main", async () => {
+  const calls = [];
+  const refs = new Map([["main", "base000"]]);
+  let branch = "main";
+  let head = "base000";
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "main",
+  };
+  const result = await createGraphCommit({
+    graph,
+    options: {
+      bugId: "1234567",
+      summary: "Keep main in place",
+      reviewers: ["aleca"],
+    },
+    runCommand: async (command) => {
+      calls.push(command);
+      const args = command.args.join(" ");
+
+      if (args === "branch --show-current") {
+        return `${branch}\n`;
+      }
+
+      if (args === "for-each-ref --format=%(refname:short) refs/heads") {
+        return `${[...refs.keys()].join("\n")}\n`;
+      }
+
+      if (args === "switch -c Bug-1234567") {
+        branch = "Bug-1234567";
+        refs.set(branch, head);
+        return "";
+      }
+
+      if (command.args[0] === "commit" && command.args[1] === "-m") {
+        head = "def4567890abcdef";
+        refs.set(branch, head);
+        return "";
+      }
+
+      if (args === "rev-parse HEAD") {
+        return `${head}\n`;
+      }
+
+      return "";
+    },
+  });
+
+  assert.deepEqual(calls.map((call) => call.args.slice(0, 2)), [
+    ["branch", "--show-current"],
+    ["for-each-ref", "--format=%(refname:short)"],
+    ["switch", "-c"],
+    ["add", "-A"],
+    ["commit", "-m"],
+    ["rev-parse", "HEAD"],
+  ]);
+  assert.equal(refs.get("main"), "base000");
+  assert.equal(refs.get("Bug-1234567"), "def4567890abcdef");
+  assert.equal(graph.branch, "Bug-1234567");
+  assert.equal(result.branch, "Bug-1234567");
+  assert.match(result.commitMessage, /^Bug 1234567 - Keep main in place\. r=aleca/);
+});
+
+test("getGraphCommitMetadata requires a bug input for every new patch", async () => {
   const metadata = await getGraphCommitMetadata({
     graph: {
       label: "comm",
       path: "/repo/comm",
     },
-    runCommand: async () => "topic\n",
+    runCommand: async () => "Bug-1234567\n",
   });
 
   assert.deepEqual(metadata, {
     label: "comm",
     path: "/repo/comm",
-    branch: "topic",
+    branch: "Bug-1234567",
     bugId: "",
     bugRequired: true,
     prefix: "",
   });
+});
+
+test("createGraphCommit requires a Bugzilla bug ID from a Bug branch", async () => {
+  await assert.rejects(
+    createGraphCommit({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+      },
+      options: {
+        summary: "Do not reuse the previous patch bug",
+      },
+      runCommand: async (command) => {
+        if (command.args.join(" ") === "branch --show-current") {
+          return "Bug-1234567\n";
+        }
+
+        throw new Error(`Unexpected command: ${command.args.join(" ")}`);
+      },
+    }),
+    /Bugzilla bug ID is required for a new commit/,
+  );
 });
 
 test("amendCurrentCommit stages shown changes and amends with an edited message", async () => {
@@ -2523,6 +3485,7 @@ test("amendCurrentCommit stages shown changes and amends with an edited message"
   assert.deepEqual(
     calls.map((call) => call.args),
     [
+      ["branch", "--show-current"],
       ["log", "-1", "--format=%B"],
       [
         "diff",
@@ -2588,12 +3551,114 @@ test("amendCurrentCommit can update only the commit message without staging dirt
   assert.deepEqual(
     calls.map((call) => call.args),
     [
+      ["branch", "--show-current"],
       ["log", "-1", "--format=%B"],
       ["commit", "--amend", "--only", "-F", writes[0].file],
       ["branch", "--show-current"],
       ["rev-parse", "HEAD"],
       ["log", "-1", "--format=%B", "def456"],
     ],
+  );
+});
+
+test("amendCurrentCommit moves local main work to its Bug branch before amending", async () => {
+  const calls = [];
+  const refs = { main: "old111" };
+  let branch = "main";
+  let head = "old111";
+  const result = await amendCurrentCommit({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+    },
+    message: "Bug 2062537 - Amended patch. r=#reviewers",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return `${branch}\n`;
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        if (command.args[2] === "refs/remotes/origin/main") {
+          return "origin-main\n";
+        }
+
+        if (command.args[2] === "refs/heads/main") {
+          return `${refs.main}\n`;
+        }
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${head}\n`;
+      }
+
+      if (command.args[0] === "merge-base") {
+        const error = new Error("not on origin main");
+
+        error.code = 1;
+        throw error;
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "old111\n";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        if (command.args.some((arg) => arg.includes("%(objectname)"))) {
+          return `${Object.entries(refs)
+            .map(([name, hash]) => `${name}\0${hash}`)
+            .join("\n")}\n`;
+        }
+
+        return `${Object.keys(refs).join("\n")}\n`;
+      }
+
+      if (command.args[0] === "branch") {
+        refs[command.args[1]] = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "switch") {
+        branch = command.args[1];
+        head = refs[branch];
+        return "";
+      }
+
+      if (command.args[0] === "update-ref") {
+        refs.main = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "commit") {
+        head = "new111";
+        refs[branch] = head;
+        return "";
+      }
+
+      if (command.args[0] === "log") {
+        return head === "new111"
+          ? "Bug 2062537 - Amended patch. r=#reviewers\n\nTB-Tools-Id: amend-id\n"
+          : "Bug 2062537 - Original patch. r=#reviewers\n\nTB-Tools-Id: amend-id\n";
+      }
+
+      return "";
+    },
+    writeMessage: async () => {},
+    removeMessage: async () => {},
+  });
+
+  assert.equal(result.branch, "Bug-2062537");
+  assert.equal(result.currentHash, "new111");
+  assert.deepEqual(refs, {
+    main: "origin-main",
+    "Bug-2062537": "new111",
+  });
+  assert.equal(
+    calls.findIndex((call) => call.args.join(" ") === "switch Bug-2062537") <
+      calls.findIndex((call) => call.args[0] === "commit"),
+    true,
   );
 });
 
@@ -2808,6 +3873,22 @@ test("amendCommitMessage rewrites a selected commit message and replays descenda
         "--ancestry-path",
         "abc123..topic",
       ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "def456",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "fed789",
+        "refs/heads",
+      ],
       ["switch", "--detach", "parent000"],
       ["cherry-pick", "--no-commit", "abc123"],
       ["commit", "-C", "abc123"],
@@ -2826,6 +3907,176 @@ test("amendCommitMessage rewrites a selected commit message and replays descenda
       ["rev-parse", "HEAD"],
     ],
   );
+});
+
+test("amendCommitMessage moves every branch ref in the rewritten stack", async () => {
+  const refs = {
+    "Bug-123": "abc123",
+    "Bug-456": "def456",
+    topic: "fed789",
+  };
+  const revParseResults = [
+    "fed789",
+    "newabc999",
+    "newdef999",
+    "newtip999",
+    "newtip999",
+    "newtip999",
+  ];
+  let branch = "topic";
+
+  const result = await amendCommitMessage({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      branch,
+      knownHashes: new Set(["abc123", "def456", "fed789"]),
+    },
+    hash: "abc123",
+    message: "Bug 123 - Reword selected commit. r=#reviewers",
+    runCommand: async (command) => {
+      if (
+        command.args[0] === "branch" &&
+        command.args[1] === "--show-current"
+      ) {
+        return `${branch}\n`;
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${revParseResults.shift() || "newtip999"}\n`;
+      }
+
+      if (command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        if (command.args.includes("--contains")) {
+          return "topic\n";
+        }
+
+        const hash = command.args[command.args.indexOf("--points-at") + 1];
+
+        return Object.entries(refs)
+          .filter(([, refHash]) => refHash === hash)
+          .map(([ref]) => ref)
+          .join("\n");
+      }
+
+      if (command.args[0] === "rev-list") {
+        return command.args.includes("--parents")
+          ? "abc123 parent000\n"
+          : "def456\nfed789\n";
+      }
+
+      if (command.args[0] === "log") {
+        return command.args.includes("newabc999")
+          ? "Bug 123 - Reword selected commit. r=#reviewers\n\nTB-Tools-Id: selected-amend-id\n"
+          : "Bug 123 - Old selected commit. r=#reviewers\n\nTB-Tools-Id: selected-amend-id\n";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "-f") {
+        refs[command.args[2]] = command.args[3];
+        return "";
+      }
+
+      if (command.args[0] === "switch") {
+        branch = command.args[1] === "--detach" ? "" : command.args[1];
+      }
+
+      return "";
+    },
+    writeMessage: async () => {},
+    removeMessage: async () => {},
+  });
+
+  assert.deepEqual(refs, {
+    "Bug-123": "newabc999",
+    "Bug-456": "newdef999",
+    topic: "newtip999",
+  });
+  assert.deepEqual(result.branchUpdates, [
+    { branch: "Bug-123", originalHash: "abc123", hash: "newabc999" },
+    { branch: "Bug-456", originalHash: "def456", hash: "newdef999" },
+    { branch: "topic", originalHash: "fed789", hash: "newtip999" },
+  ]);
+});
+
+test("amendCommitMessage restores the checkout after a replay conflict", async () => {
+  const calls = [];
+  const removedMessages = [];
+
+  await assert.rejects(
+    amendCommitMessage({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "topic",
+        knownHashes: new Set(["abc123"]),
+      },
+      hash: "abc123",
+      message: "Bug 123 - Reword selected commit. r=#reviewers",
+      runCommand: async (command) => {
+        calls.push(command.args);
+
+        if (command.args[0] === "log") {
+          return "Bug 123 - Old selected commit. r=#reviewers\n";
+        }
+
+        if (command.args[0] === "branch") {
+          return command.args[1] === "--show-current" ? "topic\n" : "";
+        }
+
+        if (command.args[0] === "rev-parse") {
+          return "tip789\n";
+        }
+
+        if (command.args[0] === "status") {
+          return "";
+        }
+
+        if (command.args[0] === "for-each-ref") {
+          return command.args.includes("--contains") ? "topic\n" : "";
+        }
+
+        if (command.args[0] === "rev-list") {
+          return command.args.includes("--parents")
+            ? "abc123 parent000\n"
+            : "";
+        }
+
+        if (
+          command.args[0] === "cherry-pick" &&
+          command.args[1] === "--no-commit"
+        ) {
+          const error = new Error("conflict while applying commit");
+
+          error.code = 1;
+          throw error;
+        }
+
+        if (command.args[0] === "cherry-pick" || command.args[0] === "reset") {
+          return "";
+        }
+
+        if (command.args[0] === "switch") {
+          return "";
+        }
+
+        throw new Error(`Unexpected command: ${command.args.join(" ")}`);
+      },
+      writeMessage: async () => {},
+      removeMessage: async (file) => removedMessages.push(file),
+    }),
+    /conflict while applying commit/,
+  );
+
+  assert.deepEqual(calls.slice(-3), [
+    ["cherry-pick", "--abort"],
+    ["reset", "--hard"],
+    ["switch", "topic"],
+  ]);
+  assert.equal(removedMessages.length, 1);
 });
 
 test("amendCurrentCommit refuses when the shown working tree diff is stale", async () => {
@@ -3184,6 +4435,7 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
       ["status", "--porcelain"],
       ["branch", "--show-current"],
       ["rev-parse", "HEAD"],
+      ["merge-base", "--is-ancestor", "abc123", "base123"],
       [
         "for-each-ref",
         "--sort=refname",
@@ -3214,11 +4466,12 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
         "origin/main..abc123",
       ],
       ["merge-base", "--is-ancestor", "abc123", "origin/main"],
-      ["log", "-1", "--format=%B", "abc123"],
       [
         "for-each-ref",
         "--sort=refname",
-        "--format=%(refname:short)%00%(objectname)",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
         "refs/heads",
       ],
       ["switch", "--detach", "base123"],
@@ -3280,6 +4533,7 @@ test("rebaseCommit rebases a selected commit onto the current checkout without a
       ["status", "--porcelain"],
       ["branch", "--show-current"],
       ["rev-parse", "HEAD"],
+      ["merge-base", "--is-ancestor", "abc123", "base123"],
       [
         "for-each-ref",
         "--sort=refname",
@@ -3303,11 +4557,12 @@ test("rebaseCommit rebases a selected commit onto the current checkout without a
         "origin/main..abc123",
       ],
       ["merge-base", "--is-ancestor", "abc123", "origin/main"],
-      ["log", "-1", "--format=%B", "abc123"],
       [
         "for-each-ref",
         "--sort=refname",
-        "--format=%(refname:short)%00%(objectname)",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
         "refs/heads",
       ],
       ["switch", "--detach", "base123"],
@@ -3387,6 +4642,7 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
       ["status", "--porcelain"],
       ["branch", "--show-current"],
       ["rev-parse", "HEAD"],
+      ["merge-base", "--is-ancestor", "abc123", "base123"],
       [
         "for-each-ref",
         "--sort=refname",
@@ -3424,6 +4680,14 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
         "--sort=refname",
         "--format=%(refname:short)",
         "--points-at",
+        "abc123",
+        "refs/heads",
+      ],
+      [
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
         "def456",
         "refs/heads",
       ],
@@ -3433,15 +4697,6 @@ test("rebaseCommit rebases a selected commit and descendants in order", async ()
         "--format=%(refname:short)",
         "--points-at",
         "ghi789",
-        "refs/heads",
-      ],
-      ["log", "-1", "--format=%B", "abc123"],
-      ["log", "-1", "--format=%B", "def456"],
-      ["log", "-1", "--format=%B", "ghi789"],
-      [
-        "for-each-ref",
-        "--sort=refname",
-        "--format=%(refname:short)%00%(objectname)",
         "refs/heads",
       ],
       ["switch", "--detach", "base123"],
@@ -4986,6 +6241,55 @@ test("rebaseCommit refuses to rebase the current checkout onto itself", async ()
   );
 });
 
+test("rebaseCommit refuses to rebase an ancestor onto the current checkout", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    rebaseCommit({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "topic",
+        knownHashes: new Set(["parent123"]),
+      },
+      hash: "parent123",
+      runCommand: async (command) => {
+        calls.push(command.args);
+
+        if (command.args[0] === "status") {
+          return "";
+        }
+
+        if (command.args[0] === "branch") {
+          return "topic\n";
+        }
+
+        if (command.args[0] === "rev-parse") {
+          return "child456\n";
+        }
+
+        if (command.args[0] === "merge-base") {
+          assert.deepEqual(command.args, [
+            "merge-base",
+            "--is-ancestor",
+            "parent123",
+            "child456",
+          ]);
+          return "";
+        }
+
+        throw new Error(`Unexpected command: ${command.args.join(" ")}`);
+      },
+    }),
+    /current checkout already descends from it/,
+  );
+
+  assert.equal(
+    calls.some((args) => args[0] === "switch" || args[0] === "cherry-pick"),
+    false,
+  );
+});
+
 test("rebaseCommit refuses when the current checkout is inside the selected stack", async () => {
   await assert.rejects(
     rebaseCommit({
@@ -5428,12 +6732,115 @@ test("updateGraphCheckout switches to updated main for plain updates", async () 
     calls.map((call) => call.args),
     [
       ["fetch", "origin", "main"],
+      ["rev-parse", "--verify", "refs/remotes/origin/main"],
+      ["rev-parse", "--verify", "refs/heads/main"],
       ["switch", "main"],
       ["pull", "--ff-only", "origin", "main"],
       ["branch", "--show-current"],
       ["rev-parse", "HEAD"],
     ],
   );
+});
+
+test("updateGraphCheckout recovers every unbranched local main commit before updating", async () => {
+  const calls = [];
+  const refs = {
+    main: "local-three",
+    "Bug-1": "local-one",
+  };
+  let branch = "main";
+  let head = "local-three";
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "main",
+  };
+
+  const result = await updateGraphCheckout({
+    graph,
+    mode: "update",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        if (command.args[2] === "refs/remotes/origin/main") {
+          return "origin-new\n";
+        }
+
+        if (command.args[2] === "refs/heads/main") {
+          return `${refs.main}\n`;
+        }
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return `${head}\n`;
+      }
+
+      if (command.args[0] === "merge-base") {
+        const error = new Error("not an ancestor");
+
+        error.code = 1;
+        throw error;
+      }
+
+      if (command.args[0] === "rev-list") {
+        return "local-one\nlocal-two\nlocal-three\n";
+      }
+
+      if (command.args[0] === "for-each-ref") {
+        if (command.args.some((arg) => arg.includes("%(objectname)"))) {
+          return `${Object.entries(refs)
+            .map(([name, hash]) => `${name}\0${hash}`)
+            .join("\n")}\n`;
+        }
+
+        return `${Object.keys(refs).join("\n")}\n`;
+      }
+
+      if (command.args[0] === "log") {
+        return command.args.at(-1) === "local-three"
+          ? "Bug 2062537 - Local patch.\n"
+          : "No bug - Local follow-up.\n";
+      }
+
+      if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+        return `${branch}\n`;
+      }
+
+      if (command.args[0] === "branch") {
+        refs[command.args[1]] = command.args[2];
+        return "";
+      }
+
+      if (command.args[0] === "switch") {
+        branch = command.args[1];
+        head = refs[branch];
+        return "";
+      }
+
+      if (command.args[0] === "update-ref") {
+        refs.main = command.args[2];
+        return "";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.message, "comm updated main from origin/main after recovering 2 branches.");
+  assert.equal(result.branch, "main");
+  assert.deepEqual(refs, {
+    main: "origin-new",
+    "Bug-1": "local-one",
+    "recovery/local-two": "local-two",
+    "Bug-2062537": "local-three",
+  });
+  assert.equal(
+    calls.some((call) =>
+      call.args.join(" ") === "update-ref refs/heads/main origin-new local-three"),
+    true,
+  );
+  assert.equal(calls.some((call) => call.args[0] === "pull"), true);
 });
 
 test("updateGraphCheckout rebases local branch commits onto origin main", async () => {
@@ -5570,13 +6977,11 @@ test("updateGraphCheckout rebases local branch commits onto origin main", async 
     main: "origin-new",
     "Bug-1": "root-new",
     topic: "child-new",
-    "stale-root": "root-new",
-    "stale-child": "child-new",
+    "stale-root": "old-root",
+    "stale-child": "old-child",
   });
   assert.deepEqual(result.branchUpdates, [
     { branch: "Bug-1", originalHash: "root111", hash: "root-new" },
-    { branch: "stale-root", originalHash: "root111", hash: "root-new" },
-    { branch: "stale-child", originalHash: "child222", hash: "child-new" },
     { branch: "topic", originalHash: "child222", hash: "child-new" },
   ]);
   assert.equal(
@@ -5902,6 +7307,7 @@ test("runGraphRepositoryUpdate reports dirty checkouts before changing anything"
           label: "comm",
           path: "/repo/comm",
           status: "M file.txt",
+          files: ["file.txt"],
         },
       ]);
       return /Uncommitted changes/.test(error.message);
@@ -5912,6 +7318,18 @@ test("runGraphRepositoryUpdate reports dirty checkouts before changing anything"
     calls.map((call) => call.args),
     [["status", "--porcelain"]],
   );
+});
+
+test("getGraphDirtyCheckouts ignores untracked files", async () => {
+  const dirty = await getGraphDirtyCheckouts({
+    graphs: [{
+      label: "firefox",
+      path: "/repo/firefox",
+    }],
+    runCommand: async () => "?? .tb-review-scratch/\n",
+  });
+
+  assert.deepEqual(dirty, []);
 });
 
 test("runGraphRepositoryUpdate can shelf dirty changes before updating", async () => {
@@ -5974,6 +7392,8 @@ test("runGraphRepositoryUpdate can shelf dirty changes before updating", async (
         "tb-tools graph update: comm",
       ],
       ["fetch", "origin", "main"],
+      ["rev-parse", "--verify", "refs/remotes/origin/main"],
+      ["rev-parse", "--verify", "refs/heads/main"],
       ["switch", "main"],
       ["pull", "--ff-only", "origin", "main"],
       ["branch", "--show-current"],
@@ -6499,7 +7919,7 @@ test("pruneCommitBranches drops a commit from the current branch history", async
         command.args[0] === "branch" &&
         command.args[1] === "--show-current"
       ) {
-        return "main\n";
+        return "topic\n";
       }
 
       if (
@@ -6513,7 +7933,7 @@ test("pruneCommitBranches drops a commit from the current branch history", async
         command.args[0] === "for-each-ref" &&
         command.args.includes("--contains")
       ) {
-        return "topic\nmain\n";
+        return "topic\n";
       }
 
       if (command.args[0] === "rev-list" && command.args.includes("--parents")) {
@@ -6521,7 +7941,7 @@ test("pruneCommitBranches drops a commit from the current branch history", async
       }
 
       if (command.args[0] === "rev-list") {
-        return command.args.at(-1) === "abc123..main" ? "child456\n" : "";
+        return command.args.at(-1) === "abc123..topic" ? "child456\n" : "";
       }
 
       if (command.args[0] === "rev-parse") {
@@ -6534,11 +7954,11 @@ test("pruneCommitBranches drops a commit from the current branch history", async
     },
   });
 
-  assert.equal(result.message, "comm pruned abc123 from branch main.");
-  assert.deepEqual(result.branches, ["main"]);
+  assert.equal(result.message, "comm pruned abc123 from branch topic.");
+  assert.deepEqual(result.branches, ["topic"]);
   assert.equal(result.parent, "parent123");
   assert.equal(result.currentHash, "rebased456");
-  assert.equal(result.branch, "main");
+  assert.equal(result.branch, "topic");
   assert.deepEqual(
     calls.map((call) => call.args),
     [
@@ -6586,11 +8006,12 @@ test("pruneCommitBranches drops a commit from the current branch history", async
         "abc123..topic",
       ],
       [
-        "rev-list",
-        "--reverse",
-        "--topo-order",
-        "--ancestry-path",
-        "abc123..main",
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
+        "refs/heads",
       ],
       [
         "for-each-ref",
@@ -6600,20 +8021,12 @@ test("pruneCommitBranches drops a commit from the current branch history", async
         "child456",
         "refs/heads",
       ],
-      ["log", "-1", "--format=%B", "abc123"],
-      ["log", "-1", "--format=%B", "child456"],
-      [
-        "for-each-ref",
-        "--sort=refname",
-        "--format=%(refname:short)%00%(objectname)",
-        "refs/heads",
-      ],
       ["switch", "--detach", "parent123"],
       ["cherry-pick", "--no-commit", "child456"],
       ["commit", "-C", "child456"],
       ["rev-parse", "HEAD"],
-      ["branch", "-f", "main", "rebased456"],
-      ["switch", "main"],
+      ["branch", "-f", "topic", "rebased456"],
+      ["switch", "topic"],
       ["rev-parse", "HEAD"],
     ],
   );
@@ -6641,21 +8054,21 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
             call.args[0] === "branch" && call.args[1] === "--show-current",
         ).length === 1
           ? ""
-          : "main\n";
+          : "topic\n";
       }
 
       if (
         command.args[0] === "for-each-ref" &&
         command.args.includes("--points-at")
       ) {
-        return "main\n";
+        return "topic\n";
       }
 
       if (
         command.args[0] === "for-each-ref" &&
         command.args.includes("--contains")
       ) {
-        return "main\n";
+        return "topic\n";
       }
 
       if (command.args[0] === "rev-list" && command.args.includes("--parents")) {
@@ -6674,11 +8087,11 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
     },
   });
 
-  assert.equal(result.message, "comm pruned abc123 from branch main.");
-  assert.deepEqual(result.branches, ["main"]);
+  assert.equal(result.message, "comm pruned abc123 from branch topic.");
+  assert.deepEqual(result.branches, ["topic"]);
   assert.equal(result.parent, "parent123");
   assert.equal(result.currentHash, "parent123");
-  assert.equal(result.branch, "main");
+  assert.equal(result.branch, "topic");
   assert.deepEqual(
     calls.map((call) => call.args),
     [
@@ -6723,18 +8136,19 @@ test("pruneCommitBranches drops a branch-tip commit without deleting the branch"
         "--reverse",
         "--topo-order",
         "--ancestry-path",
-        "abc123..main",
+        "abc123..topic",
       ],
-      ["log", "-1", "--format=%B", "abc123"],
       [
         "for-each-ref",
         "--sort=refname",
-        "--format=%(refname:short)%00%(objectname)",
+        "--format=%(refname:short)",
+        "--points-at",
+        "abc123",
         "refs/heads",
       ],
       ["switch", "--detach", "parent123"],
-      ["branch", "-f", "main", "parent123"],
-      ["switch", "main"],
+      ["branch", "-f", "topic", "parent123"],
+      ["switch", "topic"],
       ["rev-parse", "HEAD"],
     ],
   );
@@ -6874,15 +8288,15 @@ test("pruneCommitBranches removes a branch-per-commit stack commit in one pass",
         "--sort=refname",
         "--format=%(refname:short)",
         "--points-at",
-        "c333",
+        "b222",
         "refs/heads",
       ],
-      ["log", "-1", "--format=%B", "b222"],
-      ["log", "-1", "--format=%B", "c333"],
       [
         "for-each-ref",
         "--sort=refname",
-        "--format=%(refname:short)%00%(objectname)",
+        "--format=%(refname:short)",
+        "--points-at",
+        "c333",
         "refs/heads",
       ],
       ["switch", "--detach", "a111"],
@@ -7621,6 +9035,8 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /id="commit-dialog"/);
   assert.match(html, /class="commit-reviewer-input"/);
   assert.match(html, /id="commit-reviewer-list" role="listbox" hidden/);
+  assert.match(html, /id="phab-auth-dialog"/);
+  assert.match(html, /class="phab-auth-start" type="button">Authenticate<\/button>/);
   assert.match(html, /id="submit-dialog"/);
   assert.match(html, /class="submit-prompt"/);
   assert.match(html, /class="submit-links" hidden/);
@@ -7725,6 +9141,8 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(style, /\.commit-reviewer-blocking\[aria-pressed="true"\]/);
   assert.match(style, /\.commit-reviewer-option\[aria-selected="true"\]/);
   assert.match(style, /\.commit-reviewer-option\.blocking/);
+  assert.match(style, /\.phab-auth-dialog \{/);
+  assert.match(style, /\.phab-auth-actions \{/);
   assert.match(style, /\.submit-dialog \{/);
   assert.match(style, /\.submit-links a/);
   assert.match(style, /\.submit-output \{/);
@@ -7747,6 +9165,30 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
     /\.diff-message a \{ color: #0969da; text-decoration: none; \}/,
   );
   assert.match(style, /\.diff-message\[hidden\] \{ display: none; \}/);
+  assert.match(style, /\.review-discussion \{/);
+  assert.match(style, /\.review-inline-thread td \{/);
+  assert.match(style, /\.review-inline-code \{/);
+  assert.match(
+    style,
+    /\.review-comment-text \{[^}]*overflow-wrap: anywhere;/,
+  );
+  assert.match(
+    style,
+    /\.review-code-block,[^}]*max-width: calc\(100% - 20px\);/,
+  );
+  assert.match(
+    style,
+    /\.diff-table\.has-review-comments \{[^}]*table-layout: fixed;/,
+  );
+  assert.match(style, /\.diff-gutter-column \{[^}]*width: 44px;/);
+  assert.match(
+    style,
+    /\.diff-table\.has-review-comments \.line-content \{[^}]*min-width: max-content;/,
+  );
+  assert.match(style, /\.review-comment header \{[^]*justify-content: flex-start/);
+  assert.match(style, /\.review-suggestion \{/);
+  assert.match(style, /\.review-code-suggestion \{/);
+  assert.match(client, /function appendReviewCodeSuggestion/);
   assert.match(style, /\.integration-status \{/);
   assert.match(style, /\.status-badge \{/);
   assert.match(style, /\.status-badge\.try/);
@@ -7786,11 +9228,18 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function decorateCommitRows/);
   assert.match(client, /function showCommitContextMenu/);
   assert.match(client, /function runCommitAction/);
+  assert.match(client, /function renderSelectedCommitReview/);
+  assert.match(client, /function fetchSelectedCommitReview/);
+  assert.match(client, /const INLINE_CODE_PATTERN/);
+  assert.doesNotMatch(client, /discussion\.open = true/);
+  assert.match(client, /function reviewPathsMatch/);
+  assert.match(client, /variants\.add\(`comm\/\$\{path\}`\)/);
   assert.match(client, /function openAmendDialog/);
   assert.match(client, /function submitAmendDialog/);
   assert.match(client, /function openCommitDialog/);
   assert.match(client, /function searchCommitReviewers/);
   assert.match(client, /function submitCommitDialog/);
+  assert.match(client, /function openPhabricatorAuthDialog/);
   assert.match(client, /function openSubmitDialog/);
   assert.match(client, /await confirmRemoteBuildRustWarning\("submit"\)/);
   assert.match(client, /function renderSubmitSession/);
@@ -7812,6 +9261,14 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function refreshGraphFromServer/);
   assert.match(client, /function pollGraphUpdates/);
   assert.match(client, /function runGraphUpdate/);
+  assert.match(client, /function createRelationOpenButton/);
+  assert.match(client, /function createRelationRemoveButton/);
+  assert.match(client, /function openRelationAddDialog/);
+  assert.match(client, /function addRelation/);
+  assert.match(
+    client,
+    /createRelationRemoveButton\(bug, relationType\),[\s\S]*?createBugzillaIconLink\(bug\)/,
+  );
   assert.match(client, /function openInteractiveRebaseDialog/);
   assert.match(client, /function submitInteractiveRebaseDialog/);
   assert.match(client, /function handleInteractiveRebaseDialogClick/);
@@ -7869,6 +9326,10 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
     /const PHABRICATOR_REVISION_URL = "https:\/\/phabricator\.services\.mozilla\.com\/D"/,
   );
   assert.match(client, /const COMMIT_MESSAGE_LINK_PATTERN = /);
+  assert.match(client, /function openLinkInNewTab\(link\)/);
+  assert.match(client, /link\.target = "_blank"/);
+  assert.match(client, /link\.relList\.add\("noopener", "noreferrer"\)/);
+  assert.match(client, /const linkTargetObserver = new MutationObserver/);
   assert.match(client, /document\.createTextNode/);
   assert.match(client, /document\.createElement\("a"\)/);
   assert.match(client, /BUGZILLA_BUG_URL \+ bugMatch\[1\]/);
@@ -8003,6 +9464,20 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.doesNotMatch(html, /class="command-status-bar"/);
 });
 
+test("interactive graph launcher opens a script-owned console tab", () => {
+  const html = buildInteractiveGraphLauncherHtml({
+    consolePath: "/",
+    tabName: "tb-tools-console-secret",
+  });
+
+  assert.match(html, /const consolePath = "\/";/);
+  assert.match(html, /const tabName = "tb-tools-console-secret";/);
+  assert.match(html, /window\.open\(consolePath, tabName\)/);
+  assert.match(html, /consoleTab\.focus\(\)/);
+  assert.match(html, /window\.setTimeout\(\(\) => window\.close\(\), 100\)/);
+  assert.match(html, /window\.location\.replace\(consolePath\)/);
+});
+
 test("buildGraphHtml supports interactive loading and checkout callbacks", () => {
   const html = buildGraphHtml({
     interactive: {
@@ -8058,6 +9533,54 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   );
   assert.match(html, /<div class="toolbar-row">\s*<nav class="tabs">/);
   assert.match(html, /class="update-actions"/);
+  assert.match(html, /class="tab dashboard-tab"/);
+  assert.match(html, /class="dashboard-panel"/);
+  assert.match(html, /class="dashboard-section dashboard-direct-review" data-dashboard-section="direct-review"/);
+  assert.match(html, /class="dashboard-workspace"/);
+  assert.match(html, /class="dashboard-column-heading">Your Patches<\/h3>/);
+  assert.match(html, /class="dashboard-column-heading">Needs Review<\/h3>/);
+  assert.match(html, /class="dashboard-column-heading">Bugzilla<\/h3>/);
+  assert.match(html, /class="dashboard-bug-sidebar" aria-label="Assigned bug queues"/);
+  assert.match(html, /class="dashboard-section dashboard-needinfo" data-dashboard-section="needinfo-bugs"/);
+  assert.match(html, /class="dashboard-section dashboard-in-progress" data-dashboard-section="in-progress-bugs"/);
+  assert.match(html, /class="dashboard-section dashboard-bugs" data-dashboard-section="assigned-bugs"/);
+  assert.doesNotMatch(html, /dashboard-needinfo-tray/);
+  assert.doesNotMatch(html, /dashboard-bug-inbox/);
+  assert.match(html, /<dialog class="patch-update-dialog" id="patch-update-dialog">/);
+  assert.doesNotMatch(html, /Codex assessment/);
+  assert.doesNotMatch(html, /Suggested reply/);
+  assert.doesNotMatch(html, /Save Reply Draft/);
+  assert.doesNotMatch(html, /Submit Patch/);
+  assert.doesNotMatch(html, /data-dashboard-section="approved-not-marked"/);
+  assert.doesNotMatch(html, /data-dashboard-section="reviewed-awaiting-review"/);
+  assert.match(html, /class="tab meta-boards-tab"/);
+  assert.match(html, /class="meta-boards-panel"/);
+  assert.match(html, /class="meta-board-root-links"/);
+  assert.match(html, /<h3>Blocked By<\/h3>/);
+  assert.match(html, /<h3>Blocks<\/h3>/);
+  assert.doesNotMatch(html, /<h3>Dependents<\/h3>/);
+  assert.doesNotMatch(html, /meta-board-detail-depends"/);
+  assert.doesNotMatch(html, /meta-board-detail-blocks"/);
+  assert.match(html, /class="meta-board-relation-add" type="button" data-relation="dependsOn">Add<\/button>/);
+  assert.match(html, /class="meta-board-relation-add" type="button" data-relation="blocks">Add<\/button>/);
+  assert.match(html, /id="meta-board-relation-dialog"/);
+  assert.match(html, /data-menu-action="meta-boards-add"/);
+  assert.match(html, /data-menu-action="meta-boards-manage"/);
+  assert.match(html, /id="meta-board-manager-dialog"/);
+  assert.match(client, /meta-board-review-group/);
+  assert.match(client, /saveBoardReviewGroup/);
+  assert.match(html, /id="meta-board-dialog"/);
+  assert.match(
+    html,
+    /class="meta-board-detail-assignee" type="email" list="meta-board-assignees"/,
+  );
+  assert.match(html, /class="meta-board-detail-header-actions"/);
+  assert.match(html, /class="meta-board-detail-bugzilla"/);
+  assert.match(html, /class="meta-board-description-edit"/);
+  assert.match(html, /aria-pressed="false"/);
+  assert.match(html, /data-mode="render" aria-hidden="true" hidden/);
+  assert.match(html, /class="meta-board-detail-description-rendered"/);
+  assert.match(html, /class="meta-board-detail-description" rows="12" hidden/);
   assert.match(html, /<\/nav>\s*<div class="update-actions" role="toolbar"/);
   assert.ok(
     html.indexOf('<div class="update-actions"') >
@@ -8085,6 +9608,10 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(
     html,
     /class="graph-menu-command" type="button" role="menuitem" data-menu-action="commit">Commit<\/button>/,
+  );
+  assert.match(
+    html,
+    /class="graph-menu-command" type="button" role="menuitem" data-menu-action="phabricator-auth">Authenticate Phabricator\.\.\.<\/button>/,
   );
   assert.match(
     html,
@@ -8119,6 +9646,10 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
     style,
     /\.graph-submenu \{ display: none; position: absolute; right: calc\(100% - 1px\); top: 0; \}/,
   );
+  assert.match(style, /\.meta-board-detail-depends-links,[\s\S]*?height: 180px;/);
+  assert.match(style, /\.meta-board-relation-link \+ \.meta-board-relation-link/);
+  assert.match(style, /\.meta-board-detail-description-rendered \{/);
+  assert.match(style, /\.markdown-code-block \{/);
   assert.match(
     html,
     /class="origin-main-status" role="status" aria-label="origin\/main freshness"/,
@@ -8189,6 +9720,13 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /document\.querySelectorAll\("\.tab\[data-index\]"\)/);
   assert.match(client, /\/api\/commit-action/);
   assert.match(client, /openCommitDialog\(\)/);
+  assert.match(client, /openPhabricatorAuthDialog\(\)/);
+  assert.match(client, /let latestAuthenticationRequest = 0;/);
+  assert.match(client, /tb-phab-authenticated/);
+  assert.match(client, /renderMarkdown\(detailDescriptionRendered, description\)/);
+  assert.match(client, /renderEditedDetailDescription\(\)/);
+  assert.match(client, /toggleDetailDescription/);
+  assert.match(client, /detailDescription\.hidden = false;/);
   assert.match(client, /submitCommitDialog/);
   assert.match(client, /addCommitReviewerFromEvent/);
   assert.match(client, /handleCommitReviewerPillEvent/);
@@ -8262,6 +9800,92 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /function renderGraphLandSession/);
   assert.match(client, /function answerLandPrompt/);
   assert.doesNotMatch(client, /window\.innerHeight \+ window\.scrollY/);
+});
+
+test("buildGraphHtml only renders Codex patch review controls when enabled", () => {
+  const graphs = [{
+    label: "comm",
+    path: "/repo/comm",
+    branch: "main",
+    commitCount: 0,
+    commits: [],
+    diffs: {},
+  }];
+  const disabledHtml = buildGraphHtml({
+    graphs,
+    interactive: { enabled: true, token: "secret" },
+  });
+  const enabledHtml = buildGraphHtml({
+    graphs,
+    interactive: { enabled: true, aiEnabled: true, token: "secret" },
+  });
+
+  assert.match(disabledHtml, /class="patch-update-title">Update patch<\/h2>/);
+  assert.match(disabledHtml, /class="patch-update-output-toggle"/);
+  assert.doesNotMatch(disabledHtml, /Codex assessment/);
+  assert.doesNotMatch(disabledHtml, /Suggested reply/);
+  assert.doesNotMatch(disabledHtml, /Review comment/);
+  assert.doesNotMatch(disabledHtml, /Save Reply Draft/);
+  assert.doesNotMatch(disabledHtml, /Feedback or instruction for Codex/);
+  assert.doesNotMatch(disabledHtml, /Submit Patch/);
+  assert.match(enabledHtml, /Codex recommendation/);
+  assert.match(enabledHtml, /What Codex found/);
+  assert.match(enabledHtml, /Planned source change/);
+  assert.match(enabledHtml, /Codex activity/);
+  assert.match(enabledHtml, /Feedback or instruction for Codex/);
+  assert.match(enabledHtml, /Send to Codex/);
+  assert.match(enabledHtml, /Draft reply/);
+  assert.match(enabledHtml, /Save Reply Draft/);
+  assert.match(enabledHtml, /Submit Patch/);
+});
+
+test("patch update dialog clears the prior session before starting another update", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /function resetPatchUpdateDialog\(patch\)/);
+  assert.match(source, /session = undefined;/);
+  assert.match(source, /output\.textContent = "";/);
+  assert.match(source, /setComment\(null\);/);
+  assert.match(source, /resetPatchUpdateDialog\(patch\);\n {2}dialog\.showModal\(\);/);
+});
+
+test("patch update enables saving the generated reply after advancing to a comment", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+  const renderComment = source.indexOf("setComment(busy ? null : item);");
+  const readReply = source.indexOf("const replyValue = reply?.value || \"\";", renderComment);
+
+  assert.ok(renderComment >= 0);
+  assert.ok(readReply > renderComment);
+});
+
+test("patch update output remains hidden until the user expands it", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /let outputVisible = false;/);
+  assert.doesNotMatch(source, /outputAutoShown/);
+  assert.match(source, /output\.hidden = !outputVisible \|\| !hasOutput;/);
+  assert.match(source, /!item\?\.proposedDiffHtml/);
+});
+
+test("patch update activity follows new entries until the user scrolls away", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /let activityFollowsLatest = true;/);
+  assert.match(source, /function updateActivityFollowState\(\)/);
+  assert.match(source, /activityList\?\.addEventListener\("scroll", updateActivityFollowState/);
+  assert.match(source, /window\.requestAnimationFrame\(\(\) => \{\n {6}activityList\.scrollTop = activityList\.scrollHeight;/);
 });
 
 test("getGraphOutputPath defaults to a temp HTML file", () => {
@@ -8536,17 +10160,74 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
       checkinMarked = true;
       return {};
     },
-    phab: async () => ({
-      result: [
-        {
-          id: 987654,
-          uri: "https://phabricator.services.mozilla.com/D987654",
-          status: "status-accepted",
-          statusName: "Accepted",
-          title: "Bug 123456 - Fix the thing",
-        },
-      ],
-    }),
+    phab: async ({ route }) => {
+      if (route === "transaction.search") {
+        return {
+          result: {
+            data: [
+              {
+                id: "transaction-inline",
+                phid: "PHID-XACT-inline",
+                type: "inline",
+                authorPHID: "PHID-USER-reviewer",
+                dateCreated: 1710000000,
+                fields: {
+                  line: 1,
+                  path: "file.txt",
+                },
+                comments: [
+                  {
+                    id: 100,
+                    phid: "PHID-XCMT-inline",
+                    authorPHID: "PHID-USER-reviewer",
+                    dateCreated: 1710000000,
+                    content: { raw: "```suggestion\nnew\n```" },
+                  },
+                ],
+              },
+              {
+                id: "transaction-comment",
+                phid: "PHID-XACT-comment",
+                type: "comment",
+                authorPHID: "PHID-USER-reviewer",
+                dateCreated: 1710000001,
+                fields: {},
+                comments: [
+                  {
+                    id: 101,
+                    phid: "PHID-XCMT-comment",
+                    authorPHID: "PHID-USER-reviewer",
+                    dateCreated: 1710000001,
+                    content: { raw: "Please take a look at this." },
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+
+      if (route === "user.query") {
+        return {
+          result: [{
+            phid: "PHID-USER-reviewer",
+            realName: "Reviewing Person",
+          }],
+        };
+      }
+
+      return {
+        result: [
+          {
+            id: 987654,
+            uri: "https://phabricator.services.mozilla.com/D987654",
+            status: "status-accepted",
+            statusName: "Accepted",
+            title: "Bug 123456 - Fix the thing",
+          },
+        ],
+      };
+    },
     getNotionStoriesByBugId: async ({ bugId }) => ({
       bugId,
       stories: [
@@ -8664,6 +10345,28 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
   assert.match(diff.html, /pretty-file/);
   assert.equal(diff.insertions, 1);
   assert.equal(diff.deletions, 1);
+  assert.equal(
+    calls.some(
+      (command) =>
+        command.args[0] === "show" &&
+        command.args.at(-1) === "abc123" &&
+        command.args.includes("--unified=2147483647"),
+    ),
+    true,
+  );
+
+  const reviewResponse = await fetch(
+    new URL("api/graph/0/review/abc123?token=secret", serverInfo.url),
+  );
+  const review = await reviewResponse.json();
+  assert.equal(review.available, true);
+  assert.equal(review.comments[0].content, "Please take a look at this.");
+  assert.equal(review.inlineComments[0].filePath, "file.txt");
+  assert.equal(review.inlineComments[0].content, "");
+  assert.deepEqual(review.inlineComments[0].codeSuggestion, {
+    content: "new",
+    url: "https://phabricator.services.mozilla.com/D987654#inline-100",
+  });
 
   const integrationResponse = await fetch(
     new URL("api/graph/0/integration/abc123?token=secret", serverInfo.url),
@@ -8758,7 +10461,7 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     },
   );
   const rebase = await rebaseResponse.json();
-  assert.equal(rebase.message, "comm rebased branch main onto main.");
+  assert.equal(rebase.message, "comm rebased abc123 onto main.");
   assert.equal(rebase.currentHash, "def456");
   assert.equal(rebase.snapshot.branch, "main");
   assert.equal(rebase.snapshot.commits[0].hash, "abc123");
@@ -8885,7 +10588,7 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
         call.args[1] === "-f" &&
         call.args[2] === "main",
     ),
-    true,
+    false,
   );
 });
 
@@ -9231,6 +10934,113 @@ test("interactive graph server cancels an active build session", async (t) => {
     body: JSON.stringify({ token: "secret" }),
   });
   await closePromise;
+});
+
+test("interactive graph server manages the Phabricator web session", async (t) => {
+  const calls = [];
+  const phabWebSession = {
+    async getStatus() {
+      calls.push("status");
+      return { state: "disconnected", message: "Not connected." };
+    },
+    async startAuthentication() {
+      calls.push("start");
+      return { state: "pending", message: "Sign in in the browser." };
+    },
+    async cancelAuthentication() {
+      calls.push("cancel");
+      return { state: "disconnected", message: "Canceled." };
+    },
+    async signOut() {
+      calls.push("sign-out");
+      return { state: "disconnected", message: "Signed out." };
+    },
+    async getSuggestions() {
+      return new Map();
+    },
+    async close() {
+      calls.push("close");
+    },
+  };
+  const serverInfo = await startInteractiveGraphServer({
+    closeBrowserTabsOnShutdown: false,
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    phabWebSession,
+  });
+
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const statusResponse = await fetch(
+    new URL("api/phabricator/auth?token=secret", serverInfo.url),
+  );
+  const status = await statusResponse.json();
+  assert.deepEqual(status, {
+    ok: true,
+    state: "disconnected",
+    message: "Not connected.",
+  });
+
+  const startResponse = await fetch(
+    new URL("api/phabricator/auth/start", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret" }),
+    },
+  );
+  assert.deepEqual(await startResponse.json(), {
+    ok: true,
+    state: "pending",
+    message: "Sign in in the browser.",
+  });
+
+  const cancelResponse = await fetch(
+    new URL("api/phabricator/auth/cancel", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret" }),
+    },
+  );
+  assert.deepEqual(await cancelResponse.json(), {
+    ok: true,
+    state: "disconnected",
+    message: "Canceled.",
+  });
+
+  const signOutResponse = await fetch(
+    new URL("api/phabricator/auth/sign-out", serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret" }),
+    },
+  );
+  assert.deepEqual(await signOutResponse.json(), {
+    ok: true,
+    state: "disconnected",
+    message: "Signed out.",
+  });
+
+  const closePromise = new Promise((resolve) =>
+    serverInfo.server.once("close", resolve),
+  );
+  serverInfo.server.shutdown(0, "test complete");
+  await closePromise;
+  assert.deepEqual(calls, ["status", "start", "cancel", "sign-out", "close"]);
 });
 
 test("interactive graph server starts lint sessions from menu modes", async (t) => {
@@ -9988,6 +11798,7 @@ test("interactive graph server lands patches through browser prompts", async (t)
   const pushes = [];
   const bugUpdates = [];
   const commPath = await mkdtemp(path.join(os.tmpdir(), "tb-tools-land-"));
+  const firefoxPath = path.join(commPath, "firefox");
   await mkdir(path.join(commPath, "mail", "config"), { recursive: true });
   await writeFile(path.join(commPath, "mail", "config", "version.txt"), "128.0a1\n");
   let transactionSearches = 0;
@@ -9999,6 +11810,14 @@ test("interactive graph server lands patches through browser prompts", async (t)
       {
         label: "comm",
         path: commPath,
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+      {
+        label: "firefox",
+        path: firefoxPath,
         branch: "main",
         commits: [],
         commitCount: 0,
@@ -10085,6 +11904,10 @@ test("interactive graph server lands patches through browser prompts", async (t)
     runCommand: async (command) => {
       calls.push(command);
 
+      if (command.cwd === firefoxPath && command.args[0] === "status") {
+        return "?? .tb-review-scratch/\n";
+      }
+
       if (command.cmd === "moz-phab") {
         return "patched D987654\n";
       }
@@ -10168,7 +11991,7 @@ test("interactive graph server lands patches through browser prompts", async (t)
       options: {
         landoRepo: "test-lando",
       },
-      snapshotLimits: [1],
+      snapshotLimits: [1, 1],
     }),
   });
   const start = await startResponse.json();
@@ -10199,6 +12022,12 @@ test("interactive graph server lands patches through browser prompts", async (t)
   );
   assert.equal(patchChoice.tryStatus.state, "pending");
   assert.equal(transactionSearches, 0);
+  assert.equal(
+    calls.some(
+      (call) => call.cwd === firefoxPath && call.args[0] === "status",
+    ),
+    false,
+  );
 
   const tryStatusUrl = new URL(
     `api/land/${session.id}/patch/123456/987654/try-status?token=secret`,
@@ -11122,6 +12951,7 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
   const storePath = path.join(tempDir, "try-runs.json");
   const calls = [];
   const phabCalls = [];
+  let branch = "Bug-1234567";
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
     token: "secret",
@@ -11177,7 +13007,16 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
         command.args[0] === "branch" &&
         command.args[1] === "--show-current"
       ) {
+        return `${branch}\n`;
+      }
+
+      if (command.args[0] === "for-each-ref") {
         return "Bug-1234567\n";
+      }
+
+      if (command.args[0] === "switch" && command.args[1] === "-c") {
+        branch = command.args[2];
+        return "";
       }
 
       if (command.args[0] === "add") {
@@ -11191,7 +13030,7 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
           command.args[2],
           /^Bug 1234567 - Fix folder keyboard flow\. r=aleca!,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
         );
-        return "[Bug-1234567 def456] Bug 1234567 - Fix folder keyboard flow. r=aleca!,#mail-reviewers\n";
+        return `[${branch} def456] Bug 1234567 - Fix folder keyboard flow. r=aleca!,#mail-reviewers\n`;
       }
 
       if (command.args[0] === "rev-parse" && command.args[1] === "--git-path") {
@@ -11203,7 +13042,7 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
       }
 
       if (command.args[0] === "log") {
-        return "\x1edef4567890abcdef\x1f\x1fHEAD -> Bug-1234567\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 1234567 - Fix folder keyboard flow\n";
+        return `\x1edef4567890abcdef\x1f\x1fHEAD -> ${branch}\x1fAlice\x1falice@example.com\x1f1710000000\x1fBug 1234567 - Fix folder keyboard flow\n`;
       }
 
       if (command.args[0] === "diff" || command.args[0] === "ls-files") {
@@ -11226,8 +13065,8 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
   const metadata = await metadataResponse.json();
 
   assert.equal(metadata.ok, true);
-  assert.equal(metadata.metadata.bugRequired, false);
-  assert.equal(metadata.metadata.bugId, "1234567");
+  assert.equal(metadata.metadata.bugRequired, true);
+  assert.equal(metadata.metadata.bugId, "");
 
   const userReviewerResponse = await fetch(
     new URL("api/commit/reviewers?query=alec&token=secret", serverInfo.url),
@@ -11265,6 +13104,7 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
     body: JSON.stringify({
       token: "secret",
       options: {
+        bugId: "1234567",
         summary: "Fix folder keyboard flow",
         reviewers: [{ value: "aleca", blocking: true }, "#mail-reviewers"],
       },
@@ -11279,7 +13119,7 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
     commit.commitMessage,
     /^Bug 1234567 - Fix folder keyboard flow\. r=aleca!,#mail-reviewers\n\nTB-Tools-Id: [0-9a-f-]+$/,
   );
-  assert.equal(commit.snapshots[0].branch, "Bug-1234567");
+  assert.equal(commit.snapshots[0].branch, "Bug-1234567_2");
   assert.equal(commit.snapshots[0].commits[0].hash, "def4567890abcdef");
   assert.deepEqual(
     calls.filter((call) => call.args[0] === "add").map((call) => call.args),
@@ -11869,6 +13709,44 @@ test("interactive graph server asks browser tabs to close on shutdown", async (t
   assert.equal(serverInfo.server.closeReason, "terminal signal received");
 });
 
+test("interactive graph server serves the token-protected browser launcher", async (t) => {
+  const launcherHtml = buildInteractiveGraphLauncherHtml({
+    consolePath: "/",
+    tabName: "tb-tools-console-secret",
+  });
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    launcherHtml,
+    token: "secret",
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch: "main",
+      commits: [],
+      commitCount: 0,
+      diffs: {},
+    }],
+    runCommand: async () => "",
+  });
+
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const response = await fetch(
+    new URL("launch?token=secret", serverInfo.url),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), launcherHtml);
+
+  const rejected = await fetch(new URL("launch?token=wrong", serverInfo.url));
+
+  assert.equal(rejected.status, 403);
+});
+
 test("waitForInteractiveServerClose routes signals through the interactive shutdown hook", async () => {
   const signals = new EventEmitter();
   const server = new EventEmitter();
@@ -11916,16 +13794,22 @@ test("console command serves interactive mode without writing static output", as
     log: () => {},
     startServer: async ({
       html,
+      launcherHtml,
       token,
       pageSize,
+      port,
+      fallbackPort,
       closeBrowserTabsOnShutdown,
     }) => {
       calls.push([
         "server",
         /id="graph-config"/.test(html),
         /\/assets\/graph-client\/init\.js/.test(html),
+        /window\.open\(consolePath, tabName\)/.test(launcherHtml),
         token,
         pageSize,
+        port,
+        fallbackPort,
         closeBrowserTabsOnShutdown,
       ]);
       return {
@@ -11940,8 +13824,8 @@ test("console command serves interactive mode without writing static output", as
 
   assert.equal(url, "http://127.0.0.1:1234/");
   assert.deepEqual(calls, [
-    ["server", true, true, "secret", 25, true],
-    ["open", "http://127.0.0.1:1234/"],
+    ["server", true, true, true, "secret", 25, 4310, 0, true],
+    ["open", "http://127.0.0.1:1234/launch?token=secret"],
     ["wait", {}],
   ]);
 });
@@ -11962,8 +13846,8 @@ test("console command can leave browser tabs open on process shutdown", async ()
     open: async (url) => calls.push(["open", url]),
     makeToken: () => "secret",
     log: () => {},
-    startServer: async ({ closeBrowserTabsOnShutdown }) => {
-      calls.push(["server", closeBrowserTabsOnShutdown]);
+    startServer: async ({ closeBrowserTabsOnShutdown, fallbackPort, port }) => {
+      calls.push(["server", closeBrowserTabsOnShutdown, port, fallbackPort]);
       return {
         url: "http://127.0.0.1:1234/",
         server: {},
@@ -11972,11 +13856,30 @@ test("console command can leave browser tabs open on process shutdown", async ()
     waitForClose: async (server) => calls.push(["wait", server]),
   });
 
-  const url = await command({ closeTabs: false, open: false });
+  const url = await command({ closeTabs: false, open: false, port: 0 });
 
   assert.equal(url, "http://127.0.0.1:1234/");
   assert.deepEqual(calls, [
-    ["server", false],
+    ["server", false, 0, undefined],
     ["wait", {}],
   ]);
+});
+
+test("interactive graph server falls back to a random port when the preferred port is busy", async (t) => {
+  const blocker = createServer();
+
+  await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+  t.after(() => blocker.close());
+
+  const serverInfo = await startInteractiveGraphServer({
+    graphs: [{ label: "comm", path: "/repo/comm" }],
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    port: blocker.address().port,
+    fallbackPort: 0,
+  });
+
+  t.after(() => serverInfo.server.close());
+
+  assert.notEqual(new URL(serverInfo.url).port, String(blocker.address().port));
 });

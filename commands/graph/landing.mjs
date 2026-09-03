@@ -3,7 +3,10 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getAttachments as defaultGetAttachments, getBugs as defaultGetBugs, updateBug as defaultUpdateBug } from "../../lib/bugzilla.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
-import { DEFAULT_LANDO_REPO, pushCommits as defaultPushCommits } from "../../lib/lando.mjs";
+import {
+  DEFAULT_LANDO_REPO,
+  pushCommits as defaultPushCommits,
+} from "../../lib/lando.mjs";
 import defaultPhab, { comment as defaultComment, isPhabricatorRateLimitError } from "../../lib/phab.mjs";
 import { run } from "../../lib/utils.mjs";
 import {
@@ -333,6 +336,7 @@ async function runLandingCommand({
     const output = await runInteractiveSubmitCommand({
       command: normalizedCommand,
       session,
+      promptForConfirmation: askLandingConfirm,
     });
 
     throwIfLandingCanceled(session);
@@ -1407,7 +1411,7 @@ async function runGraphLandingFlow(session) {
   appendLandingOutput(session, "Starting landing flow.\n");
 
   const updateResult = await runGraphRepositoryUpdate({
-    graphs: session.graphs,
+    graphs: [session.graph],
     mode: GRAPH_UPDATE_MODE_UPDATE,
     runCommand: session.runCommand,
   });

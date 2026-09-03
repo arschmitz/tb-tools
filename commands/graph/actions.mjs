@@ -5,7 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { run } from "../../lib/utils.mjs";
 import { getBug as defaultGetBug, updateBug as defaultUpdateBug } from "../../lib/bugzilla.mjs";
-import { getNotionStoriesByBugId as defaultGetNotionStoriesByBugId } from "../../lib/notion.mjs";
+import {
+  getNotionStoriesByBugId as defaultGetNotionStoriesByBugId,
+  isNotionAuthenticationError,
+} from "../../lib/notion.mjs";
 import defaultPhab, { comment as defaultComment } from "../../lib/phab.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
 import {
@@ -95,6 +98,26 @@ const INTERACTIVE_REBASE_ACTIONS = new Set([
   INTERACTIVE_REBASE_ACTION_DROP,
 ]);
 
+async function recoverCurrentGraphMainBranch(graph, runCommand) {
+  const currentBranch = await getCurrentGraphBranch(graph, runCommand);
+
+  if (currentBranch !== DEFAULT_BRANCH) {
+    graph.branch = currentBranch || "(detached)";
+    return;
+  }
+
+  const originMainHash = await getGraphOriginMainHash(graph, runCommand);
+  const recovered = await recoverDivergedGraphMainBranches({
+    graph,
+    originMainHash,
+    runCommand,
+  });
+
+  if (recovered.workBranch) {
+    graph.branch = recovered.workBranch;
+  }
+}
+
 async function amendCheckedOutCommit({
   graph,
   message,
@@ -117,6 +140,8 @@ async function amendCheckedOutCommit({
     error.statusCode = 400;
     throw error;
   }
+
+  await recoverCurrentGraphMainBranch(graph, runCommand);
 
   const existingMessage = await getGraphCurrentCommitMessage({
     graph,
@@ -303,10 +328,10 @@ export async function amendCommitMessage({
     getLocalBranchesContainingCommit(graph, selectedHash, runCommand),
     getCommitParents(graph, selectedHash, runCommand),
   ]);
-  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const containingBranches = getPatchBranches(containingBranchRefs);
   const branch = chooseRewordBranch({
-    containingRefs: containingBranchRefs,
-    tipRefs: branchRefs,
+    containingRefs: getPatchBranchRefs(containingBranchRefs),
+    tipRefs: getPatchBranchRefs(branchRefs),
     currentBranch: base.branch,
   });
 
@@ -332,9 +357,18 @@ export async function amendCommitMessage({
 
   const parent = parents[0];
   const stackCommits = await getRebaseCommitStack(graph, selectedHash, branch, runCommand);
+  const stackBranchRefs = [{
+    hash: selectedHash,
+    branches: getPatchBranches(branchRefs),
+  }, ...await getRebaseStackBranches({
+    graph,
+    stackCommits: stackCommits.slice(1),
+    runCommand,
+  })];
   const messagePath = path.join(os.tmpdir(), `tb-tools-amend-${randomUUID()}.txt`);
   const rewrittenCommits = [];
   let rewrittenHash = "";
+  let replayStarted = false;
 
   await writeMessage(
     messagePath,
@@ -348,6 +382,7 @@ export async function amendCommitMessage({
       cwd: graph.path,
       silent: true,
     });
+    replayStarted = true;
 
     for (const [index, commit] of stackCommits.entries()) {
       await runCommand({
@@ -396,6 +431,13 @@ export async function amendCommitMessage({
         });
       }
     }
+  } catch (error) {
+    if (replayStarted) {
+      await resetGraphReplayState(graph, runCommand);
+      await restoreGraphCheckout(graph, base, runCommand);
+    }
+
+    throw error;
   } finally {
     await removeMessage(messagePath).catch(() => {});
   }
@@ -408,12 +450,47 @@ export async function amendCommitMessage({
     silent: true,
   })).trim();
 
-  await runCommand({
-    cmd: "git",
-    args: ["branch", "-f", branch, currentHash],
-    cwd: graph.path,
-    silent: true,
-  });
+  const rewrittenHashByOriginalHash = new Map(
+    rewrittenCommits.map((commit) => [commit.originalHash, commit.hash]),
+  );
+  const branchUpdates = [];
+
+  for (const { hash: originalHash, branches } of stackBranchRefs) {
+    const rewrittenHash = rewrittenHashByOriginalHash.get(originalHash);
+
+    if (!rewrittenHash) {
+      continue;
+    }
+
+    for (const branchName of branches) {
+      await runCommand({
+        cmd: "git",
+        args: ["branch", "-f", branchName, rewrittenHash],
+        cwd: graph.path,
+        silent: true,
+      });
+      branchUpdates.push({
+        branch: branchName,
+        originalHash,
+        hash: rewrittenHash,
+      });
+    }
+  }
+
+  if (!branchUpdates.some((update) => update.branch === branch)) {
+    await runCommand({
+      cmd: "git",
+      args: ["branch", "-f", branch, currentHash],
+      cwd: graph.path,
+      silent: true,
+    });
+    branchUpdates.push({
+      branch,
+      originalHash: stackCommits.at(-1),
+      hash: currentHash,
+    });
+  }
+
   await runCommand({
     cmd: "git",
     args: ["switch", branch],
@@ -438,6 +515,7 @@ export async function amendCommitMessage({
     parent,
     commits: stackCommits,
     rewrittenCommits,
+    branchUpdates,
     amendedCount: stackCommits.length,
     rewrittenHash,
     currentHash,
@@ -516,6 +594,14 @@ async function getLocalBranchesContainingCommit(graph, hash, runCommand) {
     capture: true,
     silent: true,
   });
+}
+
+function getPatchBranches(refsOutput = "") {
+  return parseBranchRefs(refsOutput).filter((branch) => branch !== DEFAULT_BRANCH);
+}
+
+function getPatchBranchRefs(refsOutput = "") {
+  return getPatchBranches(refsOutput).join("\n");
 }
 
 async function getToolRefsAtCommit(graph, hash, runCommand) {
@@ -893,86 +979,14 @@ function createRebaseConflictError({
 async function getRebaseStackBranches({
   graph,
   stackCommits,
-  selectedHash = "",
-  selectedCommitRefs = "",
   runCommand,
 }) {
-  const entries = [];
-
-  for (const hash of stackCommits) {
-    entries.push({
-      hash,
-      branches:
-        hash === selectedHash
-          ? parseBranchRefs(selectedCommitRefs)
-          : parseBranchRefs(
-              await getLocalBranchesAtCommit(graph, hash, runCommand),
-            ),
-    });
-  }
-
-  const stackEntriesByTbToolsId = new Map();
-  const stackEntriesBySubject = new Map();
-
-  for (const entry of entries) {
-    const message = await getGraphCommitMessage({
-      graph,
-      hash: entry.hash,
-      runCommand,
-    });
-    const tbToolsId = getTbToolsIdFromCommitMessage(message);
-    const subject = getCommitSubjectFromMessage(message, entry.hash);
-
-    if (tbToolsId) {
-      const matchingEntries = stackEntriesByTbToolsId.get(tbToolsId) || [];
-      matchingEntries.push(entry);
-      stackEntriesByTbToolsId.set(tbToolsId, matchingEntries);
-    }
-
-    const matchingEntries = stackEntriesBySubject.get(subject) || [];
-    matchingEntries.push({ entry, tbToolsId });
-    stackEntriesBySubject.set(subject, matchingEntries);
-  }
-
-  for (const { branch, hash } of await getLocalBranchTips(graph, runCommand)) {
-    if (branch === DEFAULT_BRANCH || entries.some((entry) => entry.hash === hash)) {
-      continue;
-    }
-
-    const message = await getGraphCommitMessage({
-      graph,
-      hash,
-      runCommand,
-    });
-    const tbToolsId = getTbToolsIdFromCommitMessage(message);
-    const subject = getCommitSubjectFromMessage(message, hash);
-    const matchingById = tbToolsId
-      ? stackEntriesByTbToolsId.get(tbToolsId) || []
-      : [];
-    const matchingBySubject = tbToolsId
-      ? []
-      : (stackEntriesBySubject.get(subject) || []).filter(
-          (candidate) => !candidate.tbToolsId,
-        );
-    const matchingEntry = matchingById.length === 1
-      ? matchingById[0]
-      : matchingBySubject.length === 1
-        ? matchingBySubject[0].entry
-        : null;
-
-    if (
-      !matchingEntry ||
-      await isCommitReachableFromMain(graph, hash, runCommand)
-    ) {
-      continue;
-    }
-
-    matchingEntry.branches = Array.from(
-      new Set([...matchingEntry.branches, branch]),
-    ).sort();
-  }
-
-  return entries;
+  return Promise.all(stackCommits.map(async (hash) => ({
+    hash,
+    branches: getPatchBranches(
+      await getLocalBranchesAtCommit(graph, hash, runCommand),
+    ),
+  })));
 }
 
 async function getLocalBranchNames(graph, runCommand) {
@@ -1192,15 +1206,13 @@ function normalizeGraphDirtyAction(action = "") {
 }
 
 async function getGraphDirtyStatus(graph, runCommand) {
-  const status = await runCommand({
+  return runCommand({
     cmd: "git",
     args: ["status", "--porcelain"],
     cwd: graph.path,
     capture: true,
     silent: true,
   });
-
-  return status.trim();
 }
 
 export async function getGraphDirtyCheckouts({
@@ -1214,7 +1226,11 @@ export async function getGraphDirtyCheckouts({
       continue;
     }
 
-    const status = await getGraphDirtyStatus(graph, runCommand);
+    const rawStatus = await getGraphDirtyStatus(graph, runCommand);
+    const statusLines = rawStatus
+      .split("\n")
+      .filter((line) => line && !line.startsWith("?? "));
+    const status = statusLines.join("\n").trim();
 
     if (status) {
       dirty.push({
@@ -1222,6 +1238,7 @@ export async function getGraphDirtyCheckouts({
         label: graph.label,
         path: graph.path,
         status,
+        files: statusLines.map(parseGraphStatusFile).filter(Boolean),
       });
     }
   }
@@ -1330,7 +1347,7 @@ async function isGraphCommitAncestor(graph, ancestor, descendant, runCommand) {
     });
     return true;
   } catch (error) {
-    if (error?.code === 1) {
+    if (error?.code === 1 || error?.code === undefined) {
       return false;
     }
 
@@ -1420,7 +1437,7 @@ async function getGraphRebaseWorkRef(graph, runCommand) {
       silent: true,
     })).trim();
     const containingBranchRefs = await getLocalBranchesContainingCommit(graph, currentHash, runCommand);
-    const containingBranches = parseBranchRefs(containingBranchRefs);
+    const containingBranches = getPatchBranches(containingBranchRefs);
 
     if (containingBranches.length === 1) {
       return {
@@ -1446,6 +1463,119 @@ async function getGraphLocalCommitsOffMain(graph, ref, runCommand) {
   });
 
   return output.trim().split(/\s+/).filter(Boolean);
+}
+
+async function getRecoveryBranchName(graph, hash, runCommand) {
+  const bugBranch = await getBugBranchNameForCommit(graph, hash, runCommand);
+
+  if (bugBranch) {
+    return bugBranch;
+  }
+
+  const existingBranches = await getLocalBranchNames(graph, runCommand);
+  const baseName = `recovery/${hash.slice(0, 12)}`;
+
+  if (!existingBranches.includes(baseName)) {
+    return baseName;
+  }
+
+  let suffix = 2;
+
+  while (existingBranches.includes(`${baseName}-${suffix}`)) {
+    suffix += 1;
+  }
+
+  return `${baseName}-${suffix}`;
+}
+
+async function recoverDivergedGraphMainBranches({
+  graph,
+  originMainHash,
+  runCommand = run,
+}) {
+  const mainRef = `refs/heads/${DEFAULT_BRANCH}`;
+  const localMainHash = await getOptionalGitRefHash({
+    cwd: graph.path,
+    ref: mainRef,
+    runCommand,
+  });
+
+  if (
+    !localMainHash ||
+    localMainHash === originMainHash ||
+    await isGraphCommitAncestor(graph, localMainHash, originMainHash, runCommand)
+  ) {
+    return {
+      recoveredBranches: [],
+      workBranch: "",
+    };
+  }
+
+  const localCommits = await getGraphLocalCommitsOffMain(
+    graph,
+    DEFAULT_BRANCH,
+    runCommand,
+  );
+  const branchesByHash = new Map();
+
+  for (const { branch, hash } of await getLocalBranchTips(graph, runCommand)) {
+    if (branch === DEFAULT_BRANCH) {
+      continue;
+    }
+
+    const branches = branchesByHash.get(hash) || [];
+    branches.push(branch);
+    branchesByHash.set(hash, branches);
+  }
+
+  const recoveredBranches = [];
+
+  for (const hash of localCommits) {
+    if (branchesByHash.has(hash)) {
+      continue;
+    }
+
+    const branch = await getRecoveryBranchName(graph, hash, runCommand);
+
+    await runCommand({
+      cmd: "git",
+      args: ["branch", branch, hash],
+      cwd: graph.path,
+      silent: true,
+    });
+    branchesByHash.set(hash, [branch]);
+    recoveredBranches.push({ branch, hash });
+  }
+
+  const workBranches = branchesByHash.get(localMainHash) || [];
+  const workBranch = chooseCheckoutBranch(workBranches.join("\n"));
+
+  if (!workBranch) {
+    const error = new Error(
+      `${graph.label} could not preserve local ${DEFAULT_BRANCH} commit ` +
+        `${localMainHash.slice(0, 12)} before updating.`,
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
+  await runCommand({
+    cmd: "git",
+    args: ["switch", workBranch],
+    cwd: graph.path,
+    silent: true,
+  });
+  await runCommand({
+    cmd: "git",
+    args: ["update-ref", mainRef, originMainHash, localMainHash],
+    cwd: graph.path,
+    silent: true,
+  });
+
+  return {
+    recoveredBranches,
+    workBranch,
+  };
 }
 
 async function replayGraphUpdateRebase({
@@ -1529,13 +1659,18 @@ export async function updateGraphCheckout({
   const updateMode = normalizeGraphUpdateMode(mode);
 
   await fetchGraphMain(graph, runCommand);
+  const originMainHash = await getGraphOriginMainHash(graph, runCommand);
+  const recoveredMainBranches = await recoverDivergedGraphMainBranches({
+    graph,
+    originMainHash,
+    runCommand,
+  });
 
   if (updateMode === GRAPH_UPDATE_MODE_REBASE) {
     const workRef = await getGraphRebaseWorkRef(graph, runCommand);
     const localCommits = await getGraphLocalCommitsOffMain(graph, workRef.ref, runCommand);
 
     if (localCommits.length) {
-      const originMainHash = await getGraphOriginMainHash(graph, runCommand);
       const mainUpdate = await fastForwardLocalMainRef({
         graph,
         originMainHash,
@@ -1568,7 +1703,8 @@ export async function updateGraphCheckout({
     currentHash: base.hash,
     rebasedCount: 0,
     commits: [],
-    message: `${graph.label} updated ${DEFAULT_BRANCH} from origin/${DEFAULT_BRANCH}.`,
+    recoveredBranches: recoveredMainBranches.recoveredBranches,
+    message: `${graph.label} updated ${DEFAULT_BRANCH} from origin/${DEFAULT_BRANCH}${recoveredMainBranches.recoveredBranches.length ? ` after recovering ${recoveredMainBranches.recoveredBranches.length} branch${recoveredMainBranches.recoveredBranches.length === 1 ? "" : "es"}` : ""}.`,
   };
 }
 
@@ -2193,6 +2329,10 @@ async function getNotionStoryStatus({
   try {
     return await getNotionStoriesByBugId({ bugId });
   } catch (error) {
+    if (isNotionAuthenticationError(error)) {
+      return null;
+    }
+
     return {
       bugId,
       error: String(error?.message || error),
@@ -2840,7 +2980,7 @@ function appendSubmitOutput(session, output = "") {
 export function getInteractiveYesNoPrompt(output = "") {
   const text = stripAnsi(output).replace(/\r/g, "\n");
   const tail = text.slice(-2000);
-  const match = tail.match(/(?:^|\n)([^\n]*(?:\[[Yy]\/[Nn]\]|\[[Nn]\/[Yy]\]|\((?:yes|no|always|y|n|a)(?:\/(?:yes|no|always|y|n|a)){1,3}\)\?)[^\n]*)$/i);
+  const match = tail.match(/([^\n]*(?:\[[Yy]\/[Nn]\]|\[[Nn]\/[Yy]\]|\((?:yes|no|always|y|n|a)(?:\/(?:yes|no|always|y|n|a)){1,3}\)\?)[^\n]*)$/i);
 
   if (!match) {
     return "";
@@ -2851,6 +2991,14 @@ export function getInteractiveYesNoPrompt(output = "") {
 
 function askSubmitConfirm(session, message, source = "tb-tools") {
   return new Promise((resolve, reject) => {
+    if (session.cancelRequested) {
+      const error = new Error("Submit canceled.");
+
+      error.canceled = true;
+      reject(error);
+      return;
+    }
+
     if (session.prompt) {
       reject(new Error("Submit is already waiting on a browser prompt."));
       return;
@@ -2911,6 +3059,7 @@ export async function runInteractiveSubmitCommand({
   command,
   session,
   spawnCommand = spawn,
+  promptForConfirmation = askSubmitConfirm,
 }) {
   appendSubmitOutput(session, `$ ${formatCommandForOutput(command)}\n`);
   const initialOutputLength = session.output.length;
@@ -2954,7 +3103,7 @@ export async function runInteractiveSubmitCommand({
 
       promptSearchStart = session.output.length;
       promptPromise = promptPromise.then(async () => {
-        const answer = await askSubmitConfirm(session, prompt, command.cmd);
+        const answer = await promptForConfirmation(session, prompt, command.cmd);
         child.stdin.write(answer ? "y\n" : "n\n");
       }).catch((error) => {
         child.kill();
@@ -3003,6 +3152,29 @@ export function serializeSubmitSession(session) {
     snapshot: session.snapshot,
     output: session.output || "",
   };
+}
+
+function cancelGraphSubmitSession(session) {
+  if (["complete", "error", "canceled"].includes(session.status)) {
+    return;
+  }
+
+  session.cancelRequested = true;
+
+  if (session.pendingPrompt) {
+    const pendingPrompt = session.pendingPrompt;
+    const error = new Error("Submit canceled.");
+
+    error.canceled = true;
+    session.pendingPrompt = null;
+    pendingPrompt.reject(error);
+  }
+
+  session.prompt = null;
+  session.cancelCurrentCommand?.();
+  session.status = "canceled";
+  session.message = "Submit canceled.";
+  appendSubmitOutput(session, "Submit canceled.\n");
 }
 
 function createBrowserSubmitPrompts(session) {
@@ -3067,7 +3239,7 @@ async function prepareGraphSubmitDescendantReplay({
     getLocalBranchesAtCommit(graph, base.hash, runCommand),
     getLocalBranchesContainingCommit(graph, base.hash, runCommand),
   ]);
-  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const containingBranches = getPatchBranches(containingBranchRefs);
   const stackCandidate = chooseRebaseStackCandidate({
     candidates: await Promise.all(
       containingBranches.map((candidateBranch) =>
@@ -3305,6 +3477,7 @@ function createGraphSubmitRunner({
   session,
   runCommand = run,
   postComment = defaultComment,
+  afterMozPhabSubmit = async () => {},
 }) {
   const prompts = createBrowserSubmitPrompts(session);
   const graphRunCommand = withGraphSubmitCwd(graph, session, runCommand);
@@ -3337,12 +3510,18 @@ function createGraphSubmitRunner({
       graph,
       runCommand,
     }),
-    afterMozPhabSubmit: ({ context }) => replayGraphSubmitDescendants({
-      graph,
-      session,
-      plan: context,
-      runCommand,
-    }),
+    afterMozPhabSubmit: async ({ context, ...result }) => {
+      try {
+        return await replayGraphSubmitDescendants({
+          graph,
+          session,
+          plan: context,
+          runCommand,
+        });
+      } finally {
+        await afterMozPhabSubmit(result);
+      }
+    },
     createSpinner: (text) => createBrowserSubmitSpinner(session, text),
   });
 }
@@ -3354,6 +3533,8 @@ export function createGraphSubmitSession({
   getSnapshot,
   runCommand = run,
   postComment = defaultComment,
+  submitMessage = "",
+  afterMozPhabSubmit,
 }) {
   const session = {
     id: randomUUID(),
@@ -3366,27 +3547,58 @@ export function createGraphSubmitSession({
     links: [],
     error: "",
     snapshot: null,
+    cancelRequested: false,
+    cancelCurrentCommand: null,
   };
   const submit = createGraphSubmitRunner({
     graph,
     session,
     runCommand,
     postComment,
+    afterMozPhabSubmit: async (result) => {
+      if (!afterMozPhabSubmit) {
+        return;
+      }
+
+      try {
+        await afterMozPhabSubmit(result);
+        appendSubmitOutput(session, "Saved Phabricator reply draft cleared after upload.\n");
+      } catch (error) {
+        appendSubmitOutput(
+          session,
+          `Patch uploaded, but the saved Phabricator reply draft could not be cleared: ${error?.message || error}\n`,
+        );
+      }
+    },
   });
 
   session.answer = (promptId, answer) => {
     answerSubmitSessionPrompt(session, promptId, answer);
   };
+  session.cancel = () => {
+    cancelGraphSubmitSession(session);
+  };
 
   queueMicrotask(async () => {
     try {
-      const result = await submit(GRAPH_SUBMIT_OPTIONS, []);
+      const result = await submit({
+        ...GRAPH_SUBMIT_OPTIONS,
+        ...(String(submitMessage || "").trim()
+          ? { message: String(submitMessage).trim() }
+          : {}),
+      }, []);
       session.result = result;
       session.links = getSubmitLinks(result);
       session.snapshot = await getSnapshot(graph, snapshotLimit);
       session.status = "complete";
       session.message = "Submit complete.";
     } catch (error) {
+      if (session.cancelRequested || error?.canceled) {
+        session.status = "canceled";
+        session.message = "Submit canceled.";
+        return;
+      }
+
       session.status = "error";
       session.error = String(error?.message || error);
       session.message = session.error;
@@ -4142,10 +4354,13 @@ export async function getInteractiveRebasePlan({
     getLocalBranchesAtCommit(graph, hash, runCommand),
     getLocalBranchesContainingCommit(graph, hash, runCommand),
   ]);
-  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const containingBranches = getPatchBranches(containingBranchRefs);
+  const candidateBranches = containingBranches.length
+    ? containingBranches
+    : parseBranchRefs(containingBranchRefs);
   const stackCandidate = chooseRebaseStackCandidate({
     candidates: await Promise.all(
-      containingBranches.map((candidateBranch) =>
+      candidateBranches.map((candidateBranch) =>
         getRebaseStackCandidate(graph, hash, candidateBranch, runCommand),
       ),
     ),
@@ -5237,18 +5452,30 @@ export async function rebaseCommit({
     throw error;
   }
 
+  if (await isGraphCommitAncestor(graph, hash, base.hash, runCommand)) {
+    const error = new Error(
+      `Cannot rebase ${hash.slice(0, 12)} because the current checkout already descends from it.`,
+    );
+
+    error.statusCode = 409;
+    throw error;
+  }
+
   const [branchRefs, containingBranchRefs] = await Promise.all([
     getLocalBranchesAtCommit(graph, hash, runCommand),
     getLocalBranchesContainingCommit(graph, hash, runCommand),
   ]);
-  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const containingBranches = getPatchBranches(containingBranchRefs);
+  const candidateBranches = containingBranches.length
+    ? containingBranches
+    : parseBranchRefs(containingBranchRefs);
   const stackCandidate =
     mode === GRAPH_REBASE_MODE_SELECTED
       ? {
           branch: await chooseSelectedRebaseResultBranch({
             graph,
             hash,
-            branchRefs,
+            branchRefs: getPatchBranchRefs(branchRefs),
             currentBranch: base.branch,
             preferredBranch,
             runCommand,
@@ -5257,7 +5484,7 @@ export async function rebaseCommit({
         }
       : chooseRebaseStackCandidate({
           candidates: await Promise.all(
-            containingBranches.map((candidateBranch) =>
+            candidateBranches.map((candidateBranch) =>
               getRebaseStackCandidate(graph, hash, candidateBranch, runCommand),
             ),
           ),
@@ -5404,13 +5631,50 @@ export async function pruneCommitBranches({
     getToolRefsContainingCommit(graph, hash, runCommand),
     getCommitParents(graph, hash, runCommand),
   ]);
-  const containingBranches = parseBranchRefs(containingBranchRefs);
+  const containingBranches = getPatchBranches(containingBranchRefs);
   const branches = choosePruneBranches({
-    containingRefs: containingBranchRefs,
-    tipRefs: branchRefs,
+    containingRefs: getPatchBranchRefs(containingBranchRefs),
+    tipRefs: getPatchBranchRefs(branchRefs),
     currentBranch,
     preferredBranch,
   });
+  const allContainingBranches = parseBranchRefs(containingBranchRefs);
+
+  if (allContainingBranches.includes(DEFAULT_BRANCH)) {
+    const originMainHash = await getGraphOriginMainHash(graph, runCommand);
+
+    if (currentBranch === DEFAULT_BRANCH) {
+      const recovered = await recoverDivergedGraphMainBranches({
+        graph,
+        originMainHash,
+        runCommand,
+      });
+
+      if (recovered.workBranch) {
+        return pruneCommitBranches({
+          graph,
+          hash,
+          preferredBranch,
+          runCommand,
+        });
+      }
+    }
+
+    if (await isGraphCommitAncestor(graph, hash, originMainHash, runCommand)) {
+      const error = new Error(
+        `Cannot prune ${hash.slice(0, 12)} because it is already on origin/${DEFAULT_BRANCH}.`,
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const error = new Error(
+      `${DEFAULT_BRANCH} contains local commit ${hash.slice(0, 12)}. Check it out and update to recover its branch before pruning.`,
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
   const containingToolRefNames = parseBranchRefs(containingToolRefs);
   const toolRefs = choosePruneRefs({
     containingRefs: containingToolRefs,

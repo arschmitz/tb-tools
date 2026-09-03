@@ -101,7 +101,7 @@ test("diff command writes and opens a rendered git diff", async () => {
   assert.equal(outputPath, "/tmp/tb-diff.html");
   assert.deepEqual(calls[0], {
     cmd: "git",
-    args: ["diff", "--unified=20", "--cached", "--", "mail/base/test/browser/browser_tree.js"],
+    args: ["diff", "--unified=2147483647", "--cached", "--", "mail/base/test/browser/browser_tree.js"],
     cwd: "/repo/comm",
     capture: true,
     silent: true,
