@@ -11,6 +11,7 @@ import {
   GRAPH_CLIENT_STYLESHEETS,
 } from "./graph/constants.mjs";
 import { getCheckoutGraphData, getCheckoutGraphMetadata } from "./graph/data.mjs";
+import { resolveGraphCheckouts } from "./graph/checkouts.mjs";
 import { getGraphOutputPath, writeGraphClientAssets } from "./graph/assets.mjs";
 import { startInteractiveGraphServer, waitForInteractiveServerClose } from "./graph/server.mjs";
 import {
@@ -27,10 +28,14 @@ export * from "./graph/actions.mjs";
 export * from "./graph/assets.mjs";
 export * from "./graph/branches.mjs";
 export * from "./graph/commit.mjs";
+export * from "./graph/checkouts.mjs";
+export * from "./graph/checkout-transfer.mjs";
+export * from "./graph/review-sync.mjs";
 export * from "./graph/landing.mjs";
 export * from "./graph/new-patch.mjs";
 export * from "./graph/patching.mjs";
 export * from "./graph/patch-update.mjs";
+export * from "./graph/patch-review.mjs";
 export * from "./graph/patch-update-memory.mjs";
 export * from "./graph/phab-auth.mjs";
 export * from "./graph/reviews.mjs";
@@ -50,6 +55,9 @@ export function createGraphCommand({
   runCommand = run,
   log = console.log,
   forceInteractive = false,
+  appConfig = defaultConfig,
+  getCheckouts = resolveGraphCheckouts,
+  cwd = process.cwd(),
 } = {}) {
   return async function graph({
     limit = 80,
@@ -70,21 +78,19 @@ export function createGraphCommand({
     const diffByteLimit = Number.isFinite(parsedDiffByteLimit)
       ? parsedDiffByteLimit
       : DEFAULT_MAX_DIFF_BYTES;
-    const checkouts = [];
-
-    if (comm) {
-      checkouts.push({ label: "comm", cwd: "." });
-    }
-
-    if (firefox) {
-      checkouts.push({ label: "firefox", cwd: ".." });
-    }
+    const isInteractive = forceInteractive || Boolean(interactive);
+    const checkouts = getCheckouts({
+      cwd,
+      config: appConfig,
+      comm,
+      firefox,
+      includeReview: isInteractive,
+    });
 
     if (!checkouts.length) {
       throw new Error("At least one checkout tab must be enabled.");
     }
 
-    const isInteractive = forceInteractive || Boolean(interactive);
     const closeTabsOnShutdown = closeTabs !== false && closeTabs !== "false";
     const graphs = await Promise.all(checkouts.map((checkout) => {
       if (isInteractive) {
@@ -105,7 +111,7 @@ export function createGraphCommand({
         enabled: isInteractive,
         pageSize: commitPageSize,
         closeTabsOnShutdown,
-        aiEnabled: defaultConfig?.ai?.enabled === true,
+        aiEnabled: appConfig?.ai?.enabled === true,
         token,
       },
       stylesheetHref: isInteractive
@@ -133,7 +139,7 @@ export function createGraphCommand({
         port,
         fallbackPort: forceInteractive && Number(port) === DEFAULT_CONSOLE_PORT ? 0 : undefined,
         closeBrowserTabsOnShutdown: closeTabsOnShutdown,
-        appConfig: defaultConfig,
+        appConfig,
         runCommand,
       });
 

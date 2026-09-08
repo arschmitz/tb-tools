@@ -10,6 +10,7 @@ import {
 } from "./data.mjs";
 
 const TRANSACTION_PAGE_SIZE = 100;
+const MAX_TRANSACTION_PAGES = 4;
 
 function getGraphCommitReviewHaystack({ graph, hash, message }) {
   const commit = (graph.commits || []).find((item) => item.hash === hash);
@@ -53,8 +54,9 @@ async function getReviewerNamesByPhid({ phids, phab }) {
 async function getRevisionTransactions({ revision, phab }) {
   const transactions = [];
   let after = null;
+  let historyTruncated = false;
 
-  do {
+  for (let page = 0; page < MAX_TRANSACTION_PAGES; page++) {
     const response = await phab({
       route: "transaction.search",
       params: {
@@ -67,9 +69,15 @@ async function getRevisionTransactions({ revision, phab }) {
 
     transactions.push(...(result.data || []));
     after = result.cursor?.after || null;
-  } while (after);
 
-  return transactions;
+    if (!after) {
+      break;
+    }
+
+    historyTruncated = page === MAX_TRANSACTION_PAGES - 1;
+  }
+
+  return { historyTruncated, transactions };
 }
 
 function getTransactionCommentContent(comment) {
@@ -121,6 +129,13 @@ function getInlineSuggestionText(transaction, comment) {
 
   return String(candidates.find((value) => typeof value === "string") || "")
     .trimEnd();
+}
+
+function getInlineSuggestionRecoverySources(inlineSources) {
+  return inlineSources.filter(({ comment, transaction }) => (
+    !getTransactionCommentContent(comment) &&
+    !getInlineSuggestionText(transaction, comment)
+  ));
 }
 
 function getInlineProseContent(comment) {
@@ -270,24 +285,125 @@ function getRevisionDiffs(revision) {
     ));
 }
 
-async function getRecoveredSuggestionContents({
+function getDiffContextRange(offset, count) {
+  return count === 1 ? String(offset) : `${offset},${count}`;
+}
+
+function getDiffHunkEntries(hunk) {
+  let oldLine = Number(hunk?.oldOffset);
+  let newLine = Number(hunk?.newOffset);
+
+  if (!Number.isInteger(newLine) || newLine < 1) {
+    return [];
+  }
+
+  if (!Number.isInteger(oldLine) || oldLine < 0) {
+    oldLine = Math.max(0, newLine - 1);
+  }
+
+  return String(hunk?.corpus || "").split(/\r?\n/).reduce((entries, rawLine) => {
+    const prefix = rawLine[0];
+
+    if (!prefix || ![" ", "+", "-"].includes(prefix)) {
+      return entries;
+    }
+
+    const entry = {
+      oldLine: prefix === "+" ? null : oldLine,
+      newLine: prefix === "-" ? null : newLine,
+      rawLine,
+    };
+
+    if (prefix !== "+") {
+      oldLine++;
+    }
+
+    if (prefix !== "-") {
+      newLine++;
+    }
+
+    entries.push(entry);
+    return entries;
+  }, []);
+}
+
+function getInlineCommentContextDiff({
+  diff,
+  filePath,
+  line,
+  lineLength,
+}) {
+  const normalizedPath = getNormalizedFilePath(filePath);
+  const change = (diff?.changes || []).find((item) => (
+    [item?.currentPath, item?.oldPath]
+      .map(getNormalizedFilePath)
+      .includes(normalizedPath)
+  ));
+  const commentLine = Math.abs(Number(line));
+  const lineSide = Number(line) < 0 ? "oldLine" : "newLine";
+
+  if (!normalizedPath || !change?.hunks?.length || !Number.isInteger(commentLine)) {
+    return "";
+  }
+
+  for (const hunk of change.hunks) {
+    const entries = getDiffHunkEntries(hunk);
+    const firstLine = commentLine;
+    const lastLine = commentLine + Math.max(1, Number(lineLength) || 1) - 1;
+    const anchorIndex = entries.findIndex((entry) => (
+      entry[lineSide] !== null && entry[lineSide] >= firstLine && entry[lineSide] <= lastLine
+    ));
+
+    if (anchorIndex < 0) {
+      continue;
+    }
+
+    const start = Math.max(0, anchorIndex - 7);
+    const end = Math.min(entries.length, anchorIndex + Math.max(1, Number(lineLength) || 1) + 7);
+    const selected = entries.slice(start, end);
+    const preceding = entries.slice(0, start);
+    const oldOffset = Number.isInteger(Number(hunk.oldOffset))
+      ? Number(hunk.oldOffset)
+      : Math.max(0, Number(hunk.newOffset) - 1);
+    const oldStart = oldOffset + preceding.filter((entry) => (
+      entry.oldLine !== null
+    )).length;
+    const newStart = Number(hunk.newOffset) + preceding.filter((entry) => (
+      entry.newLine !== null
+    )).length;
+    const oldCount = selected.filter((entry) => entry.oldLine !== null).length;
+    const newCount = selected.filter((entry) => entry.newLine !== null).length;
+
+    return [
+      `diff --git a/${normalizedPath} b/${normalizedPath}`,
+      `--- a/${normalizedPath}`,
+      `+++ b/${normalizedPath}`,
+      `@@ -${getDiffContextRange(oldStart, oldCount)} +${getDiffContextRange(newStart, newCount)} @@`,
+      ...selected.map((entry) => entry.rawLine),
+    ].join("\n");
+  }
+
+  return "";
+}
+
+async function getInlineReviewData({
   inlineSources,
+  suggestionSources,
   phab,
   revision,
 }) {
-  const suggestionSources = inlineSources.filter(({ comment, transaction }) => (
-    !getTransactionCommentContent(comment) &&
-    !getInlineSuggestionText(transaction, comment)
-  ));
-
-  if (!suggestionSources.length) {
-    return new Map();
+  const result = {
+    diffsById: new Map(),
+    suggestionContents: new Map(),
+  };
+  if (!inlineSources.length) {
+    return result;
   }
 
   const revisionId = Number(String(revision).replace(/^D/, ""));
 
   if (!Number.isInteger(revisionId)) {
-    return new Map();
+    return result;
   }
 
   let response;
@@ -298,15 +414,16 @@ async function getRecoveredSuggestionContents({
       params: { revision_id: revisionId },
     });
   } catch {
-    return new Map();
+    return result;
   }
 
   const diffs = getRevisionDiffs(response?.result);
-  const diffsById = new Map(diffs.map((diff) => [Number(diff.id), diff]));
-  const contents = new Map();
+  result.diffsById = new Map(diffs.map((diff) => [Number(diff.id), diff]));
 
   for (const source of suggestionSources) {
-    const originalDiff = diffsById.get(Number(source.transaction?.fields?.diff?.id));
+    const originalDiff = result.diffsById.get(
+      Number(source.transaction?.fields?.diff?.id),
+    );
 
     if (!originalDiff) {
       continue;
@@ -338,7 +455,7 @@ async function getRecoveredSuggestionContents({
       });
 
       if (content) {
-        contents.set(
+        result.suggestionContents.set(
           getTransactionCommentId(
             source.transaction,
             source.comment,
@@ -351,7 +468,7 @@ async function getRecoveredSuggestionContents({
     }
   }
 
-  return contents;
+  return result;
 }
 
 function getInlineCodeSuggestion({
@@ -414,6 +531,7 @@ function normalizeInlineComment({
   transaction,
   comment,
   index,
+  inlineReviewDiffs,
   recoveredSuggestionContents,
   reviewerNames,
   revision,
@@ -435,9 +553,10 @@ function normalizeInlineComment({
     revision,
   });
   normalized.content = getInlineProseContent(comment);
-  const isNewFile = typeof transaction.fields.isNewFile === "boolean"
-    ? transaction.fields.isNewFile
-    : null;
+  // Phabricator encodes the diff side in the sign of the inline line number.
+  // Its isNewFile field is not reliable enough to choose a rendered side.
+  const contextLineSide = line < 0 ? "old" : "new";
+  const isNewFile = contextLineSide === "new";
   const codeSuggestion = getInlineCodeSuggestion({
     comment,
     index,
@@ -445,6 +564,12 @@ function normalizeInlineComment({
     revision,
     transaction,
     webSuggestionContents,
+  });
+  const contextDiff = getInlineCommentContextDiff({
+    diff: inlineReviewDiffs?.get(Number(transaction.fields.diff?.id)),
+    filePath,
+    line,
+    lineLength: Number(transaction.fields.length) || 1,
   });
 
   return {
@@ -456,6 +581,10 @@ function normalizeInlineComment({
     isNewFile,
     lineLength: Number(transaction.fields.length) || 1,
     lineNumber,
+    contextLineSide,
+    ...(contextDiff ? {
+      contextDiff,
+    } : {}),
     url: getPhabCommentUrl({ comment, revision }),
   };
 }
@@ -569,26 +698,30 @@ export async function getGraphCommitReview({
   const result = {
     available: true,
     comments: [],
+    historyTruncated: false,
     inlineComments: [],
     revision,
     url: getPhabUrl(revision),
   };
 
   try {
-    const [transactions, revisionAuthorPhid] = await Promise.all([
+    const [transactionResult, revisionAuthorPhid] = await Promise.all([
       getRevisionTransactions({ revision, phab }),
       getRevisionAuthorPhid({ revision, phab }),
     ]);
+    const { historyTruncated, transactions } = transactionResult;
     const { inlineSources, regularSources } = getReviewSources(
       transactions,
       revisionAuthorPhid,
     );
+    const suggestionSources = getInlineSuggestionRecoverySources(inlineSources);
     const reviewerNames = await getReviewerNamesByPhid({
       phab,
       phids: getReviewAuthorPhids([...regularSources, ...inlineSources]),
     });
-    const recoveredSuggestionContents = await getRecoveredSuggestionContents({
+    const inlineReviewData = await getInlineReviewData({
       inlineSources,
+      suggestionSources,
       phab,
       revision,
     });
@@ -620,13 +753,15 @@ export async function getGraphCommitReview({
     result.inlineComments = uniqueComments(inlineSources
       .map((source) => normalizeInlineComment({
         ...source,
+        inlineReviewDiffs: inlineReviewData.diffsById,
         reviewerNames,
-        recoveredSuggestionContents,
+        recoveredSuggestionContents: inlineReviewData.suggestionContents,
         revision,
         webSuggestionContents,
       }))
       .filter(Boolean))
       .sort((first, second) => first.dateCreated - second.dateCreated);
+    result.historyTruncated = historyTruncated;
   } catch (error) {
     result.error = String(error?.message || error);
   }

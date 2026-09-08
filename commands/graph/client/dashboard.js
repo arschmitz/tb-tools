@@ -1,11 +1,14 @@
 import { GRAPHS, INTERACTIVE } from "./config.js";
 import { openPatchUpdateDialog } from "./patch-update-dialog.js";
+import { openPatchReviewDialog } from "./patch-review-dialog.js";
 import { setConsoleRoute } from "./view-router.js";
 
 const dashboardTab = document.querySelector(".dashboard-tab");
 const dashboardPanel = document.querySelector(".dashboard-panel");
 const dashboardStatus = dashboardPanel?.querySelector(".dashboard-status");
 const dashboardRefresh = dashboardPanel?.querySelector(".dashboard-refresh");
+const dashboardLoading = dashboardPanel?.querySelector(".dashboard-loading");
+const dashboardLoadingText = dashboardPanel?.querySelector(".dashboard-loading-text");
 const dashboardErrors = dashboardPanel?.querySelector(".dashboard-errors");
 
 const sections = new Map([
@@ -54,7 +57,10 @@ function createLink({ href, text, className = "" }) {
   return link;
 }
 
-function createPatchRow(patch, { canUpdate = false } = {}) {
+function createPatchRow(
+  patch,
+  { canUpdate = false, canReview = false, showAuthor = false } = {},
+) {
   const row = document.createElement("article");
   const heading = document.createElement("div");
   const primary = document.createElement("div");
@@ -91,6 +97,14 @@ function createPatchRow(patch, { canUpdate = false } = {}) {
   status.textContent = patch.statusName;
   meta.append(status);
 
+  if (showAuthor && patch.authorName) {
+    const author = document.createElement("span");
+
+    author.className = "dashboard-author";
+    author.textContent = `Author: ${patch.authorName}`;
+    meta.append(author);
+  }
+
   if (patch.groups?.length) {
     const groups = document.createElement("span");
 
@@ -115,7 +129,8 @@ function createPatchRow(patch, { canUpdate = false } = {}) {
     update.textContent = "Update";
     update.addEventListener("click", () => {
       const graphIndex = GRAPHS.findIndex((graph) => (
-        String(graph.label || "").toLowerCase() === "comm"
+        String(graph.repository || graph.label || "").toLowerCase() === "comm" &&
+        graph.checkout !== "review"
       ));
 
       openPatchUpdateDialog({
@@ -124,6 +139,16 @@ function createPatchRow(patch, { canUpdate = false } = {}) {
       });
     });
     heading.append(update);
+  }
+
+  if (canReview) {
+    const review = document.createElement("button");
+
+    review.className = "dashboard-patch-review";
+    review.type = "button";
+    review.textContent = "Review";
+    review.addEventListener("click", () => openPatchReviewDialog({ patch }));
+    heading.append(review);
   }
 
   row.append(heading, meta);
@@ -233,6 +258,10 @@ function renderSection(sectionName, rows = []) {
           : createPatchRow(row, {
             canUpdate: sectionName === "own-needs-revision" ||
               sectionName === "own-needs-review",
+            canReview: sectionName === "direct-review" ||
+              sectionName === "group-first-review",
+            showAuthor: sectionName === "direct-review" ||
+              sectionName === "group-first-review",
           }),
     );
   }
@@ -256,10 +285,17 @@ function renderDashboard(result) {
     : status;
 }
 
-function setDashboardLoading(isLoading) {
+function setDashboardLoading(isLoading, message = "") {
   loadingDashboard = isLoading;
+  dashboardPanel?.classList.toggle("is-loading", isLoading);
+  dashboardPanel?.setAttribute("aria-busy", String(isLoading));
   dashboardRefresh.disabled = isLoading;
   dashboardRefresh.textContent = isLoading ? "Refreshing..." : "Refresh";
+  dashboardLoading.hidden = !isLoading;
+
+  if (isLoading && dashboardLoadingText) {
+    dashboardLoadingText.textContent = message || "Loading dashboard...";
+  }
 
   if (isLoading) {
     dashboardStatus.textContent = "Loading open patches, review queues, and assigned bugs...";
@@ -271,7 +307,10 @@ export async function loadDashboard({ force = false } = {}) {
     return;
   }
 
-  setDashboardLoading(true);
+  setDashboardLoading(
+    true,
+    force ? "Refreshing dashboard..." : "Loading dashboard...",
+  );
 
   try {
     const response = await fetch(
@@ -299,6 +338,7 @@ export function showDashboard({ updateLocation = true } = {}) {
     return;
   }
 
+  document.body.classList.remove("graph-view-active");
   document.querySelectorAll(".tab, .panel").forEach((node) => {
     node.classList.remove("active");
   });

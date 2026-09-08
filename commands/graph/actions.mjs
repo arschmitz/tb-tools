@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { run } from "../../lib/utils.mjs";
+import { getTbToolsCommandEnvironment, run } from "../../lib/utils.mjs";
 import { getBug as defaultGetBug, updateBug as defaultUpdateBug } from "../../lib/bugzilla.mjs";
 import {
   getNotionStoriesByBugId as defaultGetNotionStoriesByBugId,
@@ -828,7 +828,11 @@ function uniqueCommits(commits = []) {
   return Array.from(new Set(commits.filter(Boolean)));
 }
 
-async function isCommitReachableFromMain(graph, hash, runCommand) {
+export async function isGraphCommitOnOriginMain({
+  graph,
+  hash,
+  runCommand = run,
+}) {
   try {
     await runCommand({
       cmd: "git",
@@ -847,7 +851,7 @@ async function filterRebaseCommitsOnMain(graph, commits, runCommand) {
   const skipped = [];
 
   for (const hash of commits) {
-    if (await isCommitReachableFromMain(graph, hash, runCommand)) {
+    if (await isGraphCommitOnOriginMain({ graph, hash, runCommand })) {
       skipped.push(hash);
     } else {
       kept.push(hash);
@@ -1037,7 +1041,7 @@ async function getSelectedRebaseParentAnchors({
 
   const parent = parents[0];
 
-  if (await isCommitReachableFromMain(graph, parent, runCommand)) {
+  if (await isGraphCommitOnOriginMain({ graph, hash: parent, runCommand })) {
     return [];
   }
 
@@ -1205,6 +1209,47 @@ function normalizeGraphDirtyAction(action = "") {
   return normalizedAction;
 }
 
+function normalizeGraphUpdateScope(scope = "both") {
+  const normalizedScope = String(scope || "both").trim().toLowerCase();
+
+  if (normalizedScope !== "current" && normalizedScope !== "both") {
+    const error = new Error(`Unknown graph update scope: ${scope}`);
+
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalizedScope;
+}
+
+function getGraphCheckoutKind(graph = {}) {
+  return graph.checkout === "review" ? "review" : "working";
+}
+
+function getGraphUpdateEntries({ graphs = [], scope, graphIndex }) {
+  const normalizedScope = normalizeGraphUpdateScope(scope);
+  const entries = graphs
+    .map((graph, index) => ({ graph, index }))
+    .filter(({ graph }) => graph);
+
+  if (normalizedScope === "both") {
+    return entries;
+  }
+
+  const selected = entries.find(({ index }) => index === Number(graphIndex));
+
+  if (!selected) {
+    const error = new Error("Unknown graph checkout.");
+
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const checkout = getGraphCheckoutKind(selected.graph);
+
+  return entries.filter(({ graph }) => getGraphCheckoutKind(graph) === checkout);
+}
+
 async function getGraphDirtyStatus(graph, runCommand) {
   return runCommand({
     cmd: "git",
@@ -1217,12 +1262,16 @@ async function getGraphDirtyStatus(graph, runCommand) {
 
 export async function getGraphDirtyCheckouts({
   graphs,
+  graphIndexes,
   runCommand = run,
 }) {
   const dirty = [];
+  const requestedIndexes = Array.isArray(graphIndexes)
+    ? new Set(graphIndexes.map(Number))
+    : null;
 
   for (const [index, graph] of graphs.entries()) {
-    if (!graph) {
+    if (!graph || (requestedIndexes && !requestedIndexes.has(index))) {
       continue;
     }
 
@@ -1799,6 +1848,8 @@ export async function runGraphRepositoryUpdate({
   graphs,
   mode = GRAPH_UPDATE_MODE_UPDATE,
   dirtyAction = "",
+  scope = "both",
+  graphIndex,
   runCommand = run,
 }) {
   const { session: outputSession, runCommand: runCommandWithOutput } =
@@ -1806,8 +1857,15 @@ export async function runGraphRepositoryUpdate({
   try {
     const updateMode = normalizeGraphUpdateMode(mode);
     const normalizedDirtyAction = normalizeGraphDirtyAction(dirtyAction);
+    const normalizedScope = normalizeGraphUpdateScope(scope);
+    const updateEntries = getGraphUpdateEntries({
+      graphs,
+      scope: normalizedScope,
+      graphIndex,
+    });
     const dirty = await getGraphDirtyCheckouts({
       graphs,
+      graphIndexes: updateEntries.map(({ index }) => index),
       runCommand: runCommandWithOutput,
     });
     const shelves = [];
@@ -1845,7 +1903,7 @@ export async function runGraphRepositoryUpdate({
 
     const results = [];
 
-    for (const graph of graphs) {
+    for (const { graph } of updateEntries) {
       results.push(await updateGraphCheckout({
         graph,
         mode: updateMode,
@@ -1856,6 +1914,8 @@ export async function runGraphRepositoryUpdate({
     return {
       action: "update-graphs",
       mode: updateMode,
+      scope: normalizedScope,
+      graphIndexes: updateEntries.map(({ index }) => index),
       dirtyAction: normalizedDirtyAction,
       dirty,
       dirtyResults,
@@ -1910,6 +1970,8 @@ export async function getGraphOriginMainStatus({
 
   return {
     label: graph.label,
+    checkout: graph.checkout || "working",
+    repository: graph.repository || graph.label,
     path: graph.path,
     branch: DEFAULT_BRANCH,
     state: upToDate ? "current" : "stale",
@@ -1924,6 +1986,18 @@ export async function getGraphOriginMainStatus({
 
 function getGraphByLabel(graphs = [], label) {
   return graphs.find((graph) => String(graph?.label || "").toLowerCase() === label) || null;
+}
+
+function getWorkingGraphByRepository(graphs = [], repository) {
+  const normalizedRepository = String(repository || "").toLowerCase();
+  const matching = graphs.filter((graph) =>
+    String(graph?.repository || "").toLowerCase() === normalizedRepository
+  );
+
+  return matching.find((graph) => graph.checkout !== "review") ||
+    getGraphByLabel(graphs, normalizedRepository) ||
+    matching[0] ||
+    null;
 }
 
 function getSha512(value = "") {
@@ -2075,8 +2149,8 @@ async function getRustFileChecksumsFromGithubRaw({
 
 export async function getGraphRustUpstreamStatus({
   graphs,
-  commGraph = getGraphByLabel(graphs, "comm"),
-  firefoxGraph = getGraphByLabel(graphs, "firefox"),
+  commGraph = getWorkingGraphByRepository(graphs, "comm"),
+  firefoxGraph = getWorkingGraphByRepository(graphs, "firefox"),
   runCommand = run,
   fetchImpl = fetch,
   makeTempDir = mkdtemp,
@@ -3067,6 +3141,7 @@ export async function runInteractiveSubmitCommand({
   return new Promise((resolve, reject) => {
     const child = spawnCommand(command.cmd, command.args || [], {
       cwd: command.cwd,
+      env: getTbToolsCommandEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout = [];
@@ -3562,11 +3637,11 @@ export function createGraphSubmitSession({
 
       try {
         await afterMozPhabSubmit(result);
-        appendSubmitOutput(session, "Saved Phabricator reply draft cleared after upload.\n");
+        appendSubmitOutput(session, "Completed post-upload follow-up.\n");
       } catch (error) {
         appendSubmitOutput(
           session,
-          `Patch uploaded, but the saved Phabricator reply draft could not be cleared: ${error?.message || error}\n`,
+          `Patch uploaded, but post-upload follow-up failed: ${error?.message || error}\n`,
         );
       }
     },
@@ -3705,11 +3780,28 @@ function getGraphMachActionLabel(action) {
   }
 }
 
-export function chooseGraphMachCheckout(graphs = []) {
+export function chooseGraphMachCheckout(graphs = [], graphIndex) {
   const entries = graphs
     .map((graph, index) => ({ graph, index }))
     .filter(({ graph }) => graph && !graph.error);
-  const selected = entries.find(({ graph }) => graph.label === "comm") ||
+  const requested = entries.find(({ index }) => index === Number(graphIndex));
+
+  if (requested) {
+    if (
+      requested.graph.repository === "comm" ||
+      path.basename(requested.graph.path || "") === "comm"
+    ) {
+      return requested;
+    }
+
+    const error = new Error("Build and run require a comm checkout tab.");
+
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const selected = entries.find(({ graph }) => graph.repository === "comm" && graph.checkout !== "review") ||
+    entries.find(({ graph }) => graph.label === "comm") ||
     entries.find(({ graph }) => path.basename(graph.path || "") === "comm");
 
   if (!selected) {
@@ -3835,6 +3927,7 @@ function runInteractiveGraphMachCommand({
       cwd: command.cwd,
       stdio: ["inherit", "pipe", "pipe"],
       detached: process.platform !== "win32",
+      env: getTbToolsCommandEnvironment(),
     });
     const stdout = [];
     const stderr = [];

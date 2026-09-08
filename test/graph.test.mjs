@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +17,7 @@ import {
   choosePruneBranches,
   chooseRebaseBranch,
   chooseRewordBranch,
+  copyGraphCommitsBetweenCheckouts,
   checkoutCommit,
   continueRebaseCommit,
   createBranchForCommit,
@@ -25,6 +26,7 @@ import {
   createPhabricatorWebSession,
   getGraphCommitMessage,
   getGraphCommitIntegrationStatus,
+  isGraphCommitOnOriginMain,
   getGraphCommitReview,
   getGraphCommitMetadata,
   getGraphCurrentCommitMessage,
@@ -39,6 +41,7 @@ import {
   getCheckoutCommitPage,
   getCheckoutGraphData,
   getCheckoutGraphMetadata,
+  getReviewCheckoutConfig,
   getCommitDiff,
   getCommitDiffs,
   getWorkingTreeCommits,
@@ -63,10 +66,17 @@ import {
   runGraphTrySubmission,
   runGraphCommitAction,
   searchGraphCommitReviewers,
+  syncReviewCheckoutFromWorking,
+  acceptGraphPatchUpdateChange,
+  applyGraphPatchUpdateComment,
+  markGraphPatchUpdateCommentHandled,
+  revertGraphPatchUpdateChange,
+  saveGraphPatchUpdateReply,
   normalizeGraphCommitReviewers,
   getInteractiveYesNoPrompt,
   runGraphMachActionSession,
   runGraphRepositoryUpdate,
+  resolveGraphCheckouts,
   runInteractiveSubmitCommand,
   serializeGraphTestSession,
   startInteractiveRebase,
@@ -97,6 +107,7 @@ import { run } from "../lib/utils.mjs";
 const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "style.css", output: "graph-client/style.css" },
   { source: "config.js", output: "graph-client/config.js" },
+  { source: "system-dialog.js", output: "graph-client/system-dialog.js" },
   { source: "commit-model.js", output: "graph-client/commit-model.js" },
   { source: "dom.js", output: "graph-client/dom.js" },
   { source: "pane-resizer.js", output: "graph-client/pane-resizer.js" },
@@ -105,12 +116,16 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "review-viewer.js", output: "graph-client/review-viewer.js" },
   { source: "diff-viewer.js", output: "graph-client/diff-viewer.js" },
   { source: "command-sessions.js", output: "graph-client/command-sessions.js" },
+  { source: "update-scope-dialog.js", output: "graph-client/update-scope-dialog.js" },
   { source: "rebase-dialog.js", output: "graph-client/rebase-dialog.js" },
   { source: "interactive-rebase-dialog.js", output: "graph-client/interactive-rebase-dialog.js" },
   { source: "commit-actions.js", output: "graph-client/commit-actions.js" },
   { source: "commit-dialog.js", output: "graph-client/commit-dialog.js" },
+  { source: "checkout-transfer-dialog.js", output: "graph-client/checkout-transfer-dialog.js" },
+  { source: "review-sync-dialog.js", output: "graph-client/review-sync-dialog.js" },
   { source: "view-router.js", output: "graph-client/view-router.js" },
   { source: "patch-update-dialog.js", output: "graph-client/patch-update-dialog.js" },
+  { source: "patch-review-dialog.js", output: "graph-client/patch-review-dialog.js" },
   { source: "dashboard.js", output: "graph-client/dashboard.js" },
   { source: "meta-board-colors.js", output: "graph-client/meta-board-colors.js" },
   { source: "markdown.js", output: "graph-client/markdown.js" },
@@ -124,8 +139,263 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "init.js", output: "graph-client/init.js" },
 ];
 
+test("isGraphCommitOnOriginMain distinguishes published commits from local work", async () => {
+  const calls = [];
+  const graph = { path: "/repo/comm" };
+
+  const onMain = await isGraphCommitOnOriginMain({
+    graph,
+    hash: "published",
+    runCommand: async (command) => {
+      calls.push(command);
+    },
+  });
+  const local = await isGraphCommitOnOriginMain({
+    graph,
+    hash: "local",
+    runCommand: async () => {
+      throw new Error("not reachable");
+    },
+  });
+
+  assert.equal(onMain, true);
+  assert.equal(local, false);
+  assert.deepEqual(calls[0].args, [
+    "merge-base",
+    "--is-ancestor",
+    "published",
+    "origin/main",
+  ]);
+});
+
 test("interactive graph server defaults to a 24 hour heartbeat timeout", () => {
   assert.equal(DEFAULT_HEARTBEAT_TIMEOUT_MS, 24 * 60 * 60 * 1000);
+});
+
+test("Patch Update amends an accepted source change before the server handles its comment", async () => {
+  const item = {
+    assessment: "The existing implementation needs the focused source update.",
+    changeSummary: "Replace the local implementation with the shared helper.",
+    id: "inline:1",
+    state: "ready",
+    requiresChanges: true,
+  };
+  const session = {
+    aiEnabled: true,
+    codexSessionId: "thread-1",
+    codexAgent: {
+      threadId: "thread-1",
+      client: {
+        async startTurn({ onTurnStarted }) {
+          onTurnStarted("turn-1");
+          return {
+            turn: { status: "completed" },
+            message: "Updated file and ran the focused test.",
+          };
+        },
+      },
+    },
+    graph: {
+      checkout: "working",
+      repository: "comm",
+      path: "/repo/working/comm",
+    },
+    revision: "D123",
+    currentHash: "old123",
+    commitMessage: "Bug 123 - Update the patch. r=reviewer\n\nTB-Tools-Id: test-id",
+    currentItemIndex: 0,
+    items: [item, { id: "inline:2", state: "ready" }],
+  };
+
+  saveGraphPatchUpdateReply({
+    session,
+    itemId: item.id,
+    message: "I will keep this behavior and explain why in the update.",
+  });
+
+  assert.equal(item.draftSaved, true);
+  assert.equal(item.state, "ready");
+  assert.equal(session.currentItemIndex, 0);
+
+  const before = {
+    head: "old123",
+    rawDiff: "",
+    treeish: "before123",
+    untrackedPaths: [],
+  };
+  const after = {
+    head: "old123",
+    rawDiff: "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n",
+    treeish: "after456",
+    untrackedPaths: [],
+  };
+  let workingTreeReadCount = 0;
+
+  await applyGraphPatchUpdateComment({
+    session,
+    itemId: item.id,
+    runCommand: async () => "",
+    getWorkingTreePatch: async () => after.rawDiff,
+    getWorkingTreeState: async () => (
+      workingTreeReadCount++ ? after : before
+    ),
+  });
+
+  assert.equal(item.changeApplied, true);
+  assert.equal(item.changeAccepted, false);
+  assert.equal(item.state, "ready");
+  assert.equal(session.currentItemIndex, 0);
+  assert.match(item.workingDiffHtml, /pretty-file/);
+  assert.match(session.message, /Review the actual uncommitted diff/);
+
+  const clean = {
+    head: "amended456",
+    rawDiff: "",
+    treeish: "amended456",
+    untrackedPaths: [],
+  };
+  let acceptedStateReads = 0;
+  const amendCalls = [];
+  const runCommand = async () => "";
+
+  await acceptGraphPatchUpdateChange({
+    session,
+    itemId: item.id,
+    runCommand,
+    getCurrentCommit: async () => ({ hash: "old123" }),
+    amendCurrent: async (options) => {
+      amendCalls.push(options);
+      return {
+        currentHash: "amended456",
+        message: "comm amended current commit amended456.",
+      };
+    },
+    getWorkingTreeState: async () => {
+      const state = acceptedStateReads === 0 ? after : clean;
+
+      acceptedStateReads++;
+      return state;
+    },
+  });
+
+  assert.deepEqual(amendCalls, [{
+    graph: session.graph,
+    message: session.commitMessage,
+    includeChanges: true,
+    runCommand,
+  }]);
+  assert.equal(item.changeAccepted, true);
+  assert.equal(item.changesAmended, true);
+  assert.equal(session.currentHash, "amended456");
+  assert.equal(session.workingDiff, "");
+  assert.equal(session.workingDiffHtml, "");
+  assert.equal(session.currentItemIndex, 0);
+  assert.equal(session.items[1].state, "ready");
+  assert.match(session.message, /Source change was amended/);
+});
+
+test("Patch Update refuses a source apply without its explanation", async () => {
+  const session = {
+    aiEnabled: true,
+    codexSessionId: "thread-1",
+    graph: {
+      checkout: "working",
+      path: "/repo/working/comm",
+      repository: "comm",
+    },
+    items: [{
+      assessment: "",
+      changeSummary: "",
+      id: "inline:1",
+      state: "ready",
+    }],
+  };
+
+  await assert.rejects(
+    applyGraphPatchUpdateComment({
+      session,
+      itemId: "inline:1",
+      runCommand: async () => {
+        throw new Error("Codex should not run for an incomplete proposal.");
+      },
+    }),
+    /assessment and planned-change summary/,
+  );
+});
+
+test("Patch Update reverts only its prepared working-tree candidate", async () => {
+  const before = {
+    head: "old123",
+    rawDiff: "diff --git a/existing b/existing\n--- a/existing\n+++ b/existing\n@@ -1 +1 @@\n-old\n+kept\n",
+    treeish: "before123",
+    untrackedPaths: [],
+  };
+  const after = {
+    head: "old123",
+    rawDiff: `${before.rawDiff}\ndiff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+candidate\n`,
+    treeish: "after456",
+    untrackedPaths: [],
+  };
+  let current = after;
+  const item = {
+    changeAccepted: false,
+    changeApplied: true,
+    changeReverted: false,
+    id: "inline:1",
+    state: "ready",
+  };
+  const session = {
+    changeSnapshots: new Map([[item.id, {
+      addedUntrackedPaths: [],
+      after,
+      before,
+      patch: "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+candidate\n",
+    }]]),
+    graph: {
+      checkout: "working",
+      path: "/repo/working/comm",
+      repository: "comm",
+    },
+    items: [item],
+  };
+  let revertedPatch = "";
+
+  await revertGraphPatchUpdateChange({
+    session,
+    itemId: item.id,
+    runCommand: async () => "",
+    applyReversePatch: async ({ patch }) => {
+      revertedPatch = patch;
+      current = before;
+    },
+    getWorkingTreeState: async () => current,
+  });
+
+  assert.match(revertedPatch, /candidate/);
+  assert.equal(item.changeApplied, false);
+  assert.equal(item.changeReverted, true);
+  assert.equal(item.changeAccepted, false);
+  assert.equal(session.changeSnapshots.has(item.id), false);
+  assert.equal(item.workingDiff, before.rawDiff);
+});
+
+test("Patch Update requires a candidate decision before handling a comment", () => {
+  const item = {
+    changeAccepted: false,
+    changeApplied: true,
+    id: "inline:1",
+    state: "ready",
+  };
+  const session = {
+    currentItemIndex: 0,
+    items: [item],
+  };
+
+  assert.throws(
+    () => markGraphPatchUpdateCommentHandled({ session, itemId: item.id }),
+    /Keep or revert the prepared working-tree change/,
+  );
+  assert.equal(item.state, "ready");
 });
 
 test("run streams captured output while a command is active", async () => {
@@ -1459,6 +1729,7 @@ test("truncateDiff caps embedded diff size", () => {
 
 test("runInteractiveSubmitCommand routes child yes/no prompts through submit session", async () => {
   let child;
+  let spawnOptions;
   const writes = [];
   const session = {
     status: "running",
@@ -1467,7 +1738,8 @@ test("runInteractiveSubmitCommand routes child yes/no prompts through submit ses
     pendingPrompt: null,
     output: "",
   };
-  const spawnCommand = () => {
+  const spawnCommand = (_cmd, _args, options) => {
+    spawnOptions = options;
     child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -1512,6 +1784,7 @@ test("runInteractiveSubmitCommand routes child yes/no prompts through submit ses
     "Submit to https://phabricator.services.mozilla.com (Yes/no/always)? Submitted https://phabricator.services.mozilla.com/D123456\n",
   );
   assert.deepEqual(writes, ["y\n"]);
+  assert.equal(spawnOptions.env.MOZ_SKIP_PATH_PERFORMANCE_CHECK, "1");
   assert.match(session.output, /\$ moz-phab submit/);
   assert.match(session.output, /> yes/);
   assert.match(
@@ -2239,6 +2512,7 @@ test("getGraphCommitReview returns regular comments and inline suggestions", asy
               dateCreated: 1710000001,
               fields: {
                 diff: { id: 42 },
+                isNewFile: false,
                 length: 2,
                 line: 42,
                 path: "comm/mail/base/content/example.js",
@@ -2350,9 +2624,11 @@ test("getGraphCommitReview returns regular comments and inline suggestions", asy
     dateCreated: 1710000001,
     diffId: 42,
     filePath: "comm/mail/base/content/example.js",
-    isNewFile: null,
+    isNewFile: true,
     lineLength: 2,
     lineNumber: 42,
+    contextDiff: "diff --git a/mail/base/content/example.js b/mail/base/content/example.js\n--- a/mail/base/content/example.js\n+++ b/mail/base/content/example.js\n@@ -0,0 +35,16 @@\n+line 35;\n+line 36;\n+line 37;\n+line 38;\n+line 39;\n+line 40;\n+line 41;\n+line 42;\n+line 43;\n+line 44;\n+line 45;\n+line 46;\n+line 47;\n+line 48;\n+line 49;\n+line 50;",
+    contextLineSide: "new",
     url: "https://phabricator.services.mozilla.com/D987654#inline-101",
   }, {
     id: "PHID-XCMT-code-suggestion",
@@ -2368,12 +2644,131 @@ test("getGraphCommitReview returns regular comments and inline suggestions", asy
     dateCreated: 1710000002,
     diffId: 42,
     filePath: "comm/mail/base/content/example.js",
-    isNewFile: null,
+    isNewFile: true,
     lineLength: 1,
     lineNumber: 99,
+    contextDiff: "diff --git a/mail/base/content/example.js b/mail/base/content/example.js\n--- a/mail/base/content/example.js\n+++ b/mail/base/content/example.js\n@@ -0,0 +92,9 @@\n+line 92;\n+line 93;\n+line 94;\n+line 95;\n+line 96;\n+line 97;\n+line 98;\n+const old = true;\n+line 100;",
+    contextLineSide: "new",
     url: "https://phabricator.services.mozilla.com/D987654#inline-102",
   }]);
   assert.equal(review.revision, "D987654");
+});
+
+test("getGraphCommitReview loads context for prose-only inline feedback", async () => {
+  const phabCalls = [];
+  const review = await getGraphCommitReview({
+    graph: {
+      commits: [{ hash: "abc123", subject: "Fix thing" }],
+      label: "comm",
+      path: "/repo/comm",
+    },
+    hash: "abc123",
+    runCommand: async () => (
+      "Bug 123456 - Fix thing\n\nDifferential Revision: https://phabricator.services.mozilla.com/D987654\n"
+    ),
+    phab: async (request) => {
+      phabCalls.push(request);
+
+      if (request.route === "differential.query") {
+        return { result: [{ authorPHID: "PHID-USER-author" }] };
+      }
+      if (request.route === "user.query") {
+        return {
+          result: [{
+            phid: "PHID-USER-reviewer",
+            realName: "Reviewing Person",
+          }],
+        };
+      }
+      if (request.route === "differential.getrevision") {
+        return {
+          result: {
+            diffs: {
+              42: {
+                dateCreated: 1710000000,
+                id: 42,
+                changes: [{
+                  currentPath: "comm/mail/base/content/example.js",
+                  hunks: [{
+                    newOffset: "1",
+                    oldOffset: "1",
+                    corpus: " line 1;\n line 2;\n line 3;\n line 4;\n",
+                  }],
+                }],
+              },
+            },
+          },
+        };
+      }
+
+      return {
+        result: {
+          cursor: { after: null },
+          data: [{
+            authorPHID: "PHID-USER-reviewer",
+            dateCreated: 1710000001,
+            fields: {
+              diff: { id: 42 },
+              length: 1,
+              line: 3,
+              path: "comm/mail/base/content/example.js",
+            },
+            id: "transaction-inline",
+            phid: "PHID-XACT-inline",
+            type: "inline",
+            comments: [{
+              authorPHID: "PHID-USER-reviewer",
+              content: { raw: "Please preserve this behavior." },
+              dateCreated: 1710000001,
+              id: 101,
+              phid: "PHID-XCMT-inline",
+            }],
+          }],
+        },
+      };
+    },
+  });
+
+  assert.match(review.inlineComments[0].contextDiff, /line 3/);
+  assert.equal(
+    phabCalls.filter(({ route }) => route === "differential.getrevision").length,
+    1,
+  );
+});
+
+test("getGraphCommitReview caps Phabricator transaction history", async () => {
+  let transactionRequests = 0;
+  const review = await getGraphCommitReview({
+    graph: {
+      label: "comm",
+      path: "/repo/comm",
+      commits: [{ hash: "abc123", subject: "Fix thing" }],
+    },
+    hash: "abc123",
+    runCommand: async () => (
+      "Bug 123456 - Fix thing\n\nDifferential Revision: https://phabricator.services.mozilla.com/D987654\n"
+    ),
+    phab: async ({ route }) => {
+      if (route === "transaction.search") {
+        transactionRequests++;
+        return {
+          result: {
+            data: [],
+            cursor: { after: `cursor-${transactionRequests}` },
+          },
+        };
+      }
+
+      if (route === "differential.query") {
+        return { result: [{ authorPHID: "PHID-USER-author" }] };
+      }
+
+      assert.fail(`Unexpected Phabricator route: ${route}`);
+    },
+  });
+
+  assert.equal(transactionRequests, 4);
+  assert.equal(review.historyTruncated, true);
 });
 
 test("getGraphCommitReview uses the authenticated web session for a prose comment suggestion", async () => {
@@ -2621,19 +3016,109 @@ test("Phabricator web session fetches a missing suggestion from its revision dif
   assert.equal(page.url, "https://phabricator.services.mozilla.com/D290877?id=42");
 });
 
-test("Phabricator web session saves a reply draft with the revision form", async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-draft-"));
+test("Phabricator web session verifies Request Changes is available and applied", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-review-"));
   const profilePath = path.join(directory, "profile");
-  let savedComment = "";
-  const page = {
-    async goto() {},
-    async evaluate(callback, value) {
-      if (String(callback).includes("new FormData")) {
-        savedComment = value;
-        return;
+  const requests = [];
+  let reviewPublished = false;
+  let requestChangesAvailable = true;
+  const form = {
+    action: "https://phabricator.services.mozilla.com/D123456/",
+    fields: [["__csrf__", "test-csrf"]],
+    querySelector(selector) {
+      if (selector === "input[name='editengine.actions']") {
+        return { name: "editengine.actions" };
       }
 
-      return savedComment;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === "select") {
+        return [{
+          options: requestChangesAvailable && !reviewPublished
+            ? [{ value: "+" }, { value: "accept" }, { value: "reject" }]
+            : [{ value: "+" }],
+        }];
+      }
+
+      return [];
+    },
+  };
+  const page = {
+    async goto(url) {
+      this.url = url;
+    },
+    async evaluate(callback, value) {
+      class FakeFormData {
+        constructor(source) {
+          this.fields = new Map(source?.fields || []);
+        }
+
+        delete(name) {
+          this.fields.delete(name);
+        }
+
+        entries() {
+          return this.fields.entries();
+        }
+
+        get(name) {
+          return this.fields.get(name) || null;
+        }
+
+        set(name, fieldValue) {
+          this.fields.set(name, String(fieldValue));
+        }
+      }
+
+      const previousGlobals = new Map([
+        ["document", Object.getOwnPropertyDescriptor(globalThis, "document")],
+        ["fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch")],
+        ["FormData", Object.getOwnPropertyDescriptor(globalThis, "FormData")],
+      ]);
+
+      Object.defineProperties(globalThis, {
+        document: {
+          configurable: true,
+          value: {
+            querySelector: (selector) => (
+              selector === "form[data-sigil~='transaction-append']" ? form : null
+            ),
+          },
+          writable: true,
+        },
+        fetch: {
+          configurable: true,
+          value: async (endpoint, options) => {
+            requests.push({
+              endpoint,
+              fields: Object.fromEntries(options.body.entries()),
+              method: options.method,
+            });
+            reviewPublished = true;
+
+            return {
+              ok: true,
+              status: 200,
+              url: "https://phabricator.services.mozilla.com/D123456",
+            };
+          },
+          writable: true,
+        },
+        FormData: { configurable: true, value: FakeFormData, writable: true },
+      });
+
+      try {
+        return await callback(value);
+      } finally {
+        for (const [name, descriptor] of previousGlobals) {
+          if (descriptor) {
+            Object.defineProperty(globalThis, name, descriptor);
+          } else {
+            delete globalThis[name];
+          }
+        }
+      }
     },
   };
   const browser = {
@@ -2664,13 +3149,197 @@ test("Phabricator web session saves a reply draft with the revision form", async
     await rm(directory, { force: true, recursive: true });
   });
 
-  const result = await session.saveRevisionDraft({
+  const result = await session.publishRevisionReview({
+    action: "reject",
+    message: "Please address the focus regression.",
     revision: "D123456",
-    draftBlock: "Draft reply",
   });
 
-  assert.equal(result.comment, "Draft reply");
-  assert.equal(savedComment, "Draft reply");
+  assert.deepEqual(result, { action: "reject", revision: "D123456" });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "POST");
+  assert.equal(requests[0].fields.comment, "Please address the focus regression.");
+  assert.deepEqual(JSON.parse(requests[0].fields["editengine.actions"]), [{
+    initialValue: null,
+    type: "reject",
+    value: true,
+  }]);
+
+  reviewPublished = false;
+  const accepted = await session.publishRevisionReview({
+    action: "accept",
+    revision: "D123456",
+  });
+
+  assert.deepEqual(accepted, { action: "accept", revision: "D123456" });
+  assert.equal(requests.length, 2);
+  assert.deepEqual(JSON.parse(requests[1].fields["editengine.actions"]), [{
+    initialValue: null,
+    type: "accept",
+    value: true,
+  }]);
+
+  reviewPublished = false;
+  requestChangesAvailable = false;
+  await assert.rejects(
+    session.publishRevisionReview({
+      action: "reject",
+      message: "This must not silently become a comment.",
+      revision: "D123456",
+    }),
+    /does not offer Request Changes.*No review comment was posted/,
+  );
+  assert.equal(requests.length, 2);
+});
+
+test("Phabricator web session saves an inline reply draft with the exact parent", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-inline-reply-"));
+  const profilePath = path.join(directory, "profile");
+  let postedDetails;
+  const requests = [];
+  const form = { fields: [["__csrf__", "test-csrf"]] };
+  const responsePayloads = [
+    { inline: { id: 24680 }, view: "<tr></tr>" },
+    { inline: { id: 24680 }, view: "<tr></tr>" },
+  ];
+  const page = {
+    async goto() {},
+    async evaluate(callback, value) {
+      assert.match(String(callback), /replyToCommentPHID/);
+      postedDetails = value;
+      const previousGlobals = new Map([
+        ["document", Object.getOwnPropertyDescriptor(globalThis, "document")],
+        ["fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch")],
+        ["FormData", Object.getOwnPropertyDescriptor(globalThis, "FormData")],
+        ["location", Object.getOwnPropertyDescriptor(globalThis, "location")],
+      ]);
+
+      class FakeFormData {
+        constructor(source) {
+          this.fields = new Map(source?.fields || []);
+        }
+
+        entries() {
+          return this.fields.entries();
+        }
+
+        get(name) {
+          return this.fields.get(name) || null;
+        }
+
+        set(name, fieldValue) {
+          this.fields.set(name, String(fieldValue));
+        }
+      }
+
+      Object.defineProperties(globalThis, {
+        document: {
+          configurable: true,
+          value: { querySelector: () => form },
+          writable: true,
+        },
+        fetch: {
+          configurable: true,
+          value: async (endpoint, options) => {
+            requests.push({
+              endpoint,
+              fields: Object.fromEntries(options.body.entries()),
+              method: options.method,
+            });
+            const payload = responsePayloads.shift();
+
+            return {
+              ok: true,
+              status: 200,
+              text: async () => `for (;;);${JSON.stringify({
+                error_code: null,
+                error_info: null,
+                payload,
+              })}`,
+            };
+          },
+          writable: true,
+        },
+        FormData: { configurable: true, value: FakeFormData, writable: true },
+        location: {
+          configurable: true,
+          value: { origin: "https://phabricator.services.mozilla.com" },
+          writable: true,
+        },
+      });
+
+      try {
+        return await callback(value);
+      } finally {
+        for (const [name, descriptor] of previousGlobals) {
+          if (descriptor) {
+            Object.defineProperty(globalThis, name, descriptor);
+          } else {
+            delete globalThis[name];
+          }
+        }
+      }
+    },
+  };
+  const browser = {
+    async launchPersistentContext() {
+      return {
+        pages: () => [page],
+        async addCookies() {},
+        async close() {},
+        async newPage() {
+          return page;
+        },
+        async storageState() {
+          return { cookies: [] };
+        },
+      };
+    },
+  };
+  await mkdir(profilePath, { recursive: true });
+  const session = createPhabricatorWebSession({
+    browserLoader: async () => browser,
+    getPageAuthenticationState: async () => true,
+    homeDirectory: directory,
+    profilePath,
+  });
+
+  t.after(async () => {
+    await session.close();
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  const result = await session.postInlineReply({
+    commentPHID: "PHID-XCMT-test-parent",
+    message: "The replacement keeps the treegrid focus contract intact.",
+    revision: "D123456",
+  });
+
+  assert.deepEqual(postedDetails, {
+    content: "The replacement keeps the treegrid focus contract intact.",
+    parentCommentPHID: "PHID-XCMT-test-parent",
+    revision: "D123456",
+  });
+  assert.deepEqual(result, {
+    inlineId: 24680,
+    parentCommentPHID: "PHID-XCMT-test-parent",
+    revision: "D123456",
+  });
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map((request) => request.fields.op), ["reply", "save"]);
+  assert.equal(requests[0].fields.replyToCommentPHID, "PHID-XCMT-test-parent");
+  assert.equal(requests[1].fields.id, "24680");
+  assert.ok(requests.every((request) => (
+    request.endpoint.endsWith("/differential/comment/inline/edit/123456/")
+  )));
+  await assert.rejects(
+    session.postInlineReply({
+      commentPHID: "not-an-inline-parent",
+      message: "No detached comment.",
+      revision: "D123456",
+    }),
+    /will not post a detached reply/,
+  );
 });
 
 test("getGraphCommitIntegrationStatus includes Notion stories by bug id", async () => {
@@ -2805,6 +3474,116 @@ test("interactive graph server disables Notion after an invalid token", async (t
   assert.equal(first.notion, null);
   assert.equal(second.notion, null);
   assert.equal(notionCalls, 1);
+});
+
+test("interactive graph server shares an in-flight integration request across tabs", async (t) => {
+  let phabCalls = 0;
+  const releasePhab = [];
+  let markPhabStarted;
+  const phabStarted = new Promise((resolve) => {
+    markPhabStarted = resolve;
+  });
+  const serverInfo = await startInteractiveGraphServer({
+    getBug: async () => ({ bugs: [] }),
+    getNotionStoriesByBugId: async () => [],
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      commits: [{ hash: "abc123", subject: "Bug 123456 - Fix thing D987654" }],
+    }],
+    html: "<!doctype html><p>graph</p>",
+    phab: async () => {
+      phabCalls++;
+      markPhabStarted();
+      await new Promise((resolve) => {
+        releasePhab.push(resolve);
+      });
+      return { result: [{ id: 987654, status: "status-open" }] };
+    },
+    runCommand: async (command) => (
+      command.args[0] === "log" && command.args.includes("--format=%B")
+        ? "Bug 123456 - Fix thing\n\nDifferential Revision: https://phabricator.services.mozilla.com/D987654\n"
+        : ""
+    ),
+    token: "secret",
+  });
+
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const endpoint = new URL(
+    "api/graph/0/integration/abc123?token=secret",
+    serverInfo.url,
+  );
+  const first = fetch(endpoint);
+
+  await phabStarted;
+  const second = fetch(endpoint);
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let assertionError;
+
+  try {
+    assert.equal(phabCalls, 1);
+  } catch (error) {
+    assertionError = error;
+  } finally {
+    releasePhab.forEach((resolve) => resolve());
+  }
+
+  const [firstResponse, secondResponse] = await Promise.all([first, second]);
+
+  if (assertionError) {
+    throw assertionError;
+  }
+
+  assert.equal(firstResponse.ok, true);
+  assert.equal(secondResponse.ok, true);
+  assert.equal(phabCalls, 1);
+});
+
+test("interactive graph server does not cache an unavailable Phabricator status", async (t) => {
+  let phabCalls = 0;
+  const serverInfo = await startInteractiveGraphServer({
+    getBug: async () => ({ bugs: [] }),
+    getNotionStoriesByBugId: async () => [],
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      commits: [{ hash: "abc123", subject: "Bug 123456 - Fix thing D987654" }],
+    }],
+    html: "<!doctype html><p>graph</p>",
+    phab: async () => {
+      phabCalls++;
+      throw new Error("Phabricator differential.query temporarily rate limited.");
+    },
+    runCommand: async (command) => (
+      command.args[0] === "log" && command.args.includes("--format=%B")
+        ? "Bug 123456 - Fix thing\n\nDifferential Revision: https://phabricator.services.mozilla.com/D987654\n"
+        : ""
+    ),
+    token: "secret",
+  });
+
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const endpoint = new URL(
+    "api/graph/0/integration/abc123?token=secret",
+    serverInfo.url,
+  );
+  const first = await (await fetch(endpoint)).json();
+  const second = await (await fetch(endpoint)).json();
+
+  assert.match(first.phabricator.error, /temporarily rate limited/);
+  assert.match(second.phabricator.error, /temporarily rate limited/);
+  assert.equal(phabCalls, 2);
 });
 
 test("getGraphCommitIntegrationStatus keeps subject-matched legacy try runs", async (t) => {
@@ -4149,6 +4928,9 @@ test("getCheckoutGraphData collects git log data for a checkout", async () => {
 test("getCheckoutGraphMetadata collects checkout identity without commits", async () => {
   const commands = [];
   const data = await getCheckoutGraphMetadata({
+    id: "review-firefox",
+    checkout: "review",
+    repository: "firefox",
     label: "firefox",
     cwd: "..",
     runCommand: async (command) => {
@@ -4163,6 +4945,9 @@ test("getCheckoutGraphMetadata collects checkout identity without commits", asyn
   });
 
   assert.equal(data.label, "firefox");
+  assert.equal(data.id, "review-firefox");
+  assert.equal(data.checkout, "review");
+  assert.equal(data.repository, "firefox");
   assert.equal(data.path, "/repo/firefox");
   assert.equal(data.branch, "main");
   assert.deepEqual(data.commits, []);
@@ -7320,6 +8105,541 @@ test("runGraphRepositoryUpdate reports dirty checkouts before changing anything"
   );
 });
 
+test("runGraphRepositoryUpdate updates only the selected checkout pair", async () => {
+  const calls = [];
+  const graphs = [
+    { label: "Working comm", checkout: "working", path: "/working/comm" },
+    { label: "Working firefox", checkout: "working", path: "/working" },
+    { label: "Review comm", checkout: "review", path: "/review/comm" },
+    { label: "Review firefox", checkout: "review", path: "/review" },
+  ];
+  const result = await runGraphRepositoryUpdate({
+    graphs,
+    mode: "update",
+    scope: "current",
+    graphIndex: 2,
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "review-main\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.scope, "current");
+  assert.deepEqual(result.graphIndexes, [2, 3]);
+  assert.deepEqual(result.results.map(({ label }) => label), [
+    "Review comm",
+    "Review firefox",
+  ]);
+  assert.equal(calls.some((call) => call.cwd.startsWith("/working")), false);
+  assert.equal(calls.some((call) => call.cwd.startsWith("/review")), true);
+});
+
+test("copyGraphCommitsBetweenCheckouts copies a stack onto a new destination branch", async () => {
+  const calls = [];
+  const source = {
+    label: "Working comm",
+    checkout: "working",
+    repository: "comm",
+    path: "/working/comm",
+  };
+  const destination = {
+    label: "Review comm",
+    checkout: "review",
+    repository: "comm",
+    path: "/review/comm",
+  };
+  let destinationHeadCalls = 0;
+  const result = await copyGraphCommitsBetweenCheckouts({
+    source,
+    destination,
+    hash: "tip222",
+    mode: "stack",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cwd === source.path && command.args[0] === "rev-parse") {
+        return "tip222\n";
+      }
+
+      if (command.cwd === source.path && command.args[0] === "rev-list") {
+        return "base111\ntip222\n";
+      }
+
+      if (command.cwd === source.path && command.args[0] === "for-each-ref") {
+        return "Bug-1234567\n";
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "status") {
+        return "";
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "show-ref") {
+        const error = new Error("missing branch");
+
+        error.code = 1;
+        throw error;
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "merge-base") {
+        const error = new Error("not on destination main");
+
+        error.code = 1;
+        throw error;
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "rev-parse") {
+        destinationHeadCalls += 1;
+        return destinationHeadCalls === 1 ? "old-main\n" : "copied-tip\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.branch, "Bug-1234567");
+  assert.deepEqual(result.copiedCommits, ["base111", "tip222"]);
+  assert.equal(result.currentHash, "copied-tip");
+  assert.equal(destination.branch, "Bug-1234567");
+  assert.deepEqual(
+    calls
+      .filter((command) => command.cwd === destination.path)
+      .map((command) => command.args),
+    [
+      ["status", "--porcelain"],
+      ["check-ref-format", "--branch", "Bug-1234567"],
+      ["show-ref", "--verify", "--quiet", "refs/heads/Bug-1234567"],
+      [
+        "fetch",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "/working/comm",
+        "tip222",
+      ],
+      ["merge-base", "--is-ancestor", "base111", "origin/main"],
+      ["merge-base", "--is-ancestor", "tip222", "origin/main"],
+      ["branch", "--show-current"],
+      ["rev-parse", "HEAD"],
+      ["switch", "--create", "Bug-1234567", "origin/main"],
+      ["cherry-pick", "-x", "base111"],
+      ["cherry-pick", "-x", "tip222"],
+      ["rev-parse", "HEAD"],
+    ],
+  );
+});
+
+test("copyGraphCommitsBetweenCheckouts requires confirmation before discarding destination changes", async () => {
+  const source = {
+    label: "Working comm",
+    checkout: "working",
+    repository: "comm",
+    path: "/working/comm",
+  };
+  const destination = {
+    label: "Review comm",
+    checkout: "review",
+    repository: "comm",
+    path: "/review/comm",
+  };
+
+  await assert.rejects(
+    copyGraphCommitsBetweenCheckouts({
+      source,
+      destination,
+      hash: "tip222",
+      runCommand: async (command) => {
+        if (command.cwd === source.path && command.args[0] === "rev-parse") {
+          return "tip222\n";
+        }
+
+        if (command.cwd === source.path && command.args[0] === "for-each-ref") {
+          return "Bug-1234567\n";
+        }
+
+        if (command.cwd === destination.path && command.args[0] === "status") {
+          return " M file.txt\n";
+        }
+
+        return "";
+      },
+    }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.transfer.reason, "destination-dirty");
+      return /local changes/.test(error.message);
+    },
+  );
+});
+
+test("copyGraphCommitsBetweenCheckouts ignores untracked destination files", async () => {
+  const source = {
+    label: "Working comm",
+    checkout: "working",
+    repository: "comm",
+    path: "/working/comm",
+  };
+  const destination = {
+    label: "Review comm",
+    checkout: "review",
+    repository: "comm",
+    path: "/review/comm",
+  };
+  const calls = [];
+  let destinationHeadCalls = 0;
+
+  await copyGraphCommitsBetweenCheckouts({
+    source,
+    destination,
+    hash: "tip222",
+    branch: "Bug-1234567",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.cwd === source.path && command.args[0] === "rev-parse") {
+        return "tip222\n";
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "status") {
+        return "?? .DS_Store\n";
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "show-ref") {
+        const error = new Error("missing branch");
+
+        error.code = 1;
+        throw error;
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "merge-base") {
+        const error = new Error("not on destination main");
+
+        error.code = 1;
+        throw error;
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (command.cwd === destination.path && command.args[0] === "rev-parse") {
+        destinationHeadCalls += 1;
+        return destinationHeadCalls === 1 ? "old-main\n" : "copied-tip\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(calls.some((command) => command.args[0] === "clean"), false);
+  assert.equal(calls.some((command) => command.args[0] === "cherry-pick"), true);
+});
+
+test("syncReviewCheckoutFromWorking requires an explicit destructive confirmation", async () => {
+  await assert.rejects(
+    syncReviewCheckoutFromWorking({
+      graphs: [],
+      confirmation: "sync review",
+    }),
+    (error) => {
+      assert.equal(error.statusCode, 400);
+      assert.equal(error.reviewSync.reason, "confirmation-required");
+      return /Type SYNC REVIEW/.test(error.message);
+    },
+  );
+});
+
+test("syncReviewCheckoutFromWorking refuses tracked Working changes before touching Review", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    syncReviewCheckoutFromWorking({
+      confirmation: "SYNC REVIEW",
+      graphs: [
+        { checkout: "working", repository: "firefox", path: "/working" },
+        { checkout: "working", repository: "comm", path: "/working/comm" },
+        { checkout: "review", repository: "firefox", path: "/review" },
+        { checkout: "review", repository: "comm", path: "/review/comm" },
+      ],
+      runCommand: async (command) => {
+        calls.push(command);
+
+        if (command.args[0] === "status" && command.cwd === "/working") {
+          return " M source.txt\n";
+        }
+
+        return ".git\n";
+      },
+    }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.reviewSync.reason, "source-dirty");
+      return /tracked Working changes/.test(error.message);
+    },
+  );
+
+  assert.equal(
+    calls.some((command) => command.cwd.startsWith("/review") && command.args[0] === "reset"),
+    false,
+  );
+});
+
+test("syncReviewCheckoutFromWorking replaces both review repositories and mirrors build artifacts", async () => {
+  const graphs = [
+    {
+      label: "Working firefox",
+      checkout: "working",
+      repository: "firefox",
+      path: "/working",
+    },
+    {
+      label: "Working comm",
+      checkout: "working",
+      repository: "comm",
+      path: "/working/comm",
+    },
+    {
+      label: "Review firefox",
+      checkout: "review",
+      repository: "firefox",
+      path: "/review",
+    },
+    {
+      label: "Review comm",
+      checkout: "review",
+      repository: "comm",
+      path: "/review/comm",
+    },
+  ];
+  const calls = [];
+  const removals = [];
+  const directoryCopies = [];
+  const fileCopies = [];
+  const sourceStates = new Map([
+    ["/working", { hash: "firefox-head", branch: "main" }],
+    ["/working/comm", { hash: "comm-head", branch: "Bug-1234567" }],
+  ]);
+  const directoryEntry = (name) => ({ name, isDirectory: () => true, isFile: () => false });
+  const fileEntry = (name) => ({ name, isDirectory: () => false, isFile: () => true });
+  const result = await syncReviewCheckoutFromWorking({
+    graphs,
+    confirmation: "SYNC REVIEW",
+    runCommand: async (command) => {
+      calls.push(command);
+      const sourceState = sourceStates.get(command.cwd);
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--git-dir") {
+        return ".git\n";
+      }
+
+      if (command.args[0] === "rev-parse" && command.args[1] === "--verify") {
+        return `${sourceState?.hash || "review-head"}\n`;
+      }
+
+      if (sourceState && command.args[0] === "symbolic-ref") {
+        return `${sourceState.branch}\n`;
+      }
+
+      if (["rebase", "cherry-pick", "merge", "am"].includes(command.args[0])) {
+        throw new Error("no operation in progress");
+      }
+
+      return "";
+    },
+    readDirectory: async (directory) => {
+      if (directory === "/working") {
+        return [
+          directoryEntry("obj-aarch64"),
+          fileEntry("mozconfig"),
+          fileEntry("notes.txt"),
+        ];
+      }
+
+      return [
+        directoryEntry("obj-aarch64"),
+        directoryEntry("obj-stale"),
+        fileEntry("mozconfig-old"),
+      ];
+    },
+    remove: async (target, options) => removals.push([target, options]),
+    copyDirectory: async (source, destination, options) => {
+      directoryCopies.push([source, destination, options]);
+    },
+    copyFile: async (source, destination, mode) => {
+      fileCopies.push([source, destination, mode]);
+    },
+  });
+
+  assert.deepEqual(result.repositories.map((repository) => ({
+    repository: repository.repository,
+    hash: repository.destination.hash,
+    branch: repository.destination.branch,
+  })), [
+    { repository: "firefox", hash: "firefox-head", branch: "main" },
+    { repository: "comm", hash: "comm-head", branch: "Bug-1234567" },
+  ]);
+  assert.deepEqual(result.artifacts, {
+    copied: ["obj-aarch64", "mozconfig"],
+    removed: ["obj-stale", "mozconfig-old"],
+  });
+  assert.deepEqual(removals.map(([target]) => target), [
+    "/review/obj-stale",
+    "/review/mozconfig-old",
+    "/review/obj-aarch64",
+  ]);
+  assert.deepEqual(directoryCopies.map(([source, destination]) => [source, destination]), [
+    ["/working/obj-aarch64", "/review/obj-aarch64"],
+  ]);
+  assert.deepEqual(fileCopies.map(([source, destination]) => [source, destination]), [
+    ["/working/mozconfig", "/review/mozconfig"],
+  ]);
+
+  const reviewCommands = calls.filter((command) => command.cwd.startsWith("/review"));
+  const workingCommands = calls.filter((command) => command.cwd.startsWith("/working"));
+
+  assert.equal(
+    workingCommands.some((command) => ["clean", "reset", "gc"].includes(command.args[0])),
+    false,
+  );
+  assert.equal(
+    reviewCommands.filter((command) => command.args[0] === "clean").every(
+      (command) => command.args.includes("-ffdx"),
+    ),
+    true,
+  );
+  assert.equal(reviewCommands.filter((command) => command.args[0] === "gc").length, 2);
+  assert.deepEqual(
+    reviewCommands
+      .filter((command) => command.args[0] === "fetch")
+      .map((command) => command.args.slice(1, 6)),
+    [
+      ["--no-tags", "--prune", "--refmap=+refs/*:refs/*", "/working", "+refs/*:refs/*"],
+      ["--no-tags", "--prune", "--refmap=+refs/*:refs/*", "/working/comm", "+refs/*:refs/*"],
+    ],
+  );
+});
+
+test("syncReviewCheckoutFromWorking makes review refs and build outputs match real working clones", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "tb-tools-review-sync-"));
+  const workingFirefox = path.join(root, "working-firefox");
+  const workingComm = path.join(workingFirefox, "comm");
+  const reviewFirefox = path.join(root, "review-firefox");
+  const reviewComm = path.join(reviewFirefox, "comm");
+  const git = async (cwd, args) => run({
+    cmd: "git",
+    args,
+    cwd,
+    capture: true,
+    silent: true,
+  });
+  const configureRepository = async (repository) => {
+    await git(repository, ["config", "user.email", "tb-tools@example.invalid"]);
+    await git(repository, ["config", "user.name", "TB Tools Test"]);
+  };
+
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await mkdir(workingFirefox, { recursive: true });
+  await git(workingFirefox, ["init", "--initial-branch=main"]);
+  await configureRepository(workingFirefox);
+  await writeFile(path.join(workingFirefox, "source.txt"), "working firefox\n");
+  await git(workingFirefox, ["add", "source.txt"]);
+  await git(workingFirefox, ["commit", "-m", "working firefox"]);
+  await git(workingFirefox, ["branch", "Bug-1000000"]);
+
+  await mkdir(workingComm, { recursive: true });
+  await git(workingComm, ["init", "--initial-branch=main"]);
+  await configureRepository(workingComm);
+  await writeFile(path.join(workingComm, "source.txt"), "working comm\n");
+  await git(workingComm, ["add", "source.txt"]);
+  await git(workingComm, ["commit", "-m", "working comm"]);
+  await git(workingComm, ["switch", "-c", "Bug-1000001"]);
+  await writeFile(path.join(workingComm, "bug.txt"), "working branch\n");
+  await git(workingComm, ["add", "bug.txt"]);
+  await git(workingComm, ["commit", "-m", "working comm branch"]);
+
+  await git(root, ["clone", workingFirefox, reviewFirefox]);
+  await git(root, ["clone", workingComm, reviewComm]);
+  await configureRepository(reviewFirefox);
+  await configureRepository(reviewComm);
+  await git(reviewFirefox, ["switch", "-c", "review-only"]);
+  await writeFile(path.join(reviewFirefox, "review-only.txt"), "remove me\n");
+  await git(reviewFirefox, ["add", "review-only.txt"]);
+  await git(reviewFirefox, ["commit", "-m", "review only"]);
+  await git(reviewComm, ["switch", "-c", "review-only"]);
+  await writeFile(path.join(reviewComm, "review-only.txt"), "remove me\n");
+  await git(reviewComm, ["add", "review-only.txt"]);
+  await git(reviewComm, ["commit", "-m", "review only"]);
+
+  await writeFile(path.join(workingFirefox, "mozconfig"), "ac_add_options --enable-project=comm/mail\n");
+  await mkdir(path.join(workingFirefox, "obj-test"), { recursive: true });
+  await writeFile(path.join(workingFirefox, "obj-test", "artifact.txt"), "reuse this build\n");
+  await mkdir(path.join(reviewFirefox, "obj-stale"), { recursive: true });
+  await writeFile(path.join(reviewFirefox, "obj-stale", "artifact.txt"), "discard this build\n");
+
+  await syncReviewCheckoutFromWorking({
+    graphs: [
+      { checkout: "working", repository: "firefox", path: workingFirefox },
+      { checkout: "working", repository: "comm", path: workingComm },
+      { checkout: "review", repository: "firefox", path: reviewFirefox },
+      { checkout: "review", repository: "comm", path: reviewComm },
+    ],
+    confirmation: "SYNC REVIEW",
+  });
+
+  for (const [working, review] of [
+    [workingFirefox, reviewFirefox],
+    [workingComm, reviewComm],
+  ]) {
+    assert.equal(
+      (await git(review, ["rev-parse", "HEAD"])).trim(),
+      (await git(working, ["rev-parse", "HEAD"])).trim(),
+    );
+    assert.equal(
+      (await git(review, ["for-each-ref", "--format=%(refname) %(objectname)"])).trim(),
+      (await git(working, ["for-each-ref", "--format=%(refname) %(objectname)"])).trim(),
+    );
+    assert.equal(
+      (await git(review, ["branch", "--show-current"])).trim(),
+      (await git(working, ["branch", "--show-current"])).trim(),
+    );
+  }
+
+  assert.equal(
+    await (async () => {
+      try {
+        await git(reviewFirefox, ["show-ref", "--verify", "--quiet", "refs/heads/review-only"]);
+        return true;
+      } catch {
+        return false;
+      }
+    })(),
+    false,
+  );
+  await assert.rejects(access(path.join(reviewFirefox, "obj-stale")), /ENOENT/);
+  assert.equal(
+    await readFile(path.join(reviewFirefox, "obj-test", "artifact.txt"), "utf8"),
+    "reuse this build\n",
+  );
+  assert.equal(
+    await readFile(path.join(reviewFirefox, "mozconfig"), "utf8"),
+    "ac_add_options --enable-project=comm/mail\n",
+  );
+});
+
 test("getGraphDirtyCheckouts ignores untracked files", async () => {
   const dirty = await getGraphDirtyCheckouts({
     graphs: [{
@@ -7559,7 +8879,7 @@ test("getGraphOriginMainStatus compares local origin main with remote origin mai
   );
 });
 
-test("getGraphRustUpstreamStatus compares Firefox remote rust files to comm origin main checksums without changing checkouts", async () => {
+test("getGraphRustUpstreamStatus uses the working clone pair when review clones are present", async () => {
   const calls = [];
   const removed = [];
   const tempDir = path.join(os.tmpdir(), "rust-upstream-check");
@@ -7584,8 +8904,34 @@ test("getGraphRustUpstreamStatus compares Firefox remote rust files to comm orig
 
   const result = await getGraphRustUpstreamStatus({
     graphs: [
-      { label: "comm", path: "/repo/comm" },
-      { label: "firefox", path: "/repo/firefox" },
+      {
+        id: "working-comm",
+        checkout: "working",
+        repository: "comm",
+        label: "Working comm",
+        path: "/repo/comm",
+      },
+      {
+        id: "working-firefox",
+        checkout: "working",
+        repository: "firefox",
+        label: "Working firefox",
+        path: "/repo/firefox",
+      },
+      {
+        id: "review-comm",
+        checkout: "review",
+        repository: "comm",
+        label: "Review comm",
+        path: "/repo/review/comm",
+      },
+      {
+        id: "review-firefox",
+        checkout: "review",
+        repository: "firefox",
+        label: "Review firefox",
+        path: "/repo/review",
+      },
     ],
     makeTempDir: async (prefix) => {
       assert.match(prefix, /tb-tools-rust-upstream-/);
@@ -9003,7 +10349,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /data-index="1"/);
   assert.match(html, /class="header-row"/);
   assert.match(html, /class="title-row"/);
-  assert.match(html, /class="toolbar-row"/);
+  assert.match(html, /class="toolbar-row graph-toolbar"/);
   assert.match(html, /class="summary" data-index="0"/);
   assert.match(html, /class="summary-branch"/);
   assert.match(html, /class="summary-working-tree"/);
@@ -9034,10 +10380,12 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /class="amend-message"/);
   assert.match(html, /id="commit-dialog"/);
   assert.match(html, /class="commit-reviewer-input"/);
-  assert.match(html, /id="commit-reviewer-list" role="listbox" hidden/);
+  assert.doesNotMatch(html, /commit-reviewer-list/);
   assert.match(html, /id="phab-auth-dialog"/);
   assert.match(html, /class="phab-auth-start" type="button">Authenticate<\/button>/);
   assert.match(html, /id="submit-dialog"/);
+  assert.match(html, /<dialog class="system-dialog" id="system-dialog"/);
+  assert.match(html, /class="system-dialog-choices"/);
   assert.match(html, /class="submit-prompt"/);
   assert.match(html, /class="submit-links" hidden/);
   assert.match(html, /class="submit-output"/);
@@ -9046,10 +10394,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(html, /id="try-dialog"/);
   assert.match(html, /class="try-selector"/);
   assert.match(html, /class="try-tasks-regex"/);
-  assert.match(
-    html,
-    /class="tab test-output-tab" type="button" hidden>Test Output<\/button>/,
-  );
+  assert.doesNotMatch(html, /class="console-view-tab test-output-tab"/);
   assert.match(html, /class="test-output-panel" hidden/);
   assert.match(
     html,
@@ -9075,6 +10420,17 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(style, /\.workspace \{ --graph-pane-width: 54%; display: grid/);
   assert.match(style, /\.title-row \{/);
   assert.match(style, /\.toolbar-row \{/);
+  assert.match(style, /\.repository-navigation \{/);
+  assert.match(style, /\.repository-navigation \{[^}]*transform: translateY\(-5px\)/);
+  assert.match(style, /\.repository-switch \{/);
+  assert.match(style, /\.checkout-mode-button, \.repository-button \{[^}]*padding: 2px 9px/);
+  assert.match(style, /\.system-dialog \{/);
+  assert.match(style, /\.system-dialog\.danger \.system-dialog-confirm \{/);
+  assert.match(style, /\.console-navigation \{/);
+  assert.match(style, /\.console-navigation \{[^}]*align-self: stretch;/);
+  assert.match(style, /\.console-view-tab\.active \{/);
+  assert.match(style, /\.console-view-tab\.active \{\s*background: #1f5f9f;/);
+  assert.match(style, /\.dashboard-panel\[hidden\] \{\s*display: none;/);
   assert.match(style, /\.update-actions \{/);
   assert.match(style, /\.graph-options-menu \{/);
   assert.match(style, /\.graph-submenu \{/);
@@ -9130,7 +10486,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(style, /\.context-menu button\[hidden\] \{ display: none; \}/);
   assert.match(
     style,
-    /\.checkout-commit, \.amend-commit, \.submit-commit, \.load-more/,
+    /\.checkout-commit, \.amend-commit, \.submit-commit, \.patch-update-commit, \.load-more/,
   );
   assert.match(style, /\.amend-dialog \{/);
   assert.match(style, /\.amend-message \{/);
@@ -9237,7 +10593,8 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /function openAmendDialog/);
   assert.match(client, /function submitAmendDialog/);
   assert.match(client, /function openCommitDialog/);
-  assert.match(client, /function searchCommitReviewers/);
+  assert.match(client, /function handleCommitReviewerInputKeydown/);
+  assert.doesNotMatch(client, /function searchCommitReviewers/);
   assert.match(client, /function submitCommitDialog/);
   assert.match(client, /function openPhabricatorAuthDialog/);
   assert.match(client, /function openSubmitDialog/);
@@ -9275,6 +10632,11 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /\/api\/interactive-rebase\/plan/);
   assert.match(client, /\/api\/interactive-rebase/);
   assert.match(client, /function promptForDirtyUpdateAction/);
+  assert.match(client, /function showSystemChoice/);
+  assert.match(client, /function showSystemConfirmation/);
+  assert.doesNotMatch(client, /\balert\s*\(/);
+  assert.doesNotMatch(client, /\bconfirm\s*\(/);
+  assert.doesNotMatch(client, /\bprompt\s*\(/);
   assert.match(client, /function unshelfGraphUpdateChanges/);
   assert.match(client, /function listenForServerShutdown/);
   assert.match(client, /\/api\/shutdown-events/);
@@ -9347,7 +10709,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /group\.append\(current, history\)/);
   assert.match(
     client,
-    /renderCommitIntegrationStatus\(container, \{ tryRuns: commit\.tryRuns \|\| \[\] \}/,
+    /const result = \{ tryRuns: commit\.tryRuns \|\| \[\] \};/,
   );
   assert.match(client, /amendButton\.hidden = !INTERACTIVE\.enabled/);
   assert.match(client, /function startPaneResize/);
@@ -9393,10 +10755,14 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
     client,
     /loadSelectedCommitMessage\(index, commit, commitMessage\)/,
   );
-  assert.match(
+  assert.match(client, /export async function showDiff\(graph, index, commit, \{ loadIntegration = false \} = \{\}\)/);
+  assert.match(client, /if \(loadIntegration && !isWorkingTreeCommit\(commit\)\)/);
+  assert.doesNotMatch(
     client,
-    /loadSelectedCommitIntegrationStatus\(index, commit, integrationStatus\)/,
+    /loadSelectedCommitIntegrationStatus\(index, commit, integrationStatus, \{\s*onLoaded:/,
   );
+  assert.match(client, /function configurePatchUpdateButton/);
+  assert.match(client, /event\.target\.closest\("\.patch-update-commit"\)/);
   assert.match(
     client,
     /!result\.bug\.error && isAcceptedPhabricatorStatus\(result\.phabricator\)/,
@@ -9405,7 +10771,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(client, /event\.target\.closest\("\.checkin-needed-button"\)/);
   assert.match(client, /\/api\/amend-message/);
   assert.match(client, /\/api\/commit\/metadata/);
-  assert.match(client, /\/api\/commit\/reviewers/);
+  assert.doesNotMatch(client, /\/api\/commit\/reviewers/);
   assert.match(client, /\/api\/commit/);
   assert.match(
     client,
@@ -9413,7 +10779,11 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   );
   assert.match(
     client,
-    /submitButton\.hidden =[^]*!INTERACTIVE\.enabled[^]*\|\|[^]*isWorkingTreeCommit\(commit\)[^]*\|\|[^]*!isCurrentCommit\(commit\)/,
+    /function isCommitReachableFromLoadedOriginMain/,
+  );
+  assert.match(
+    client,
+    /submitButton\.hidden =[^]*!INTERACTIVE\.enabled[^]*\|\|[^]*isWorkingTreeCommit\(commit\)[^]*\|\|[^]*isCommitReachableFromLoadedOriginMain\(index, commit\)/,
   );
   assert.match(client, /hash: uiState\.amendDialogState\.hash/);
   assert.match(client, /expectedChangeId: uiState\.amendDialogState\.changeId/);
@@ -9509,6 +10879,8 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.doesNotMatch(html, /<style>/);
   assert.doesNotMatch(html, /function renderGraph/);
   assert.match(client, /const INTERACTIVE = /);
+  assert.match(client, /originMainStatusRefreshQueued/);
+  assert.match(client, /const checkout = uiState\.checkoutMode/);
   assert.match(html, /<title>Thunderbird Desktop Console<\/title>/);
   assert.match(html, /<h1>Thunderbird Desktop Console<\/h1>/);
   assert.match(
@@ -9529,11 +10901,18 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   );
   assert.ok(
     html.indexOf('<div class="graph-options">') <
-      html.indexOf('<div class="toolbar-row">'),
+      html.indexOf('<div class="toolbar-row graph-toolbar">'),
   );
-  assert.match(html, /<div class="toolbar-row">\s*<nav class="tabs">/);
+  assert.match(
+    html,
+    /<div class="toolbar-row graph-toolbar">\s*<nav class="repository-navigation" aria-label="Checkout and repository">/,
+  );
+  assert.match(
+    html,
+    /<div class="console-footer">\s*<nav class="console-navigation" aria-label="Console views">\s*<button class="tab console-view-tab graph-view-tab active" type="button">Tree<\/button>/,
+  );
   assert.match(html, /class="update-actions"/);
-  assert.match(html, /class="tab dashboard-tab"/);
+  assert.match(html, /class="tab console-view-tab dashboard-tab"/);
   assert.match(html, /class="dashboard-panel"/);
   assert.match(html, /class="dashboard-section dashboard-direct-review" data-dashboard-section="direct-review"/);
   assert.match(html, /class="dashboard-workspace"/);
@@ -9553,7 +10932,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.doesNotMatch(html, /Submit Patch/);
   assert.doesNotMatch(html, /data-dashboard-section="approved-not-marked"/);
   assert.doesNotMatch(html, /data-dashboard-section="reviewed-awaiting-review"/);
-  assert.match(html, /class="tab meta-boards-tab"/);
+  assert.match(html, /class="tab console-view-tab meta-boards-tab"/);
   assert.match(html, /class="meta-boards-panel"/);
   assert.match(html, /class="meta-board-root-links"/);
   assert.match(html, /<h3>Blocked By<\/h3>/);
@@ -9581,13 +10960,18 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /data-mode="render" aria-hidden="true" hidden/);
   assert.match(html, /class="meta-board-detail-description-rendered"/);
   assert.match(html, /class="meta-board-detail-description" rows="12" hidden/);
-  assert.match(html, /<\/nav>\s*<div class="update-actions" role="toolbar"/);
+  assert.match(html, /<details class="meta-board-detail-comments">/);
+  assert.match(html, /class="meta-board-detail-comments-count"/);
   assert.ok(
-    html.indexOf('<div class="update-actions"') >
-      html.indexOf('<div class="toolbar-row">'),
+    html.indexOf('<div class="update-actions"') <
+      html.indexOf('<div class="graph-options">'),
   );
-  assert.match(html, /data-mode="update">Update<\/button>/);
-  assert.match(html, /data-mode="rebase">Update and Rebase<\/button>/);
+  assert.ok(
+    html.indexOf('<div class="update-actions"') <
+    html.indexOf('<div class="toolbar-row graph-toolbar">'),
+  );
+  assert.match(html, /data-mode="update">Pull<\/button>/);
+  assert.match(html, /data-mode="rebase">Rebase<\/button>/);
   assert.doesNotMatch(
     html,
     /class="mach-action" type="button" data-action="build">Build<\/button>/,
@@ -9631,7 +11015,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /data-menu-action="land">Land Patches<\/button>/);
   assert.match(
     html,
-    /class="tab test-output-tab" type="button" hidden>Test Output<\/button>/,
+    /class="tab console-view-tab test-output-tab" type="button" hidden>Test Output<\/button>/,
   );
   assert.match(html, /class="test-output-panel" hidden/);
   assert.match(
@@ -9682,10 +11066,8 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(html, /<dialog class="try-dialog" id="try-dialog">/);
   assert.match(html, /<dialog class="commit-dialog" id="commit-dialog">/);
   assert.match(html, /class="commit-field commit-bug-field" hidden/);
-  assert.match(
-    html,
-    /class="commit-reviewer-input"[\s\S]+aria-controls="commit-reviewer-list"/,
-  );
+  assert.match(html, /class="commit-reviewer-input"[\s\S]+press Enter/);
+  assert.doesNotMatch(html, /aria-controls="commit-reviewer-list"/);
   assert.match(html, /<option value="fuzzy">fuzzy<\/option>/);
   assert.match(html, /Post try link to Phabricator/);
   assert.match(html, /<dialog class="test-dialog" id="test-dialog">/);
@@ -9728,15 +11110,14 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /toggleDetailDescription/);
   assert.match(client, /detailDescription\.hidden = false;/);
   assert.match(client, /submitCommitDialog/);
-  assert.match(client, /addCommitReviewerFromEvent/);
+  assert.match(client, /handleCommitReviewerInputKeydown/);
   assert.match(client, /handleCommitReviewerPillEvent/);
-  assert.match(client, /function getReviewerResultVariants/);
-  assert.match(client, /\.flatMap\(getReviewerResultVariants\)/);
-  assert.match(client, /MIN_REVIEWER_QUERY_LENGTH = 3/);
-  assert.match(client, /REVIEWER_SEARCH_DEBOUNCE_MS = 300/);
-  assert.match(client, /result\.rateLimited/);
-  assert.match(client, /Start group searches with #/);
-  assert.match(client, /limit=20/);
+  assert.match(client, /normalizeReviewerInputValue/);
+  assert.doesNotMatch(client, /scheduleCommitReviewerSearch/);
+  assert.doesNotMatch(client, /addCommitReviewerFromEvent/);
+  assert.doesNotMatch(client, /MIN_REVIEWER_QUERY_LENGTH/);
+  assert.doesNotMatch(client, /REVIEWER_SEARCH_DEBOUNCE_MS/);
+  assert.doesNotMatch(client, /\/api\/commit\/reviewers/);
   assert.match(client, /\/api\/update-graphs/);
   assert.match(client, /\/api\/unshelf-graphs/);
   assert.match(client, /\/api\/mach-action/);
@@ -9826,17 +11207,31 @@ test("buildGraphHtml only renders Codex patch review controls when enabled", () 
   assert.doesNotMatch(disabledHtml, /Suggested reply/);
   assert.doesNotMatch(disabledHtml, /Review comment/);
   assert.doesNotMatch(disabledHtml, /Save Reply Draft/);
-  assert.doesNotMatch(disabledHtml, /Feedback or instruction for Codex/);
+  assert.doesNotMatch(disabledHtml, /Guide Codex/);
   assert.doesNotMatch(disabledHtml, /Submit Patch/);
+  assert.doesNotMatch(disabledHtml, /class="patch-update-commit"/);
   assert.match(enabledHtml, /Codex recommendation/);
   assert.match(enabledHtml, /What Codex found/);
-  assert.match(enabledHtml, /Planned source change/);
+  assert.match(enabledHtml, /Working tree changes/);
+  assert.match(enabledHtml, /Actual uncommitted diff/);
   assert.match(enabledHtml, /Codex activity/);
-  assert.match(enabledHtml, /Feedback or instruction for Codex/);
-  assert.match(enabledHtml, /Send to Codex/);
-  assert.match(enabledHtml, /Draft reply/);
+  assert.match(enabledHtml, /class="patch-update-steer-label"[^>]*>Guide Codex<\/label>/);
+  assert.match(enabledHtml, /<label class="patch-update-reply-label">Reply/);
   assert.match(enabledHtml, /Save Reply Draft/);
+  assert.doesNotMatch(enabledHtml, /Prepare Change/);
+  assert.match(enabledHtml, /Keep and Amend/);
+  assert.match(enabledHtml, /Revert Change/);
+  assert.match(enabledHtml, /Amend Patch/);
   assert.match(enabledHtml, /Submit Patch/);
+  assert.match(
+    enabledHtml,
+    /class="patch-update-commit" type="button" hidden>Update<\/button>/,
+  );
+  assert.match(enabledHtml, /<dialog class="patch-review-dialog" id="patch-review-dialog">/);
+  assert.match(enabledHtml, /Add Comment as Pending/);
+  assert.match(enabledHtml, /Apply in Review Checkout/);
+  assert.match(enabledHtml, /Add Comment \+ Code Suggestion as Pending/);
+  assert.match(enabledHtml, /Request Changes/);
 });
 
 test("patch update dialog clears the prior session before starting another update", () => {
@@ -9849,7 +11244,260 @@ test("patch update dialog clears the prior session before starting another updat
   assert.match(source, /session = undefined;/);
   assert.match(source, /output\.textContent = "";/);
   assert.match(source, /setComment\(null\);/);
-  assert.match(source, /resetPatchUpdateDialog\(patch\);\n {2}dialog\.showModal\(\);/);
+  assert.match(source, /resetPatchUpdateDialog\(patch\);\n {2}setPageScrollLocked\(true\);\n {2}dialog\.showModal\(\);/);
+});
+
+test("patch update locks background page scrolling while its dialog is open", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+  const style = readFileSync(
+    new URL("../commands/graph/client/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /function setPageScrollLocked\(isLocked\)/);
+  assert.match(source, /setPageScrollLocked\(true\);\n {2}dialog\.showModal\(\);/);
+  assert.match(source, /dialog\.addEventListener\("close", \(\) => \{\n {4}setPageScrollLocked\(false\);/);
+  assert.match(style, /html\.patch-update-open,\nbody\.patch-update-open \{\n {2}overflow: hidden;/);
+});
+
+test("patch update actions display immediate pending feedback", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /let pendingAction = "";/);
+  assert.match(source, /pendingAction = action;\n {2}renderSession\(session\);/);
+  assert.match(source, /pendingAction === "comment"\n {6}\? "Saving Reply\.\.\."/);
+  assert.match(source, /item\.state === "applying"/);
+  assert.match(source, /isCommentFeedback \? "feedback" : "steer"/);
+  assert.match(source, /pendingAction === "steer" \|\| pendingAction === "feedback"/);
+});
+
+test("patch update keeps patch context above compact reviewer feedback in scrollable columns", () => {
+  const html = buildGraphHtml({
+    graphs: [],
+    interactive: { aiEnabled: true, enabled: true, token: "secret" },
+  });
+  const style = readFileSync(
+    new URL("../commands/graph/client/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(html, /class="patch-update-workspace">\s*<section class="patch-update-review-column"/);
+  assert.ok(
+    html.indexOf('class="patch-update-context"') <
+      html.indexOf('class="patch-update-reviewer-feedback"'),
+  );
+  assert.match(html, /class="patch-update-context-toggle" type="button" aria-controls="patch-update-context-details" aria-expanded="false"/);
+  assert.match(html, /class="patch-update-context-details" id="patch-update-context-details" hidden/);
+  assert.match(html, /class="patch-update-change-plan" hidden/);
+  assert.match(html, /<h4>Planned source change<\/h4>/);
+  assert.match(html, /<h4>Working tree changes<\/h4>/);
+  assert.match(html, /Actual uncommitted diff/);
+  assert.match(html, /class="patch-update-comment-context" hidden aria-label="Review context"/);
+  assert.match(style, /\.patch-update-workspace \{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);[\s\S]*?overflow: hidden;/);
+  assert.match(style, /\.patch-update-review-column,[\s\S]*?\.patch-update-analysis \{[\s\S]*?overflow: auto;/);
+  assert.match(style, /\.patch-update-context \{[\s\S]*?flex: 0 0 auto;[\s\S]*?max-height: none;/);
+  assert.match(style, /\.patch-update-context\.is-expanded \{[\s\S]*?flex: 0 1 min\(26dvh, 240px\);[\s\S]*?max-height: min\(26dvh, 240px\);/);
+  assert.match(style, /\.patch-update-context-toggle\[aria-expanded="true"\]::after/);
+  assert.match(style, /\.patch-update-context-details\[hidden\] \{\s*display: none;/);
+  assert.match(style, /\.patch-update-comment-content \{[\s\S]*?max-height: none;[\s\S]*?overflow: visible;/);
+  assert.match(style, /\.patch-update-comment \{[\s\S]*?flex: 1 1 0;[\s\S]*?min-height: 0;/);
+  assert.match(style, /\.patch-update-reviewer-context \{[\s\S]*?display: flex;[\s\S]*?flex: 1 1 auto;[\s\S]*?flex-direction: column;[\s\S]*?overflow: auto;/);
+  assert.match(style, /\.patch-update-comment-context \{[\s\S]*?flex: 1 1 auto;[\s\S]*?min-height: 220px;/);
+  assert.match(style, /\.patch-update-comment-context-diff \{[\s\S]*?height: auto;[\s\S]*?min-height: 220px;[\s\S]*?overflow: auto;/);
+});
+
+test("Patch Update automatically prepares and shows the actual working-tree diff", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+  const patchUpdate = readFileSync(
+    new URL("../commands/graph/patch-update.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /function setWorkingTreeDiff\(item\) \{/);
+  assert.match(source, /function loadWorkingTreeDiff\(item\) \{/);
+  assert.match(source, /\/diff\/uncommitted-changes\?token=/);
+  assert.match(source, /const hasWorkingDiff = Boolean\(workingDiff \|\| workingDiffHtml\);/);
+  assert.match(source, /const \{ needsChange \} = setWorkingTreeDiff\(item\);/);
+  assert.match(source, /rawDiff\.textContent = workingDiff;/);
+  assert.match(source, /if \(!item\) \{[\s\S]*?analysis\.hidden = !session\?\.id;[\s\S]*?return;/);
+  assert.match(source, /analysis\.hidden = !hasAnalysis;/);
+  assert.match(source, /changePlan\.hidden = !needsChange;/);
+  assert.match(source, /if \(hasWorkingDiff\) \{/);
+  assert.match(source, /session\.workingTreeDiffVersion/);
+  assert.doesNotMatch(source, /proposedDiff\.hidden = !item\.proposedDiffHtml/);
+  assert.doesNotMatch(source, /Prepare Change/);
+  assert.match(source, /runAction\("keep", \{ itemId: item\.id \}\)/);
+  assert.match(source, /runAction\("revert", \{ itemId: item\.id \}\)/);
+  assert.match(patchUpdate, /function hasGraphPatchUpdateChangeRecommendation\(item\)/);
+  assert.match(patchUpdate, /applyGraphPatchUpdateRecommendedChange/);
+  assert.match(
+    patchUpdate,
+    /Codex did not provide a complete source-change recommendation\./,
+  );
+});
+
+test("patch update keeps the purpose collapsed until the user expands it", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /let patchContextExpanded = false;/);
+  assert.match(source, /function setPatchContextExpanded\(expanded\)/);
+  assert.match(source, /patchContext\?\.classList\.toggle\("is-expanded", patchContextExpanded\);/);
+  assert.match(source, /patchContextDetails\.hidden = !patchContextExpanded;/);
+  assert.match(source, /patchContextToggle\?\.addEventListener\("click"/);
+  assert.match(source, /patchContextExpanded = false;\n {2}patchContextKey = "";/);
+});
+
+test("patch update keeps Codex activity visible with Notes and All filters", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+  const html = buildGraphHtml({
+    interactive: { enabled: true, token: "secret", aiEnabled: true },
+    graphs: [],
+  });
+  const style = readFileSync(
+    new URL("../commands/graph/client/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(html, /<details class="patch-update-progress" open>/);
+  assert.match(html, /class="patch-update-progress-summary"/);
+  assert.match(html, /class="patch-update-progress-toggle" aria-hidden="true"/);
+  assert.match(html, /class="patch-update-progress-label">Codex activity<\/span>/);
+  assert.ok(
+    html.indexOf('class="patch-update-progress-label"') <
+      html.indexOf('class="patch-update-progress-toggle"'),
+  );
+  assert.ok(
+    html.indexOf('class="patch-update-progress-toggle"') <
+      html.indexOf('class="patch-update-status"'),
+  );
+  assert.match(html, /class="patch-update-activity" aria-label="Codex activity"/);
+  assert.match(html, /class="patch-update-activity-status"/);
+  assert.match(html, /class="patch-update-activity-latest" role="status">Waiting for Codex activity\.\.\.<\/span>/);
+  assert.match(html, /data-activity-filter="notes" aria-pressed="true">Notes<\/button>/);
+  assert.match(html, /data-activity-filter="all" aria-pressed="false">All<\/button>/);
+  assert.match(html, /class="patch-update-activity-list"><\/ol>/);
+  assert.match(source, /let activityFilter = "notes";/);
+  assert.match(source, /function setActivityFilter\(filter\)/);
+  assert.match(source, /activityFilter = filter === "all" \? "all" : "notes";/);
+  assert.match(source, /function isCodexNoteActivity\(entry\)/);
+  assert.match(source, /items\.filter\(isCodexNoteActivity\)/);
+  assert.doesNotMatch(source, /items\.filter\(\(entry\) => !isCommandActivity\(entry\)\)/);
+  assert.match(source, /items\[items\.length - 1\]/);
+  assert.match(source, /No Codex notes yet\. Select All to include other activity\./);
+  assert.match(source, /function createCommandActivityDisclosure\(entry\)/);
+  assert.match(source, /details\.open = expandedActivityCommandIds\.has\(entry\.id\);/);
+  assert.match(source, /function getActivityCommandPreview\(detail\)/);
+  assert.match(source, /patch-update-activity-command-row/);
+  assert.match(source, /const activityProgress = dialog\?\.querySelector\("\.patch-update-progress"\);/);
+  assert.match(source, /activityProgress\.open = true;/);
+  assert.match(style, /\.patch-update-progress-summary \{/);
+  assert.match(style, /\.patch-update-progress-toggle::before \{/);
+  assert.match(style, /\.patch-update-progress\[open\] \.patch-update-progress-toggle \{/);
+  assert.match(style, /\.patch-update-activity-status \{/);
+  assert.match(style, /\.patch-update-activity-filter button\[aria-pressed="true"\] \{/);
+  assert.match(style, /height: clamp\(140px, 20dvh, 260px\);/);
+  assert.match(style, /\.patch-update-activity-command-summary \{/);
+  assert.match(style, /\.patch-update-activity-command-disclosure > code \{/);
+});
+
+test("patch update reuses graph inline review threads in the contextual diff", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+  const reviewViewer = readFileSync(
+    new URL("../commands/graph/client/review-viewer.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /import \{ appendInlineReviewComment \} from "\.\/review-viewer\.js";/);
+  assert.match(source, /appendInlineReviewComment\(anchor, \{/);
+  assert.match(source, /const isInlineInContext = item\.type === "inline"/);
+  assert.match(reviewViewer, /export function appendInlineReviewComment\(row, comment\)/);
+});
+
+test("patch update anchors a Phabricator review context diff at the commented line", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /function setCommentContext\(item\)/);
+  assert.match(source, /commentContextDiff\.innerHTML = html;/);
+  assert.match(source, /\.diff-line\[data-\$\{side\}-line=/);
+  assert.match(source, /row\.classList\.add\("comment-context-line"\)/);
+});
+
+test("dashboard and meta boards show an accessible loading indicator", () => {
+  const html = buildGraphHtml({
+    graphs: [],
+    interactive: { enabled: true, token: "secret" },
+  });
+  const dashboardSource = readFileSync(
+    new URL("../commands/graph/client/dashboard.js", import.meta.url),
+    "utf8",
+  );
+  const metaBoardsSource = readFileSync(
+    new URL("../commands/graph/client/meta-boards.js", import.meta.url),
+    "utf8",
+  );
+  const style = readFileSync(
+    new URL("../commands/graph/client/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(html, /class="loading-indicator dashboard-loading" role="status" hidden/);
+  assert.match(html, /class="loading-indicator meta-boards-loading" role="status" hidden/);
+  assert.match(dashboardSource, /dashboardPanel\?\.setAttribute\("aria-busy", String\(isLoading\)\);/);
+  assert.match(dashboardSource, /dashboardLoading\.hidden = !isLoading;/);
+  assert.match(metaBoardsSource, /panel\?\.setAttribute\("aria-busy", String\(isLoading\)\);/);
+  assert.match(metaBoardsSource, /setLoading\(true, "Loading available meta bug boards\.\.\."\);/);
+  assert.match(style, /\.loading-spinner \{/);
+  assert.match(style, /@keyframes console-loading-spinner/);
+});
+
+test("meta board columns show filtered point totals except backlog", () => {
+  const html = buildGraphHtml({
+    graphs: [],
+    interactive: { enabled: true, token: "secret" },
+  });
+  const source = readFileSync(
+    new URL("../commands/graph/client/meta-boards.js", import.meta.url),
+    "utf8",
+  );
+  const style = readFileSync(
+    new URL("../commands/graph/client/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    html,
+    /data-meta-board-column="backlog"[\s\S]*?meta-board-column-points" hidden/,
+  );
+  assert.match(
+    html,
+    /data-meta-board-column="ready"[\s\S]*?meta-board-column-points"><\/span>/,
+  );
+  assert.match(source, /function getPointTotal\(cards\)/);
+  assert.match(source, /const cards = getFilteredCards\(column\.dataset\.metaBoardColumn\);/);
+  assert.match(source, /points\.hidden = column\.dataset\.metaBoardColumn === "backlog";/);
+  assert.match(source, /formatPointTotal\(getPointTotal\(cards\)\)/);
+  assert.match(style, /\.meta-board-column header \.meta-board-column-points \{/);
 });
 
 test("patch update enables saving the generated reply after advancing to a comment", () => {
@@ -9873,7 +11521,9 @@ test("patch update output remains hidden until the user expands it", () => {
   assert.match(source, /let outputVisible = false;/);
   assert.doesNotMatch(source, /outputAutoShown/);
   assert.match(source, /output\.hidden = !outputVisible \|\| !hasOutput;/);
-  assert.match(source, /!item\?\.proposedDiffHtml/);
+  assert.match(source, /function getPatchUpdateOutput/);
+  assert.match(source, /output-expanded/);
+  assert.match(source, /const workingDiffHtml = currentDiff\?\.html \|\| "";/);
 });
 
 test("patch update activity follows new entries until the user scrolls away", () => {
@@ -9886,11 +11536,274 @@ test("patch update activity follows new entries until the user scrolls away", ()
   assert.match(source, /function updateActivityFollowState\(\)/);
   assert.match(source, /activityList\?\.addEventListener\("scroll", updateActivityFollowState/);
   assert.match(source, /window\.requestAnimationFrame\(\(\) => \{\n {6}activityList\.scrollTop = activityList\.scrollHeight;/);
+  assert.match(source, /activityFollowsLatest = true;\n {2}renderActivityFilter\(\);/);
 });
 
 test("getGraphOutputPath defaults to a temp HTML file", () => {
   assert.match(getGraphOutputPath(), /tb-tools-branch-graph\.html$/);
   assert.equal(getGraphOutputPath("/tmp/custom.html"), "/tmp/custom.html");
+});
+
+test("review checkout config requires both independent clone paths", () => {
+  assert.equal(getReviewCheckoutConfig({}), null);
+  assert.equal(getReviewCheckoutConfig({
+    reviewCheckout: { firefoxPath: "/repo/firefox-review" },
+  }), null);
+  assert.deepEqual(getReviewCheckoutConfig({
+    reviewCheckout: {
+      firefoxPath: "/repo/firefox-review",
+      commPath: "/repo/firefox-review/comm",
+    },
+  }), {
+    firefoxPath: "/repo/firefox-review",
+    commPath: "/repo/firefox-review/comm",
+  });
+});
+
+test("interactive console includes the configured independent review clone pair", () => {
+  const checkouts = resolveGraphCheckouts({
+    cwd: "/repo/working/comm",
+    config: {
+      reviewCheckout: {
+        firefoxPath: "/repo/review",
+        commPath: "/repo/review/comm",
+      },
+    },
+    includeReview: true,
+  });
+
+  assert.deepEqual(checkouts, [
+    {
+      id: "working-comm",
+      checkout: "working",
+      repository: "comm",
+      label: "Working comm",
+      cwd: "/repo/working/comm",
+    },
+    {
+      id: "working-firefox",
+      checkout: "working",
+      repository: "firefox",
+      label: "Working firefox",
+      cwd: "/repo/working",
+    },
+    {
+      id: "review-comm",
+      checkout: "review",
+      repository: "comm",
+      label: "Review comm",
+      cwd: "/repo/review/comm",
+    },
+    {
+      id: "review-firefox",
+      checkout: "review",
+      repository: "firefox",
+      label: "Review firefox",
+      cwd: "/repo/review",
+    },
+  ]);
+});
+
+test("interactive console uses a checkout switch with one comm and Firefox tab", () => {
+  const html = buildGraphHtml({
+    interactive: { enabled: true, token: "secret" },
+    graphs: [
+      {
+        id: "working-comm",
+        checkout: "working",
+        repository: "comm",
+        label: "Working comm",
+        path: "/repo/working/comm",
+        commits: [],
+        diffs: {},
+      },
+      {
+        id: "working-firefox",
+        checkout: "working",
+        repository: "firefox",
+        label: "Working firefox",
+        path: "/repo/working",
+        commits: [],
+        diffs: {},
+      },
+      {
+        id: "review-comm",
+        checkout: "review",
+        repository: "comm",
+        label: "Review comm",
+        path: "/repo/review/comm",
+        commits: [],
+        diffs: {},
+      },
+      {
+        id: "review-firefox",
+        checkout: "review",
+        repository: "firefox",
+        label: "Review firefox",
+        path: "/repo/review",
+        commits: [],
+        diffs: {},
+      },
+    ],
+  });
+  const client = readGraphClientScripts();
+
+  assert.match(html, /class="checkout-mode-switch" role="group" aria-label="Checkout mode"/);
+  assert.match(html, /<nav class="repository-navigation" aria-label="Checkout and repository">/);
+  assert.match(html, /<nav class="console-navigation" aria-label="Console views">/);
+  assert.match(html, /class="checkout-mode-button active"[^>]+data-checkout="working"[^>]*>Working<\/button>/);
+  assert.match(html, /class="checkout-mode-button"[^>]+data-checkout="review"[^>]*>Review<\/button>/);
+  assert.equal((html.match(/class="tab[^"\n]*"[^>]+data-repository=/g) || []).length, 2);
+  assert.equal((html.match(/class="origin-main-badge checking"/g) || []).length, 3);
+  assert.match(html, /data-repository="comm"[^>]*>comm<\/button>/);
+  assert.match(html, /data-repository="firefox"[^>]*>firefox<\/button>/);
+  assert.doesNotMatch(html, /data-index="0">Working comm<\/button>/);
+  assert.doesNotMatch(html, /data-index="2">Review comm<\/button>/);
+  assert.match(client, /function switchCheckoutMode\(checkout\)/);
+  assert.match(client, /document\.querySelectorAll\("\.checkout-mode-button"\)/);
+});
+
+test("interactive console exposes Review sync only for a complete checkout pair", () => {
+  const completeHtml = buildGraphHtml({
+    interactive: { enabled: true, token: "secret" },
+    graphs: [
+      { checkout: "working", repository: "comm", label: "Working comm", path: "/working/comm", commits: [], diffs: {} },
+      { checkout: "working", repository: "firefox", label: "Working firefox", path: "/working", commits: [], diffs: {} },
+      { checkout: "review", repository: "comm", label: "Review comm", path: "/review/comm", commits: [], diffs: {} },
+      { checkout: "review", repository: "firefox", label: "Review firefox", path: "/review", commits: [], diffs: {} },
+    ],
+  });
+  const incompleteHtml = buildGraphHtml({
+    interactive: { enabled: true, token: "secret" },
+    graphs: [
+      { checkout: "working", repository: "comm", label: "Working comm", path: "/working/comm", commits: [], diffs: {} },
+      { checkout: "review", repository: "comm", label: "Review comm", path: "/review/comm", commits: [], diffs: {} },
+    ],
+  });
+  const client = readGraphClientScripts();
+
+  assert.match(completeHtml, /data-menu-action="review-sync">Sync Review from Working\.\.\.<\/button>/);
+  assert.match(completeHtml, /id="review-sync-dialog"/);
+  assert.match(completeHtml, /Type <code>SYNC REVIEW<\/code> to confirm/);
+  assert.doesNotMatch(incompleteHtml, /data-menu-action="review-sync"/);
+  assert.match(client, /initializeReviewSyncDialog\(\)/);
+  assert.match(client, /openReviewSyncDialog\(\)/);
+});
+
+test("console tabs are bottom-left navigation and checkout switches are graph-only", () => {
+  const html = buildGraphHtml({
+    interactive: { enabled: true, token: "secret" },
+    graphs: [{
+      checkout: "working",
+      repository: "comm",
+      label: "comm",
+      path: "/repo/comm",
+      commits: [],
+      diffs: {},
+    }],
+  });
+  const staticHtml = buildGraphHtml({
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      commits: [],
+      diffs: {},
+    }],
+  });
+  const style = readFileSync(
+    new URL("../commands/graph/client/style.css", import.meta.url),
+    "utf8",
+  );
+  const dashboardSource = readFileSync(
+    new URL("../commands/graph/client/dashboard.js", import.meta.url),
+    "utf8",
+  );
+  const metaBoardsSource = readFileSync(
+    new URL("../commands/graph/client/meta-boards.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(html, /<div class="console-footer">/);
+  assert.match(html, /<nav class="console-navigation" aria-label="Console views">/);
+  assert.match(html, /<div class="toolbar-row graph-toolbar">/);
+  assert.match(
+    html,
+    /class="tab console-view-tab graph-view-tab active" type="button">Tree<\/button>/,
+  );
+  assert.ok(
+    html.indexOf('class="console-navigation"') <
+      html.indexOf('class="toolbar-row graph-toolbar"'),
+  );
+  assert.doesNotMatch(staticHtml, /console-navigation/);
+  assert.match(style, /body:not\(\.graph-view-active\) \.graph-toolbar \{\s*display: none;/);
+  assert.match(style, /\.console-footer \{[\s\S]*?display: flex;/);
+  assert.match(style, /\.graph-toolbar \{[\s\S]*?margin: 0 0 0 auto;/);
+  assert.match(style, /\.console-navigation \{[\s\S]*?background: transparent;/);
+  assert.match(style, /\.console-view-tab \{[\s\S]*?background: #e8ecf0;/);
+  assert.match(style, /\.console-view-tab \{[\s\S]*?border-bottom: 0;[\s\S]*?border-radius: 5px 5px 0 0;/);
+  assert.match(style, /\.console-view-tab\.active \{[\s\S]*?background: #1f5f9f;/);
+  assert.match(style, /\.console-view-tab \{[\s\S]*?background: #2a313c;/);
+  assert.match(style, /\.console-view-tab\.active \{[\s\S]*?background: #4b9eff;/);
+  assert.match(dashboardSource, /document\.body\.classList\.remove\("graph-view-active"\)/);
+  assert.match(metaBoardsSource, /document\.body\.classList\.remove\("graph-view-active"\)/);
+  assert.match(
+    readGraphClientScripts(),
+    /void loadMoreCommits\(index\)\.then\(\(\) => selectCurrentCommit\(index\)\);/,
+  );
+});
+
+test("Tree defers Phabricator review history and only loads integrations from a user-selected commit", () => {
+  const html = buildGraphHtml({
+    interactive: { enabled: true, token: "secret" },
+    graphs: [{
+      checkout: "working",
+      repository: "comm",
+      label: "comm",
+      path: "/repo/comm",
+      commits: [],
+      diffs: {},
+    }],
+  });
+  const commitActions = readFileSync(
+    new URL("../commands/graph/client/commit-actions.js", import.meta.url),
+    "utf8",
+  );
+  const laneRenderer = readFileSync(
+    new URL("../commands/graph/client/lane-renderer.js", import.meta.url),
+    "utf8",
+  );
+  const init = readFileSync(
+    new URL("../commands/graph/client/init.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(html, /class="load-commit-review" type="button" hidden>Load Review<\/button>/);
+  assert.doesNotMatch(html, /load-commit-integration/);
+  assert.match(
+    commitActions,
+    /export async function loadSelectedCommitReviewForCurrentSelection/,
+  );
+  assert.match(
+    commitActions,
+    /export async function showDiff\(graph, index, commit, \{ loadIntegration = false \} = \{\}\)/,
+  );
+  assert.match(laneRenderer, /showDiff\(state\.graph, index, commit, \{ loadIntegration: true \}\)/);
+  assert.match(init, /void showDiff\(state\.graph, index, currentCommit\);/);
+  assert.doesNotMatch(commitActions, /const reviewPromise = fetchSelectedCommitReview/);
+});
+
+test("static graph does not add review checkout tabs", () => {
+  const checkouts = resolveGraphCheckouts({
+    cwd: "/repo/working/comm",
+    config: {
+      reviewCheckout: {
+        firefoxPath: "/repo/review",
+        commPath: "/repo/review/comm",
+      },
+    },
+  });
+
+  assert.deepEqual(checkouts.map(({ label }) => label), ["comm", "firefox"]);
 });
 
 test("graph command writes and opens a tabbed graph", async () => {
@@ -10039,6 +11952,362 @@ test("interactive graph server returns origin status before slow Rust dependency
   assert.equal(completedStatus.statuses[2].state, "current");
 });
 
+test("patch update always targets the working comm checkout", async (t) => {
+  let resolvePrepared;
+  const prepared = new Promise((resolve) => {
+    resolvePrepared = resolve;
+  });
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    graphs: [
+      {
+        checkout: "working",
+        repository: "comm",
+        label: "Working comm",
+        path: "/work/comm",
+      },
+      {
+        checkout: "working",
+        repository: "firefox",
+        label: "Working firefox",
+        path: "/work/firefox",
+      },
+      {
+        checkout: "review",
+        repository: "comm",
+        label: "Review comm",
+        path: "/review/comm",
+      },
+      {
+        checkout: "review",
+        repository: "firefox",
+        label: "Review firefox",
+        path: "/review/firefox",
+      },
+    ],
+    preparePatchUpdateSession: async (options) => resolvePrepared(options),
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const response = await fetch(new URL("api/patch-update", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      graphIndex: 2,
+      revision: "D123456",
+    }),
+  });
+  const payload = await response.json();
+  const options = await prepared;
+
+  assert.equal(response.ok, true);
+  assert.equal(payload.graphIndex, 0);
+  assert.equal(options.session.graph.path, "/work/comm");
+  assert.equal(options.session.graphIndex, 0);
+  assert.deepEqual(
+    options.graphs.map((graph) => graph.path),
+    ["/work/comm", "/work/firefox"],
+  );
+});
+
+test("patch update posts only the reply body to its inline Phabricator parent", async (t) => {
+  let resolvePrepared;
+  const prepared = new Promise((resolve) => {
+    resolvePrepared = resolve;
+  });
+  const postedReplies = [];
+  const handledComments = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    appConfig: { ai: { enabled: true } },
+    graphs: [{
+      checkout: "working",
+      repository: "comm",
+      label: "Working comm",
+      path: "/work/comm",
+    }],
+    phabWebSession: {
+      async close() {},
+      async postInlineReply(details) {
+        postedReplies.push(details);
+      },
+    },
+    persistPatchUpdateHandledComment: async (details) => {
+      handledComments.push(details);
+    },
+    preparePatchUpdateSession: async ({ session }) => {
+      session.status = "review";
+      session.items = [{
+        id: "inline:PHID-XCMT-parent",
+        type: "inline",
+        parentCommentPHID: "PHID-XCMT-parent",
+        state: "ready",
+        draftReply: "",
+        draftSaved: false,
+      }];
+      resolvePrepared(session);
+    },
+    savePatchUpdateMemory: async () => {},
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const createResponse = await fetch(new URL("api/patch-update", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      graphIndex: 0,
+      revision: "D123456",
+    }),
+  });
+  const created = await createResponse.json();
+
+  await prepared;
+  const reply = "I updated the implementation and added focused coverage.";
+  const response = await fetch(
+    new URL(`api/patch-update/${encodeURIComponent(created.id)}/comment`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        itemId: "inline:PHID-XCMT-parent",
+        message: reply,
+      }),
+    },
+  );
+  const payload = await response.json();
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(postedReplies, [{
+    revision: "D123456",
+    commentPHID: "PHID-XCMT-parent",
+    message: reply,
+  }]);
+  assert.equal(payload.items[0].draftReply, reply);
+  assert.equal(payload.items[0].state, "handled");
+  assert.equal(payload.currentItemIndex, 1);
+  assert.deepEqual(handledComments, [{
+    revision: "D123456",
+    itemId: "inline:PHID-XCMT-parent",
+  }]);
+  assert.match(payload.message, /reply draft saved.*marked handled/i);
+  assert.doesNotMatch(postedReplies[0].message, /responses? to review comments|response to .*\(/i);
+});
+
+test("patch update keeps, amends, and handles a source response before moving on", async (t) => {
+  let resolvePrepared;
+  const prepared = new Promise((resolve) => {
+    resolvePrepared = resolve;
+  });
+  const acceptedChanges = [];
+  const handledComments = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    appConfig: { ai: { enabled: true } },
+    graphs: [{
+      checkout: "working",
+      repository: "comm",
+      label: "Working comm",
+      path: "/work/comm",
+    }],
+    acceptPatchUpdateChange: async ({ itemId, session }) => {
+      const item = session.items.find((candidate) => candidate.id === itemId);
+
+      acceptedChanges.push(itemId);
+      item.changeAccepted = true;
+      item.changesAmended = true;
+      session.currentHash = "amended456";
+      session.workingDiff = "";
+      session.workingDiffHtml = "";
+      session.workingTreeDiffVersion = 1;
+    },
+    persistPatchUpdateHandledComment: async (details) => {
+      handledComments.push(details);
+    },
+    preparePatchUpdateSession: async ({ session }) => {
+      session.status = "review";
+      session.currentHash = "original123";
+      session.items = [
+        {
+          changeAccepted: false,
+          changeApplied: true,
+          changesAmended: false,
+          id: "inline:1",
+          state: "ready",
+        },
+        { id: "inline:2", state: "ready" },
+      ];
+      resolvePrepared(session);
+    },
+    savePatchUpdateMemory: async () => {},
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const createResponse = await fetch(new URL("api/patch-update", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      graphIndex: 0,
+      revision: "D123456",
+    }),
+  });
+  const created = await createResponse.json();
+
+  await prepared;
+  const response = await fetch(
+    new URL(`api/patch-update/${encodeURIComponent(created.id)}/keep`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "secret",
+        itemId: "inline:1",
+      }),
+    },
+  );
+  const payload = await response.json();
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(acceptedChanges, ["inline:1"]);
+  assert.deepEqual(handledComments, [{
+    revision: "D123456",
+    itemId: "inline:1",
+  }]);
+  assert.equal(payload.currentHash, "amended456");
+  assert.equal(payload.workingDiff, "");
+  assert.equal(payload.items[0].changesAmended, true);
+  assert.equal(payload.items[0].state, "handled");
+  assert.equal(payload.currentItemIndex, 1);
+  assert.equal(payload.items[1].state, "ready");
+  assert.match(payload.message, /amended.*marked handled/i);
+});
+
+test("interactive graph server scopes origin and Rust status to the selected checkout", async (t) => {
+  const rustCalls = [];
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        checkout: "working",
+        repository: "comm",
+        label: "Working comm",
+        path: "/working/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+      {
+        checkout: "working",
+        repository: "firefox",
+        label: "Working firefox",
+        path: "/working",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+      {
+        checkout: "review",
+        repository: "comm",
+        label: "Review comm",
+        path: "/review/comm",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+      {
+        checkout: "review",
+        repository: "firefox",
+        label: "Review firefox",
+        path: "/review",
+        branch: "main",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    getRustUpstreamStatus: async ({ graphs, commGraph, firefoxGraph }) => {
+      rustCalls.push({ graphs, commGraph, firefoxGraph });
+      return {
+        type: "rust-upstream",
+        label: "rust",
+        state: "current",
+        upToDate: true,
+        mismatches: [],
+        message: "Rust dependencies match Firefox remote main.",
+      };
+    },
+    runCommand: async (command) => {
+      if (command.args[0] === "rev-parse") {
+        return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+      }
+
+      if (command.args[0] === "ls-remote") {
+        return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/main\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const reviewResponse = await fetch(
+    new URL("api/origin-main-status?token=secret&checkout=review&force=1&wait=1", serverInfo.url),
+  );
+  const reviewStatus = await reviewResponse.json();
+
+  assert.deepEqual(
+    reviewStatus.statuses.map((status) => [status.label, status.checkout]),
+    [["Review comm", "review"], ["Review firefox", "review"], ["rust", "review"]],
+  );
+  assert.deepEqual(
+    rustCalls[0].graphs.map((graph) => graph.checkout),
+    ["review", "review"],
+  );
+  assert.equal(rustCalls[0].commGraph.path, "/review/comm");
+  assert.equal(rustCalls[0].firefoxGraph.path, "/review");
+
+  const workingResponse = await fetch(
+    new URL("api/origin-main-status?token=secret&checkout=working&force=1&wait=1", serverInfo.url),
+  );
+  const workingStatus = await workingResponse.json();
+
+  assert.deepEqual(
+    workingStatus.statuses.map((status) => [status.label, status.checkout]),
+    [["Working comm", "working"], ["Working firefox", "working"], ["rust", "working"]],
+  );
+  assert.deepEqual(
+    rustCalls[1].graphs.map((graph) => graph.checkout),
+    ["working", "working"],
+  );
+});
+
 test("interactive graph server returns interactive rebase plans", async (t) => {
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
@@ -10125,10 +12394,109 @@ test("interactive graph server returns interactive rebase plans", async (t) => {
   );
 });
 
+test("interactive graph submit checks out a selected local commit before submitting", async (t) => {
+  const calls = [];
+  const localHash = "local123";
+  const publishedHash = "published123";
+  let head = "current123";
+  let branch = "Bug-current";
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    graphs: [{
+      label: "comm",
+      path: "/repo/comm",
+      branch,
+      commits: [
+        { hash: localHash, parents: [], refs: [], subject: "Local patch" },
+        { hash: publishedHash, parents: [], refs: ["origin/main"], subject: "Published patch" },
+      ],
+      commitCount: 2,
+      diffs: {},
+    }],
+    runCommand: async (command) => {
+      calls.push(command);
+      const [action, ...args] = command.args || [];
+
+      if (action === "merge-base") {
+        if (args[1] === publishedHash) {
+          return "";
+        }
+        throw new Error("not on origin/main");
+      }
+
+      if (action === "status") {
+        return "";
+      }
+
+      if (action === "branch" && args[0] === "--show-current") {
+        return `${branch}\n`;
+      }
+
+      if (action === "rev-parse" && args[0] === "HEAD") {
+        return `${head}\n`;
+      }
+
+      if (action === "for-each-ref" && args.includes("--points-at")) {
+        return "Bug-local\n";
+      }
+
+      if (action === "switch" && args[0] === "Bug-local") {
+        head = localHash;
+        branch = "Bug-local";
+        return "";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const localResponse = await fetch(new URL("api/submit", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      graphIndex: 0,
+      hash: localHash,
+    }),
+  });
+  const localResult = await localResponse.json();
+
+  assert.equal(localResponse.ok, true);
+  assert.equal(typeof localResult.id, "string");
+  assert.equal(head, localHash);
+  assert.equal(
+    calls.some((command) => (
+      command.args?.[0] === "switch" && command.args?.[1] === "Bug-local"
+    )),
+    true,
+  );
+
+  const publishedResponse = await fetch(new URL("api/submit", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      graphIndex: 0,
+      hash: publishedHash,
+    }),
+  });
+  const publishedResult = await publishedResponse.json();
+
+  assert.equal(publishedResponse.status, 409);
+  assert.match(publishedResult.error, /not already on origin\/main/i);
+});
+
 test("interactive graph server streams commits, diffs, checkout responses, and closes", async (t) => {
   const calls = [];
   const bugUpdates = [];
   let checkinMarked = false;
+  let reviewTransactionRequests = 0;
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
     token: "secret",
@@ -10162,6 +12530,7 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     },
     phab: async ({ route }) => {
       if (route === "transaction.search") {
+        reviewTransactionRequests++;
         return {
           result: {
             data: [
@@ -10367,6 +12736,12 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     content: "new",
     url: "https://phabricator.services.mozilla.com/D987654#inline-100",
   });
+
+  const cachedReviewResponse = await fetch(
+    new URL("api/graph/0/review/abc123?token=secret", serverInfo.url),
+  );
+  assert.equal(cachedReviewResponse.ok, true);
+  assert.equal(reviewTransactionRequests, 1);
 
   const integrationResponse = await fetch(
     new URL("api/graph/0/integration/abc123?token=secret", serverInfo.url),
@@ -12860,98 +15235,8 @@ test("interactive graph server cancels landing sessions waiting on browser promp
   await closePromise;
 });
 
-test("interactive graph server cools down rate-limited reviewer search routes", async (t) => {
+test("interactive graph server keeps reviewer autocomplete disabled", async (t) => {
   const phabCalls = [];
-  const serverInfo = await startInteractiveGraphServer({
-    html: "<!doctype html><p>graph</p>",
-    token: "secret",
-    pageSize: 1,
-    graphs: [
-      {
-        label: "comm",
-        path: "/repo/comm",
-        branch: "Bug-1234567",
-        commits: [],
-        commitCount: 0,
-        diffs: {},
-      },
-    ],
-    phab: async (request) => {
-      phabCalls.push([request.route, request.params.constraints.query]);
-
-      if (request.route === "user.search") {
-        throw new Error("Phabricator user.search failed (429): {}");
-      }
-
-      return {
-        result: {
-          data: [
-            {
-              phid: `PHID-PROJ-${request.params.constraints.query}`,
-              fields: {
-                slug: `${request.params.constraints.query}-reviewers`,
-                name: `${request.params.constraints.query} Reviewers`,
-              },
-            },
-          ],
-        },
-      };
-    },
-  });
-
-  t.after(() => {
-    if (serverInfo.server.listening) {
-      serverInfo.server.close();
-    }
-  });
-
-  const firstResponse = await fetch(
-    new URL("api/commit/reviewers?query=mail&token=secret", serverInfo.url),
-  );
-  const first = await firstResponse.json();
-  const secondResponse = await fetch(
-    new URL("api/commit/reviewers?query=calendar&token=secret", serverInfo.url),
-  );
-  const second = await secondResponse.json();
-  const groupUrl = new URL("api/commit/reviewers", serverInfo.url);
-  groupUrl.searchParams.set("query", "#mail");
-  groupUrl.searchParams.set("token", "secret");
-  const groupResponse = await fetch(groupUrl);
-  const group = await groupResponse.json();
-
-  assert.equal(firstResponse.ok, true);
-  assert.equal(secondResponse.ok, true);
-  assert.equal(groupResponse.ok, true);
-  assert.equal(first.rateLimited, true);
-  assert.equal(second.rateLimited, true);
-  assert.equal(group.rateLimited, false);
-  assert.equal(first.rateLimitedRoute, "user.search");
-  assert.equal(second.rateLimitedRoute, "user.search");
-  assert.equal(first.retryAfterMs > 0, true);
-  assert.deepEqual(
-    first.reviewers.map((reviewer) => reviewer.value),
-    [],
-  );
-  assert.deepEqual(
-    second.reviewers.map((reviewer) => reviewer.value),
-    [],
-  );
-  assert.deepEqual(
-    group.reviewers.map((reviewer) => reviewer.value),
-    ["#mail-reviewers"],
-  );
-  assert.deepEqual(phabCalls, [
-    ["user.search", "mail"],
-    ["project.search", "mail"],
-  ]);
-});
-
-test("interactive graph server creates commits with Phabricator reviewer suggestions", async (t) => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-commit-"));
-  const storePath = path.join(tempDir, "try-runs.json");
-  const calls = [];
-  const phabCalls = [];
-  let branch = "Bug-1234567";
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
     token: "secret",
@@ -12968,37 +15253,48 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
     ],
     phab: async (request) => {
       phabCalls.push(request);
+      throw new Error("Reviewer autocomplete must not query Phabricator.");
+    },
+  });
 
-      if (request.route === "user.search") {
-        return {
-          result: {
-            data: [
-              {
-                phid: "PHID-USER-aleca",
-                fields: {
-                  username: "aleca",
-                  realName: "Alice Example",
-                },
-              },
-            ],
-          },
-        };
-      }
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
 
-      assert.equal(request.route, "project.search");
-      return {
-        result: {
-          data: [
-            {
-              phid: "PHID-PROJ-mail",
-              fields: {
-                slug: "mail-reviewers",
-                name: "Mail Reviewers",
-              },
-            },
-          ],
-        },
-      };
+  const response = await fetch(
+    new URL("api/commit/reviewers?query=mail&token=secret", serverInfo.url),
+  );
+  const result = await response.json();
+
+  assert.equal(response.ok, true);
+  assert.equal(result.disabled, true);
+  assert.deepEqual(result.reviewers, []);
+  assert.deepEqual(phabCalls, []);
+});
+
+test("interactive graph server creates commits with manually entered reviewers", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tb-tools-commit-"));
+  const storePath = path.join(tempDir, "try-runs.json");
+  const calls = [];
+  let branch = "Bug-1234567";
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    pageSize: 1,
+    graphs: [
+      {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "Bug-1234567",
+        commits: [],
+        commitCount: 0,
+        diffs: {},
+      },
+    ],
+    phab: async () => {
+      throw new Error("Committing manually entered reviewers must not query Phabricator.");
     },
     runCommand: async (command) => {
       calls.push(command);
@@ -13068,36 +15364,6 @@ test("interactive graph server creates commits with Phabricator reviewer suggest
   assert.equal(metadata.metadata.bugRequired, true);
   assert.equal(metadata.metadata.bugId, "");
 
-  const userReviewerResponse = await fetch(
-    new URL("api/commit/reviewers?query=alec&token=secret", serverInfo.url),
-  );
-  const userReviewers = await userReviewerResponse.json();
-  const groupReviewerUrl = new URL("api/commit/reviewers", serverInfo.url);
-  groupReviewerUrl.searchParams.set("query", "#mail");
-  groupReviewerUrl.searchParams.set("token", "secret");
-  const groupReviewerResponse = await fetch(groupReviewerUrl);
-  const groupReviewers = await groupReviewerResponse.json();
-
-  assert.equal(userReviewerResponse.ok, true);
-  assert.equal(groupReviewerResponse.ok, true);
-  assert.equal(userReviewers.rateLimited, false);
-  assert.equal(groupReviewers.rateLimited, false);
-  assert.deepEqual(
-    userReviewers.reviewers.map((reviewer) => reviewer.value),
-    ["aleca"],
-  );
-  assert.deepEqual(
-    groupReviewers.reviewers.map((reviewer) => reviewer.value),
-    ["#mail-reviewers"],
-  );
-  assert.deepEqual(
-    phabCalls.map((call) => [call.route, call.params.constraints]),
-    [
-      ["user.search", { query: "alec" }],
-      ["project.search", { query: "mail" }],
-    ],
-  );
-
   const commitResponse = await fetch(new URL("api/commit", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -13163,6 +15429,10 @@ test("interactive graph server submits current commit through browser prompts", 
 
       if (command.args[0] === "status") {
         return "";
+      }
+
+      if (command.args[0] === "merge-base") {
+        throw Object.assign(new Error("not on origin/main"), { code: 1 });
       }
 
       if (

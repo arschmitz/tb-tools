@@ -20,8 +20,8 @@ function safeScriptJson(value) {
   return JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
 }
 
-function getOriginMainDisplayLabel(label) {
-  const normalized = String(label || "").toLowerCase();
+function getOriginMainDisplayLabel(graph = {}) {
+  const normalized = String(graph.repository || graph.label || "").toLowerCase();
 
   if (normalized === "comm") {
     return "Thunderbird";
@@ -31,7 +31,16 @@ function getOriginMainDisplayLabel(label) {
     return "Firefox";
   }
 
-  return label || "origin/main";
+  return graph.label || "origin/main";
+}
+
+function hasFullReviewCheckoutPair(graphs = []) {
+  return ["working", "review"].every((checkout) => (
+    ["firefox", "comm"].every((repository) => graphs.some((graph) => (
+      (graph.checkout || "working") === checkout &&
+      String(graph.repository || "").toLowerCase() === repository
+    )))
+  ));
 }
 
 export function buildInteractiveGraphLauncherHtml({
@@ -45,7 +54,7 @@ export function buildInteractiveGraphLauncherHtml({
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Opening Thunderbird Desktop Console</title>
 </head>
-<body>
+<body class="graph-view-active">
   <p id="status">Opening Thunderbird Desktop Console...</p>
   <script>
     const consolePath = ${safeScriptJson(consolePath)};
@@ -72,21 +81,49 @@ export function buildGraphHtml({
   scriptSrcs = DEFAULT_GRAPH_SCRIPT_SRCS,
 }) {
   const aiEnabled = interactive.aiEnabled === true;
-  const tabButtons = graphs.map((graph, index) => (
-    `<button class="tab${index === 0 ? " active" : ""}" data-index="${index}">${escapeHtml(graph.label)}</button>`
-  )).join("\n");
+  const checkoutModes = [...new Set(graphs.map((graph) => graph.checkout || "working"))];
+  const hasCheckoutSwitch = interactive.enabled && checkoutModes.length > 1;
+  const canSyncReview = interactive.enabled && hasFullReviewCheckoutPair(graphs);
+  const initialCheckout = checkoutModes.includes("working")
+    ? "working"
+    : checkoutModes[0] || "working";
+  const initialGraphs = graphs.filter(
+    (graph) => !hasCheckoutSwitch || (graph.checkout || "working") === initialCheckout,
+  );
+  const tabButtons = initialGraphs.map((graph, index) => {
+    const repository = graph.repository || graph.label;
+
+    return `<button class="tab repository-button${index === 0 ? " active" : ""}" type="button" data-repository="${escapeHtml(repository)}" aria-pressed="${index === 0 ? "true" : "false"}">${escapeHtml(repository)}</button>`;
+  }).join("\n");
+  const checkoutSwitch = hasCheckoutSwitch
+    ? `<div class="checkout-mode-switch" role="group" aria-label="Checkout mode">
+        <button class="checkout-mode-button active" type="button" data-checkout="working" aria-pressed="true">Working</button>
+        <button class="checkout-mode-button" type="button" data-checkout="review" aria-pressed="false">Review</button>
+      </div>`
+    : "";
   const dashboardTab = interactive.enabled
-    ? `<button class="tab dashboard-tab" type="button">Dashboard</button>`
+    ? `<button class="tab console-view-tab dashboard-tab" type="button">Dashboard</button>`
     : "";
   const metaBoardsTab = interactive.enabled
-    ? `<button class="tab meta-boards-tab" type="button">Meta Boards</button>`
+    ? `<button class="tab console-view-tab meta-boards-tab" type="button">Meta Boards</button>`
     : "";
-  const testOutputTab = `<button class="tab test-output-tab" type="button" hidden>Test Output</button>`;
+  const graphViewTab = interactive.enabled
+    ? `<button class="tab console-view-tab graph-view-tab active" type="button">Tree</button>`
+    : "";
+  const testOutputTab = `<button class="tab console-view-tab test-output-tab" type="button" hidden>Test Output</button>`;
+  const consoleNavigation = interactive.enabled
+    ? `<nav class="console-navigation" aria-label="Console views">
+        ${graphViewTab}
+        ${dashboardTab}
+        ${metaBoardsTab}
+        ${testOutputTab}
+      </nav>`
+    : "";
   const originMainStatus = interactive.enabled
     ? `<div class="origin-main-status" role="status" aria-label="origin/main freshness">
         ${graphs.length
-          ? graphs.map((graph) => (
-            `<span class="origin-main-badge checking">${escapeHtml(getOriginMainDisplayLabel(graph.label))}: checking</span>`
+          ? initialGraphs.map((graph) => (
+            `<span class="origin-main-badge checking">${escapeHtml(getOriginMainDisplayLabel(graph))}: checking</span>`
           )).join("\n") + `\n<span class="origin-main-badge checking">Rust deps: checking</span>`
           : `<span class="origin-main-badge checking">origin/main: checking</span>
 <span class="origin-main-badge checking">Rust deps: checking</span>`}
@@ -118,13 +155,14 @@ export function buildGraphHtml({
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="test">Test</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="try">Try</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="land">Land Patches</button>
+          ${canSyncReview ? `<button class="graph-menu-command graph-menu-command-destructive" type="button" role="menuitem" data-menu-action="review-sync">Sync Review from Working...</button>` : ""}
         </div>
       </div>`
     : "";
   const updateActions = interactive.enabled
     ? `<div class="update-actions" role="toolbar" aria-label="Repository update actions">
-        <button class="update-action" type="button" data-mode="update">Update</button>
-        <button class="update-action" type="button" data-mode="rebase">Update and Rebase</button>
+        <button class="update-action" type="button" data-mode="update">Pull</button>
+        <button class="update-action" type="button" data-mode="rebase">Rebase</button>
         <button class="mach-action" type="button" data-action="run">Run</button>
       </div>
       <div class="command-status-bar" role="region" aria-label="Command status" hidden>
@@ -179,6 +217,8 @@ export function buildGraphHtml({
             <button class="checkout-commit" type="button" hidden>Checkout</button>
             <button class="amend-commit" type="button" hidden>Amend</button>
             <button class="submit-commit" type="button" hidden>Submit</button>
+            ${aiEnabled ? `<button class="patch-update-commit" type="button" hidden>Update</button>` : ""}
+            ${interactive.enabled ? `<button class="load-commit-review" type="button" hidden>Load Review</button>` : ""}
             <span class="checkout-status"></span>
           </div>
           <div class="diff-body"><pre class="diff-placeholder">Select a commit in the graph.</pre></div>
@@ -218,7 +258,13 @@ export function buildGraphHtml({
             <h2>Patch Dashboard</h2>
             <p class="dashboard-status" role="status">Open the dashboard to load your open patches and assigned bugs.</p>
           </div>
-          <button class="dashboard-refresh" type="button">Refresh</button>
+          <div class="dashboard-header-actions">
+            <div class="loading-indicator dashboard-loading" role="status" hidden>
+              <span class="loading-spinner" aria-hidden="true"></span>
+              <span class="dashboard-loading-text">Loading dashboard...</span>
+            </div>
+            <button class="dashboard-refresh" type="button">Refresh</button>
+          </div>
         </div>
         <div class="dashboard-errors" role="alert" hidden></div>
         <div class="dashboard-workspace">
@@ -329,36 +375,94 @@ export function buildGraphHtml({
             </div>
             <button class="patch-update-close" type="button" aria-label="Close">&times;</button>
           </header>
-          <p class="patch-update-status" role="status">Preparing update...</p>
-          <section class="patch-update-activity" hidden aria-label="Codex activity">
-            <div class="patch-update-activity-heading">
-              <h3>Codex activity</h3>
-              <span class="patch-update-activity-count"></span>
+          <details class="patch-update-progress" open>
+            <summary class="patch-update-progress-summary">
+              <span class="patch-update-progress-label">Codex activity</span>
+              <span class="patch-update-progress-toggle" aria-hidden="true"></span>
+              <span class="patch-update-status" role="status">Preparing update...</span>
+            </summary>
+            <section class="patch-update-activity" aria-label="Codex activity">
+              <div class="patch-update-activity-status">
+                <span class="patch-update-activity-latest" role="status">Waiting for Codex activity...</span>
+              </div>
+              <div class="patch-update-activity-heading">
+                <h3>Codex activity</h3>
+                <div class="patch-update-activity-filter" role="group" aria-label="Codex activity filter">
+                  <button type="button" data-activity-filter="notes" aria-pressed="true">Notes</button>
+                  <button type="button" data-activity-filter="all" aria-pressed="false">All</button>
+                </div>
+              </div>
+              <ol class="patch-update-activity-list"></ol>
+            </section>
+          </details>
+          ${aiEnabled ? `<form class="patch-update-steer" hidden>
+            <label class="patch-update-steer-label" for="patch-update-steer-input">Guide Codex</label>
+            <div>
+              <textarea id="patch-update-steer-input" class="patch-update-steer-input" rows="2" placeholder="Add context, question an assumption, or change direction."></textarea>
+              <button class="patch-update-steer-submit" type="submit">Send</button>
             </div>
-            <ol class="patch-update-activity-list"></ol>
-          </section>
+          </form>` : ""}
           <pre class="patch-update-output" hidden aria-label="Patch update output"></pre>
           <section class="patch-update-workspace">
-          ${aiEnabled ? `<section class="patch-update-comment" hidden aria-label="Review comment">
-            <div class="patch-update-comment-heading">
-              <div>
-                <strong class="patch-update-comment-author"></strong>
-                <p class="patch-update-comment-kind"></p>
+          ${aiEnabled ? `<section class="patch-update-review-column" aria-label="Patch and reviewer context">
+            <section class="patch-update-context" hidden aria-label="Patch purpose">
+              <h3 class="patch-update-context-heading">
+                <button class="patch-update-context-toggle" type="button" aria-controls="patch-update-context-details" aria-expanded="false">
+                  <span>Patch purpose</span>
+                </button>
+              </h3>
+              <dl class="patch-update-context-details" id="patch-update-context-details" hidden>
+                <div>
+                  <dt>Purpose</dt>
+                  <dd class="patch-update-context-purpose"></dd>
+                </div>
+                <div>
+                  <dt>Behavior contract</dt>
+                  <dd class="patch-update-context-contract"></dd>
+                </div>
+                <div class="patch-update-context-stack" hidden>
+                  <dt>Stack context</dt>
+                  <dd class="patch-update-context-stack-text"></dd>
+                </div>
+                <div class="patch-update-context-evidence" hidden>
+                  <dt>Evidence</dt>
+                  <dd class="patch-update-context-evidence-text"></dd>
+                </div>
+                <div class="patch-update-context-validation" hidden>
+                  <dt>Validation</dt>
+                  <dd class="patch-update-context-validation-text"></dd>
+                </div>
+              </dl>
+            </section>
+            <section class="patch-update-comment" hidden aria-label="Review comment">
+              <div class="patch-update-comment-heading">
+                <div>
+                  <strong class="patch-update-comment-author"></strong>
+                  <p class="patch-update-comment-kind"></p>
+                </div>
+                <a class="patch-update-comment-link" hidden>Open in Phabricator</a>
               </div>
-              <a class="patch-update-comment-link" hidden>Open in Phabricator</a>
-            </div>
-            <div class="patch-update-reviewer-context">
-              <p class="patch-update-comment-location" hidden></p>
-              <section class="patch-update-reviewer-feedback">
-                <h3 class="patch-update-feedback-heading">Reviewer feedback</h3>
-                <pre class="patch-update-comment-content"></pre>
-              </section>
-              <section class="patch-update-suggestion" hidden>
-                <h3>Reviewer code suggestion</h3>
-                <pre class="patch-update-code-suggestion"></pre>
-              </section>
-            </div>
-            <div class="patch-update-analysis" hidden>
+              <div class="patch-update-reviewer-context">
+                <p class="patch-update-comment-location" hidden></p>
+                <section class="patch-update-reviewer-feedback">
+                  <h3 class="patch-update-feedback-heading">Reviewer feedback</h3>
+                  <pre class="patch-update-comment-content"></pre>
+                </section>
+                <section class="patch-update-suggestion" hidden>
+                  <h3>Reviewer code suggestion</h3>
+                  <pre class="patch-update-code-suggestion"></pre>
+                </section>
+                <section class="patch-update-comment-context" hidden aria-label="Review context">
+                  <div class="patch-update-comment-context-heading">
+                    <h3>Review context</h3>
+                    <span class="patch-update-comment-context-location"></span>
+                  </div>
+                  <div class="patch-update-comment-context-diff"></div>
+                </section>
+              </div>
+            </section>
+          </section>
+          <section class="patch-update-analysis" hidden aria-label="Codex assessment">
               <h3>Codex recommendation</h3>
               <p class="patch-update-recommendation"></p>
               <h4>What Codex found</h4>
@@ -367,36 +471,166 @@ export function buildGraphHtml({
                 <h4>Why</h4>
                 <p class="patch-update-rationale-text"></p>
               </section>
+              <section class="patch-update-validation" hidden>
+                <h4>Evidence and verification</h4>
+                <p class="patch-update-validation-text"></p>
+              </section>
               <section class="patch-update-change-plan" hidden>
                 <h4>Planned source change</h4>
                 <p class="patch-update-change-summary"></p>
               </section>
               <section class="patch-update-proposed-diff" hidden>
                 <div class="patch-update-proposed-diff-heading">
-                  <h4>Suggested source diff</h4>
-                  <span>Preview only</span>
+                  <h4>Working tree changes</h4>
+                  <span>Actual uncommitted diff</span>
                 </div>
                 <div class="patch-update-proposed-diff-content"></div>
               </section>
-              <label class="patch-update-instruction-label">Feedback or instruction for Codex
-                <textarea class="patch-update-instruction" rows="3" placeholder="Ask Codex to reconsider, explain, or revise its proposed change."></textarea>
-              </label>
-              <label class="patch-update-reply-label">Draft reply
+              <label class="patch-update-reply-label">Reply
                 <textarea class="patch-update-reply" rows="4"></textarea>
               </label>
-            </div>
           </section>
           </section>
           <div class="patch-update-actions">
             <button class="patch-update-output-toggle" type="button" hidden>Output</button>
-            <button class="patch-update-feedback" type="button" hidden>Send to Codex</button>
-            <button class="patch-update-apply" type="button" hidden>Apply Change</button>
+            <button class="patch-update-keep" type="button" hidden>Keep and Amend</button>
+            <button class="patch-update-revert" type="button" hidden>Revert Change</button>
             <button class="patch-update-post" type="button" hidden>Save Reply Draft</button>
             <button class="patch-update-handled" type="button" hidden>Mark Handled</button>
+            <button class="patch-update-amend" type="button" hidden>Amend Patch</button>
             <button class="patch-update-submit" type="button" hidden>Submit Patch</button>
           </div>` : `<div class="patch-update-actions">
             <button class="patch-update-output-toggle" type="button" hidden>Output</button>
           </div>`}
+        </div>
+      </dialog>`
+    : "";
+  const patchReviewSteer = interactive.aiEnabled
+    ? `<section class="patch-review-steer" hidden>
+            <label class="patch-review-steer-label" for="patch-review-steer-input">Guide Codex</label>
+            <div>
+              <textarea class="patch-review-steer-input" id="patch-review-steer-input" rows="2" placeholder="Add context, question an assumption, or change direction."></textarea>
+              <button class="patch-review-steer-submit" type="button">Send</button>
+            </div>
+          </section>`
+    : "";
+  const patchReviewDialog = interactive.enabled
+    ? `<dialog class="patch-review-dialog" id="patch-review-dialog">
+        <div class="patch-review-panel">
+          <header class="patch-review-header">
+            <div>
+              <p class="patch-review-kicker">Phabricator patch review</p>
+              <h2 class="patch-review-title">Review patch</h2>
+            </div>
+            <button class="patch-review-close" type="button" aria-label="Close">&times;</button>
+          </header>
+          <details class="patch-review-progress" open>
+            <summary class="patch-review-progress-summary">
+              <span class="patch-review-progress-label">Codex activity</span>
+              <span class="patch-review-progress-toggle" aria-hidden="true"></span>
+              <span class="patch-review-status" role="status">Preparing review...</span>
+            </summary>
+            <section class="patch-review-activity" aria-label="Codex review activity">
+              <div class="patch-review-activity-status">
+                <span class="patch-review-activity-latest">Waiting for Codex activity...</span>
+              </div>
+              <div class="patch-review-activity-heading">
+                <h3>Codex activity</h3>
+                <div class="patch-review-activity-filter" role="group" aria-label="Codex activity filter">
+                  <button type="button" data-review-activity-filter="notes" aria-pressed="true">Notes</button>
+                  <button type="button" data-review-activity-filter="all" aria-pressed="false">All</button>
+                </div>
+              </div>
+              <ol class="patch-review-activity-list"></ol>
+            </section>
+          </details>
+          ${patchReviewSteer}
+          <pre class="patch-review-output" hidden aria-label="Patch review output"></pre>
+          <section class="patch-review-workspace">
+            <section class="patch-review-diff-column">
+              <section class="patch-review-patch-context" hidden>
+                <button class="patch-review-patch-context-toggle" type="button" aria-expanded="false">
+                  <span>Patch context</span>
+                </button>
+                <dl class="patch-review-patch-context-details" hidden>
+                  <div><dt>Purpose</dt><dd class="patch-review-patch-context-purpose"></dd></div>
+                  <div><dt>Behavior contract</dt><dd class="patch-review-patch-context-contract"></dd></div>
+                  <div class="patch-review-patch-context-stack"><dt>Stack context</dt><dd></dd></div>
+                  <div class="patch-review-patch-context-evidence"><dt>Evidence</dt><dd></dd></div>
+                  <div class="patch-review-patch-context-validation"><dt>Validation</dt><dd></dd></div>
+                </dl>
+              </section>
+              <details class="patch-review-discussion" hidden>
+                <summary>Phabricator discussion <span class="patch-review-discussion-count"></span></summary>
+                <div class="patch-review-discussion-list"></div>
+              </details>
+              <section class="patch-review-context-diff" aria-label="Patch review context">
+                <header class="patch-review-context-diff-heading">
+                  <h3>Patch diff</h3>
+                  <span class="patch-review-context-diff-location"></span>
+                </header>
+                <div class="patch-review-context-diff-content"></div>
+              </section>
+            </section>
+            <section class="patch-review-analysis">
+              <section class="patch-review-issue" hidden aria-label="Review issue">
+                <header>
+                  <span class="patch-review-severity"></span>
+                  <h3 class="patch-review-issue-title"></h3>
+                  <span class="patch-review-position"></span>
+                </header>
+                <section class="patch-review-rationale-section">
+                  <h4>What Codex found</h4>
+                  <p class="patch-review-rationale"></p>
+                </section>
+                <section class="patch-review-validation-section">
+                  <h4>Evidence and validation</h4>
+                  <p class="patch-review-validation"></p>
+                </section>
+                <label>Suggested inline comment
+                  <textarea class="patch-review-comment" rows="5"></textarea>
+                </label>
+                <label class="patch-review-suggestion-field" hidden>Suggested code replacement
+                  <textarea class="patch-review-suggestion" rows="5" spellcheck="false"></textarea>
+                </label>
+              </section>
+              <details class="patch-review-coverage" hidden>
+                <summary>Review coverage</summary>
+                <dl>
+                  <div><dt>Summary</dt><dd class="patch-review-summary"></dd></div>
+                  <div><dt>Accessibility</dt><dd class="patch-review-accessibility"></dd></div>
+                  <div><dt>CodeRabbit</dt><dd class="patch-review-coderabbit"></dd></div>
+                  <div><dt>Static validation</dt><dd class="patch-review-static"></dd></div>
+                  <div><dt>Runtime validation</dt><dd class="patch-review-runtime"></dd></div>
+                  <div><dt>Codebase context</dt><dd class="patch-review-context"></dd></div>
+                </dl>
+              </details>
+              <section class="patch-review-experiment-diff" hidden>
+                <header class="patch-review-experiment-diff-heading">
+                  <h3>Review checkout changes</h3>
+                  <span>Local experiment diff</span>
+                </header>
+                <div class="patch-review-experiment-diff-content"></div>
+              </section>
+              <section class="patch-review-final" hidden aria-label="Final Phabricator review">
+                <h3>Post final review</h3>
+                <p>Pending inline comments publish with this review action.</p>
+                <label>Optional overall comment
+                  <textarea class="patch-review-final-message" rows="3"></textarea>
+                </label>
+              </section>
+            </section>
+          </section>
+          <div class="patch-review-actions">
+            <button class="patch-review-output-toggle" type="button" hidden>Output</button>
+            <button class="patch-review-apply-suggestion" type="button" hidden>Apply in Review Checkout</button>
+            <button class="patch-review-pending-comment" type="button" hidden>Add Comment as Pending</button>
+            <button class="patch-review-pending-suggestion" type="button" hidden>Add Comment + Code Suggestion as Pending</button>
+            <button class="patch-review-skip" type="button" hidden>Skip Issue</button>
+            <button type="button" data-review-outcome="comment" hidden>Post Comment</button>
+            <button type="button" data-review-outcome="accept" hidden>Accept</button>
+            <button type="button" data-review-outcome="request-changes" hidden>Request Changes</button>
+          </div>
         </div>
       </dialog>`
     : "";
@@ -406,6 +640,10 @@ export function buildGraphHtml({
           <div>
             <h2>Meta Bug Boards</h2>
             <p class="meta-boards-status" role="status">Create and manage boards from the Meta Boards menu.</p>
+          </div>
+          <div class="loading-indicator meta-boards-loading" role="status" hidden>
+            <span class="loading-spinner" aria-hidden="true"></span>
+            <span class="meta-boards-loading-text">Loading meta bug board...</span>
           </div>
         </div>
         <div class="meta-board-controls" hidden>
@@ -430,12 +668,12 @@ export function buildGraphHtml({
         <div class="meta-boards-error" role="alert" hidden></div>
         <div class="meta-board-empty">No meta bug boards yet. Add one from the Meta Boards menu.</div>
         <section class="meta-board-kanban" hidden aria-label="Meta bug story board">
-          <section class="meta-board-column" data-meta-board-column="backlog"><header><h3>Backlog</h3><span></span></header><div class="meta-board-cards"></div></section>
-          <section class="meta-board-column" data-meta-board-column="ready"><header><h3>Ready</h3><span></span></header><div class="meta-board-cards"></div></section>
-          <section class="meta-board-column" data-meta-board-column="assigned"><header><h3>Assigned</h3><span></span></header><div class="meta-board-cards"></div></section>
-          <section class="meta-board-column" data-meta-board-column="in-progress"><header><h3>In Progress</h3><span></span></header><div class="meta-board-cards"></div></section>
-          <section class="meta-board-column" data-meta-board-column="in-review"><header><h3>In Review</h3><span></span></header><div class="meta-board-cards"></div></section>
-          <section class="meta-board-column" data-meta-board-column="complete"><header><h3>Complete</h3><span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="backlog"><header><h3>Backlog</h3><span class="meta-board-column-summary"><span class="meta-board-column-count"></span><span class="meta-board-column-points" hidden></span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="ready"><header><h3>Ready</h3><span class="meta-board-column-summary"><span class="meta-board-column-count"></span><span class="meta-board-column-points"></span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="assigned"><header><h3>Assigned</h3><span class="meta-board-column-summary"><span class="meta-board-column-count"></span><span class="meta-board-column-points"></span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="in-progress"><header><h3>In Progress</h3><span class="meta-board-column-summary"><span class="meta-board-column-count"></span><span class="meta-board-column-points"></span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="in-review"><header><h3>In Review</h3><span class="meta-board-column-summary"><span class="meta-board-column-count"></span><span class="meta-board-column-points"></span></span></header><div class="meta-board-cards"></div></section>
+          <section class="meta-board-column" data-meta-board-column="complete"><header><h3>Complete</h3><span class="meta-board-column-summary"><span class="meta-board-column-count"></span><span class="meta-board-column-points"></span></span></header><div class="meta-board-cards"></div></section>
         </section>
       </section>`
     : "";
@@ -523,22 +761,56 @@ export function buildGraphHtml({
         <h1>Thunderbird Desktop Console</h1>
         ${originMainStatus}
       </div>
-      ${graphOptions}
+      <div class="header-actions">
+        ${updateActions}
+        ${graphOptions}
+      </div>
     </div>
-    <div class="toolbar-row">
-      <nav class="tabs">${tabButtons}
-${dashboardTab}
-${metaBoardsTab}
-${testOutputTab}</nav>
-      ${updateActions}
+    <div class="console-footer">
+      ${consoleNavigation}
+      <div class="toolbar-row graph-toolbar">
+        <nav class="repository-navigation" aria-label="Checkout and repository">
+          ${checkoutSwitch}
+          <div class="repository-switch" role="group" aria-label="Repository">
+            ${tabButtons}
+          </div>
+        </nav>
+      </div>
     </div>
   </header>
   <main>${tabPanels}
     ${dashboardPanel}
     ${patchUpdateDialog}
+    ${patchReviewDialog}
     ${metaBoardsPanel}
     ${sprintPanel}
     ${testOutputPanel}</main>
+  <dialog class="update-scope-dialog" id="update-scope-dialog">
+    <div class="update-scope-dialog-body">
+      <header>
+        <h2 class="update-scope-title">Update checkouts</h2>
+        <button class="update-scope-close" type="button" aria-label="Close">&times;</button>
+      </header>
+      <p class="update-scope-description"></p>
+      <div class="update-scope-actions">
+        <button class="update-scope-current" type="button"></button>
+        <button class="update-scope-both" type="button">Update both checkout pairs</button>
+      </div>
+    </div>
+  </dialog>
+  <dialog class="system-dialog" id="system-dialog" aria-labelledby="system-dialog-title">
+    <div class="system-dialog-body">
+      <header>
+        <h2 class="system-dialog-title" id="system-dialog-title"></h2>
+      </header>
+      <p class="system-dialog-message"></p>
+      <div class="system-dialog-choices"></div>
+      <div class="system-dialog-actions">
+        <button class="system-dialog-cancel" type="button" hidden>Cancel</button>
+        <button class="system-dialog-confirm" type="button">OK</button>
+      </div>
+    </div>
+  </dialog>
   <div class="context-menu" id="commit-context-menu" hidden role="menu" aria-label="Commit actions">
     <div class="context-menu-title"></div>
     <button type="button" role="menuitem" data-action="checkout">Checkout</button>
@@ -548,8 +820,56 @@ ${testOutputTab}</nav>
     <button type="button" role="menuitem" data-action="rebase" data-rebase-mode="stack">Rebase Whole Stack</button>
     <button type="button" role="menuitem" data-action="interactive-rebase">Interactive Rebase</button>
     <button type="button" role="menuitem" data-action="branch">Branch</button>
+    <button type="button" role="menuitem" data-action="copy">Copy to other checkout...</button>
     <button type="button" role="menuitem" data-action="prune">Prune</button>
   </div>
+  <dialog class="checkout-transfer-dialog" id="checkout-transfer-dialog">
+    <form class="checkout-transfer-form">
+      <header>
+        <div>
+          <p class="checkout-transfer-kicker">Cross-checkout copy</p>
+          <h2 class="checkout-transfer-title">Copy commit</h2>
+        </div>
+        <button class="checkout-transfer-close" type="button" aria-label="Close">&times;</button>
+      </header>
+      <p class="checkout-transfer-description"></p>
+      <fieldset class="checkout-transfer-mode">
+        <legend>Copy</legend>
+        <label><input type="radio" name="checkout-transfer-mode" value="commit" checked> Selected commit</label>
+        <label><input type="radio" name="checkout-transfer-mode" value="stack"> Stack ending at the selected commit</label>
+      </fieldset>
+      <label>Destination branch
+        <input class="checkout-transfer-branch" type="text" autocomplete="off" placeholder="Use the selected commit branch">
+      </label>
+      <p class="checkout-transfer-status" role="status"></p>
+      <div class="checkout-transfer-actions">
+        <button class="checkout-transfer-discard" type="button" hidden>Discard destination changes</button>
+        <button class="checkout-transfer-cancel" type="button">Cancel</button>
+        <button class="checkout-transfer-submit" type="submit">Copy</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="review-sync-dialog" id="review-sync-dialog">
+    <form class="review-sync-form">
+      <header>
+        <div>
+          <p class="review-sync-kicker">Destructive checkout replacement</p>
+          <h2 class="review-sync-title">Sync Review from Working</h2>
+        </div>
+        <button class="review-sync-close" type="button" aria-label="Close">&times;</button>
+      </header>
+      <p class="review-sync-description">Replace the Review Firefox and comm clones with the Working clones’ Git refs, checked-out commits, and build configuration. Review-only commits, branches, changes, untracked files, and build artifacts will be removed.</p>
+      <p class="review-sync-description">Working source changes are not copied. Build artifacts are copied from the Working Firefox clone after the Review clones are reset.</p>
+      <label>Type <code>SYNC REVIEW</code> to confirm
+        <input class="review-sync-confirmation" type="text" autocomplete="off" spellcheck="false" required>
+      </label>
+      <p class="review-sync-status" role="status"></p>
+      <div class="review-sync-actions">
+        <button class="review-sync-cancel" type="button">Cancel</button>
+        <button class="review-sync-submit" type="submit" disabled>Sync Review</button>
+      </div>
+    </form>
+  </dialog>
   <dialog class="meta-board-manager-dialog" id="meta-board-manager-dialog">
     <form class="meta-board-manager-form">
       <header class="meta-board-manager-header">
@@ -617,6 +937,13 @@ ${testOutputTab}</nav>
         <div class="meta-board-detail-description-rendered"></div>
         <textarea id="meta-board-detail-description" class="meta-board-detail-description" rows="12" hidden></textarea>
       </section>
+      <details class="meta-board-detail-comments">
+        <summary>
+          <span>Bugzilla comments</span>
+          <span class="meta-board-detail-comments-count"></span>
+        </summary>
+        <div class="meta-board-detail-comments-list"></div>
+      </details>
       <p class="meta-board-detail-error" role="alert"></p>
       <footer class="meta-board-detail-actions">
         <button class="meta-board-detail-cancel" type="button">Cancel</button>
@@ -746,11 +1073,8 @@ ${testOutputTab}</nav>
             class="commit-reviewer-input"
             type="text"
             autocomplete="off"
-            role="combobox"
-            aria-expanded="false"
-            aria-controls="commit-reviewer-list"
+            placeholder="Enter a user or #group, then press Enter"
           >
-          <div class="commit-reviewer-list" id="commit-reviewer-list" role="listbox" hidden></div>
         </div>
       </label>
       <p class="commit-status" role="status">Ready to commit changes.</p>

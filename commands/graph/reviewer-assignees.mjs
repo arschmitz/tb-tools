@@ -1,7 +1,12 @@
 import { getUsersByMatches as defaultGetUsersByMatches } from "../../lib/bugzilla.mjs";
 import defaultPhab from "../../lib/phab.mjs";
+import {
+  loadReviewGroupAssigneeCache as defaultLoadReviewGroupAssigneeCache,
+  REVIEWER_GROUP_CACHE_TTL_MS,
+  saveReviewGroupAssigneeCache as defaultSaveReviewGroupAssigneeCache,
+} from "./reviewer-groups-cache.mjs";
 
-export const REVIEW_GROUP_ASSIGNEE_CACHE_MS = 24 * 60 * 60 * 1000;
+export const REVIEW_GROUP_ASSIGNEE_CACHE_MS = REVIEWER_GROUP_CACHE_TTL_MS;
 
 const cache = new Map();
 const inflight = new Map();
@@ -152,6 +157,8 @@ export async function getReviewGroupAssignees({
   reviewGroup,
   phab = defaultPhab,
   getUsersByMatches = defaultGetUsersByMatches,
+  loadReviewGroupAssigneeCache = defaultLoadReviewGroupAssigneeCache,
+  saveReviewGroupAssigneeCache = defaultSaveReviewGroupAssigneeCache,
 } = {}) {
   const slug = normalizeGroupSlug(reviewGroup);
 
@@ -169,19 +176,41 @@ export async function getReviewGroupAssignees({
     return inflight.get(slug);
   }
 
-  const request = loadReviewGroupAssignees({
-    reviewGroup: slug,
-    phab,
-    getUsersByMatches,
-  })
-    .then((assignees) => {
+  const request = (async () => {
+    const persisted = await loadReviewGroupAssigneeCache({ reviewGroup: slug });
+
+    if (persisted?.fresh) {
+      cache.set(slug, {
+        assignees: persisted.assignees,
+        expiresAt: Date.now() + REVIEW_GROUP_ASSIGNEE_CACHE_MS,
+      });
+      return persisted.assignees;
+    }
+
+    try {
+      const assignees = await loadReviewGroupAssignees({
+        reviewGroup: slug,
+        phab,
+        getUsersByMatches,
+      });
       cache.set(slug, {
         assignees,
         expiresAt: Date.now() + REVIEW_GROUP_ASSIGNEE_CACHE_MS,
       });
+      await saveReviewGroupAssigneeCache({ assignees, reviewGroup: slug });
       return assignees;
-    })
-    .finally(() => {
+    } catch (error) {
+      if (!persisted) {
+        throw error;
+      }
+
+      cache.set(slug, {
+        assignees: persisted.assignees,
+        expiresAt: Date.now() + REVIEW_GROUP_ASSIGNEE_CACHE_MS,
+      });
+      return persisted.assignees;
+    }
+  })().finally(() => {
       inflight.delete(slug);
     });
 

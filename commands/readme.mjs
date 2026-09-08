@@ -34,16 +34,19 @@ function pushConsoleSection(lines) {
   lines.push(
     "## Thunderbird Desktop Console",
     "",
-    "`tb console` starts a local browser-based control surface for day-to-day Thunderbird patch work. It keeps the comm checkout and the Firefox parent checkout visible together, updates while the server is running, and gives complex workflows a UI instead of forcing everything through prompts in the terminal.",
+    "`tb console` starts a local browser-based control surface for day-to-day Thunderbird patch work. It keeps the comm checkout and the Firefox parent checkout visible together, updates while the server is running, and gives complex workflows a UI instead of forcing everything through prompts in the terminal. Configure an independent Review Checkout pair to work on another clone without changing the primary Working checkout.",
     "",
     "Use the console to:",
     "",
-    "- inspect live comm and Firefox branch graphs with the current checkout, uncommitted changes, branch labels, and tracked try runs",
+    "- switch between Working and Review checkout modes while keeping a single comm and Firefox graph tab, with the current checkout, uncommitted changes, branch labels, and tracked try runs",
     "- click commits for full commit messages, Bugzilla, Phabricator, and linked Notion story badges, integration status, change totals, and GitHub-style syntax-highlighted diffs",
     "- authenticate with Phabricator from the menu to display native inline code suggestions alongside reviewed diffs, including suggestions that also have prose comments",
     "- create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, blocking-review toggles, and a durable `TB-Tools-Id` trailer for console metadata",
     "- checkout, rebase, interactively reorder/squash/fixup/drop local commit ranges, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit",
-    "- update both repositories, update and rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches",
+    "- copy a selected commit or local stack between the Working and Review clone pairs on a new destination branch, with an atomic rollback if cherry-picking fails",
+    "- destructively replace the complete Review pair with the Working Git history and copy Firefox build artifacts for a fast review build",
+    "- choose whether Pull or Rebase acts on the selected clone pair or both pairs; build/run, lint, test, pull patch, and try follow the selected comm tab",
+    "- pull both repositories, rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches",
     "- run modified tests or explicit path/glob patterns, including headless runs, with parsed final summaries and rerun actions for failures",
     "- create persistent Meta Bug boards: group dependent stories by child meta bug, filter by assignee or child meta, update story fields in place, and open linked bugs internally or in Bugzilla",
     "- create Bugzilla-backed sprints from a Meta Bug board, roll open stories forward while closing the prior sprint, plan source stories in four point-totalled columns, and track dates, burndown, and assigned-point totals",
@@ -117,9 +120,17 @@ export default async function (optionList, subOptions) {
     "bugProperty": "Bug",
     "titleProperty": "Name",
     "statusProperty": "Status"
+  },
+  "reviewCheckout": {
+    "firefoxPath": "/path/to/firefox-review",
+    "commPath": "/path/to/firefox-review/comm"
   }
 }
 \`\`\``,
+    "",
+    "Set `reviewCheckout` to a separate Firefox clone and its independent comm clone to enable the Working/Review switch in `tb console`. These must be sibling clones, not Git worktrees. The switch changes the single comm and Firefox graph tabs between the two pairs; Update can target one pair or both, and a selected commit or stack can be copied to a new branch in the other clone.",
+    "",
+    "When all four checkout paths are configured, the console's More actions menu also provides **Sync Review from Working**. This intentionally destructive one-way action requires typing `SYNC REVIEW`: it aborts review Git operations, force-prunes every Review ref, removes Review changes and untracked/ignored files, and checks out the Working branch or detached commit in both Firefox and comm. It then copy-on-write clones the Working Firefox `obj-*` directories and `mozconfig*` files when the filesystem supports it. Working repositories must have no tracked changes, so their copied build artifacts match the checked-out source; working tree changes are not copied.",
     "",
     "For Notion, share the story data source with your Notion connection. The console looks up stories by the configured bug-id property and shows matching page links on selected patches.",
     "",

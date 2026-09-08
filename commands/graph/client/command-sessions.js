@@ -23,7 +23,11 @@ import {
   clearDiffSelection,
   loadSelectedCommitIntegrationStatus,
 } from "./diff-viewer.js";
-import { showDiff } from "./commit-actions.js";
+import {
+  showSystemChoice,
+  showSystemConfirmation,
+  showSystemNotice,
+} from "./system-dialog.js";
 
 export function getLoadedGitCommitLimit(state) {
   const loadedGitCommits = state.commits.filter((commit) => !isWorkingTreeCommit(commit)).length;
@@ -35,12 +39,18 @@ export function getSnapshotLimits() {
   return graphStates.map(getLoadedGitCommitLimit);
 }
 
+export function getActiveGraphIndex() {
+  const index = Number(document.querySelector(".panel.active")?.dataset.index);
+
+  return Number.isInteger(index) ? index : 0;
+}
+
 export function getUpdateActionLabel(mode) {
-  return mode === "rebase" ? "Update and rebase" : "Update";
+  return mode === "rebase" ? "Rebase" : "Pull";
 }
 
 export function setUpdateBusy(busy) {
-  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='commit'], .graph-menu-command[data-menu-action='lint-all'], .graph-menu-command[data-menu-action='lint-outgoing'], .graph-menu-command[data-menu-action='new-patch'], .graph-menu-command[data-menu-action='pull-patch'], .graph-menu-command[data-menu-action='test'], .graph-menu-command[data-menu-action='try'], .graph-menu-command[data-menu-action='land']").forEach((button) => {
+  document.querySelectorAll(".update-action, .mach-action, .graph-menu-command[data-menu-action='build'], .graph-menu-command[data-menu-action='commit'], .graph-menu-command[data-menu-action='lint-all'], .graph-menu-command[data-menu-action='lint-outgoing'], .graph-menu-command[data-menu-action='new-patch'], .graph-menu-command[data-menu-action='pull-patch'], .graph-menu-command[data-menu-action='test'], .graph-menu-command[data-menu-action='try'], .graph-menu-command[data-menu-action='land'], .graph-menu-command[data-menu-action='review-sync']").forEach((button) => {
     button.disabled = busy;
   });
 }
@@ -291,8 +301,10 @@ export function shortHash(hash) {
   return hash ? String(hash).slice(0, 12) : "unknown";
 }
 
-export function getOriginMainDisplayLabel(label) {
-  const normalized = String(label || "").toLowerCase();
+export function getOriginMainDisplayLabel(statusOrLabel) {
+  const status = typeof statusOrLabel === "object" ? statusOrLabel : null;
+  const label = status ? status.label : statusOrLabel;
+  const normalized = String(status?.repository || label || "").toLowerCase();
 
   if (normalized === "rust" || normalized === "rust-upstream") {
     return "Rust deps";
@@ -310,7 +322,7 @@ export function getOriginMainDisplayLabel(label) {
 }
 
 export function getOriginMainBadgeText(status) {
-  const label = getOriginMainDisplayLabel(status && status.label);
+  const label = getOriginMainDisplayLabel(status);
   const isRustStatus = status && status.type === "rust-upstream";
 
   if (!status || status.state === "checking") {
@@ -350,7 +362,7 @@ export function getOriginMainBadgeTitle(status) {
   }
 
   if (status.state === "current" || status.state === "stale") {
-    return getOriginMainDisplayLabel(status.label) + " origin/main local " + shortHash(status.localHash) +
+    return getOriginMainDisplayLabel(status) + " origin/main local " + shortHash(status.localHash) +
       " remote " + shortHash(status.remoteHash);
   }
 
@@ -364,12 +376,41 @@ export function renderOriginMainStatus(statuses) {
     return;
   }
 
-  const items = Array.isArray(statuses) && statuses.length
+  const hasStatuses = Array.isArray(statuses) && statuses.length;
+  const items = hasStatuses
     ? statuses
-    : [{ label: "origin/main", state: "checking" }];
-  uiState.rustUpstreamStatus = items.find((status) => status.type === "rust-upstream") || null;
+    : [
+      ...graphStates
+        .filter(({ graph }) => (graph.checkout || "working") === uiState.checkoutMode)
+        .map(({ graph }) => ({
+          label: graph.label,
+          repository: graph.repository,
+          checkout: graph.checkout,
+          state: "checking",
+        })),
+      {
+        label: "rust",
+        type: "rust-upstream",
+        checkout: uiState.checkoutMode,
+        state: "checking",
+      },
+    ];
+  uiState.originMainStatuses = hasStatuses ? statuses : [];
+  uiState.rustUpstreamStatus = hasStatuses
+    ? items.find((status) => (
+      status.type === "rust-upstream" &&
+      (!status.checkout || status.checkout === uiState.checkoutMode)
+    )) || null
+    : null;
+  const visibleItems = items.filter((status) => {
+    if (status.type === "rust-upstream") {
+      return !status.checkout || status.checkout === uiState.checkoutMode;
+    }
 
-  container.replaceChildren(...items.map((status) => {
+    return !status.checkout || status.checkout === uiState.checkoutMode;
+  });
+
+  container.replaceChildren(...visibleItems.map((status) => {
     const badge = document.createElement("span");
     const state = status.state || "error";
 
@@ -396,15 +437,22 @@ export function scheduleOriginMainStatusRetry(statuses = []) {
 }
 
 export async function refreshOriginMainStatus({ force = false } = {}) {
-  if (!INTERACTIVE.enabled || (uiState.originMainStatusLoading && !force)) {
+  if (!INTERACTIVE.enabled) {
+    return;
+  }
+
+  if (uiState.originMainStatusLoading) {
+    uiState.originMainStatusRefreshQueued = true;
     return;
   }
 
   uiState.originMainStatusLoading = true;
+  const checkout = uiState.checkoutMode;
 
   try {
     const response = await fetch(
       "/api/origin-main-status?token=" + encodeURIComponent(INTERACTIVE.token) +
+        "&checkout=" + encodeURIComponent(checkout) +
         (force ? "&force=1" : "")
     );
     const result = await response.json();
@@ -413,10 +461,18 @@ export async function refreshOriginMainStatus({ force = false } = {}) {
       throw new Error(result.error || response.statusText);
     }
 
+    if (checkout !== uiState.checkoutMode) {
+      return result.statuses || [];
+    }
+
     renderOriginMainStatus(result.statuses);
     scheduleOriginMainStatusRetry(result.statuses || []);
     return result.statuses || [];
   } catch (error) {
+    if (checkout !== uiState.checkoutMode) {
+      return [];
+    }
+
     uiState.rustUpstreamStatus = null;
     renderOriginMainStatus([{
       label: "origin/main",
@@ -426,6 +482,14 @@ export async function refreshOriginMainStatus({ force = false } = {}) {
     return [];
   } finally {
     uiState.originMainStatusLoading = false;
+
+    if (
+      uiState.originMainStatusRefreshQueued ||
+      checkout !== uiState.checkoutMode
+    ) {
+      uiState.originMainStatusRefreshQueued = false;
+      void refreshOriginMainStatus();
+    }
   }
 }
 
@@ -461,7 +525,11 @@ export async function confirmRemoteBuildRustWarning(actionLabel) {
     return true;
   }
 
-  return confirm(warning + "\n\nRemote builds may fail. Continue with " + actionLabel + "?");
+  return showSystemConfirmation({
+    title: "Rust dependencies are out of date",
+    message: warning + "\n\nRemote builds may fail. Continue with " + actionLabel + "?",
+    confirmLabel: "Continue",
+  });
 }
 
 export function getMachActionLabel(action) {
@@ -535,7 +603,10 @@ export async function pollGraphMachSession() {
 
 export async function startGraphMachAction(action) {
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -556,6 +627,7 @@ export async function startGraphMachAction(action) {
       body: JSON.stringify({
         token: INTERACTIVE.token,
         action,
+        graphIndex: getActiveGraphIndex(),
       }),
     });
     const result = await response.json();
@@ -674,7 +746,10 @@ export async function pollGraphLintSession() {
 
 export async function startGraphLintAction(mode) {
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -697,6 +772,7 @@ export async function startGraphLintAction(mode) {
       body: JSON.stringify({
         token: INTERACTIVE.token,
         mode: normalizedMode,
+        graphIndex: getActiveGraphIndex(),
       }),
     });
     const result = await response.json();
@@ -746,9 +822,12 @@ export function getTryDialogOptions() {
   };
 }
 
-export function openTryDialog() {
+export async function openTryDialog() {
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -826,7 +905,10 @@ export async function submitTryDialog(event) {
   event.preventDefault();
 
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -854,7 +936,10 @@ export async function submitTryDialog(event) {
       body: JSON.stringify({
         token: INTERACTIVE.token,
         options: getTryDialogOptions(),
-        snapshotLimit: getLoadedGitCommitLimit(graphStates[0]),
+        graphIndex: getActiveGraphIndex(),
+        snapshotLimit: getLoadedGitCommitLimit(
+          graphStates[getActiveGraphIndex()],
+        ),
       }),
     });
     const result = await response.json();
@@ -886,28 +971,38 @@ export async function promptForPostUpdateMachAction() {
     return;
   }
 
-  const answer = window.prompt(
-    "Update complete. Type 'build' to build, type 'run' to build and run, or leave blank to skip.",
-    ""
-  );
+  const answer = await showSystemChoice({
+    title: "Update complete",
+    message: "Choose what to do next.",
+    choices: [
+      {
+        value: "build",
+        label: "Build",
+        description: "Build Thunderbird without starting it.",
+      },
+      {
+        value: "run",
+        label: "Build and run",
+        description: "Build Thunderbird, then start it.",
+      },
+    ],
+    cancelLabel: "Skip",
+  });
 
-  if (answer === null || !answer.trim()) {
+  if (!answer) {
     return;
   }
 
-  const normalized = answer.trim().toLowerCase();
-
-  if (normalized === "build") {
+  if (answer === "build") {
     await startGraphMachAction("build");
     return;
   }
 
-  if (normalized === "run" || normalized === "build-run") {
+  if (answer === "run") {
     await startGraphMachAction("run");
     return;
   }
 
-  alert("Use 'build', 'run', or leave it blank.");
 }
 
 export function formatDirtyCheckoutList(dirty) {
@@ -945,30 +1040,26 @@ function refreshDirtyCheckoutGraphs(dirty) {
   }
 }
 
-export function promptForDirtyUpdateAction(dirty) {
+export async function promptForDirtyUpdateAction(dirty) {
   refreshDirtyCheckoutGraphs(dirty);
-  const answer = window.prompt(
-    "Uncommitted changes were found:\n\n" + formatDirtyCheckoutList(dirty) +
-      "\n\nThe matching Uncommitted changes row is being refreshed in the affected console tab. Type 'shelf' to temporarily stash them for the update, type 'amend' to amend them into the current commit, or leave blank to cancel.",
-    "shelf"
-  );
-
-  if (answer === null || !answer.trim()) {
-    return "";
-  }
-
-  const normalized = answer.trim().toLowerCase();
-
-  if (normalized === "stash" || normalized === "shelve") {
-    return "shelf";
-  }
-
-  if (normalized === "shelf" || normalized === "amend") {
-    return normalized;
-  }
-
-  alert("Use 'shelf' or 'amend'.");
-  return "";
+  return showSystemChoice({
+    title: "Uncommitted changes found",
+    message: formatDirtyCheckoutList(dirty) +
+      "\n\nThe matching Uncommitted changes row is being refreshed in the affected Tree. Choose how to proceed with the update.",
+    choices: [
+      {
+        value: "shelf",
+        label: "Shelf changes",
+        description: "Temporarily stash changes, then restore them after the update.",
+      },
+      {
+        value: "amend",
+        label: "Amend current commit",
+        description: "Include changes in the checked-out commit before updating.",
+      },
+    ],
+    cancelLabel: "Cancel update",
+  });
 }
 
 export function applyGraphSnapshots(snapshots) {
@@ -1015,7 +1106,12 @@ export async function unshelfGraphUpdateChanges(shelves) {
   }
 }
 
-export async function runGraphUpdate(mode, dirtyAction = "") {
+export async function runGraphUpdate(
+  mode,
+  dirtyAction = "",
+  scope = "current",
+  graphIndex = getActiveGraphIndex(),
+) {
   clearCommandStatusOutput();
   setUpdateStatus(getUpdateActionLabel(mode) + " running...", { busy: true });
 
@@ -1027,6 +1123,8 @@ export async function runGraphUpdate(mode, dirtyAction = "") {
         token: INTERACTIVE.token,
         mode,
         dirtyAction,
+        scope,
+        graphIndex,
         snapshotLimits: getSnapshotLimits(),
       }),
     });
@@ -1036,10 +1134,10 @@ export async function runGraphUpdate(mode, dirtyAction = "") {
 
     if (!response.ok) {
       if (!dirtyAction && Array.isArray(result.dirty) && result.dirty.length) {
-        const nextDirtyAction = promptForDirtyUpdateAction(result.dirty);
+        const nextDirtyAction = await promptForDirtyUpdateAction(result.dirty);
 
         if (nextDirtyAction) {
-          await runGraphUpdate(mode, nextDirtyAction);
+          await runGraphUpdate(mode, nextDirtyAction, scope, graphIndex);
         } else {
           setUpdateStatus(getUpdateActionLabel(mode) + " canceled.");
         }
@@ -1054,7 +1152,12 @@ export async function runGraphUpdate(mode, dirtyAction = "") {
     setUpdateStatus(result.message || getUpdateActionLabel(mode) + " complete.");
 
     if (Array.isArray(result.shelves) && result.shelves.length) {
-      const shouldUnshelf = confirm("Unshelf " + result.shelves.length + " shelved checkout" + (result.shelves.length === 1 ? "" : "s") + " now?");
+      const shouldUnshelf = await showSystemConfirmation({
+        title: "Restore shelved changes",
+        message: "Unshelf " + result.shelves.length + " shelved checkout" +
+          (result.shelves.length === 1 ? "" : "s") + " now?",
+        confirmLabel: "Unshelf",
+      });
 
       if (shouldUnshelf) {
         await unshelfGraphUpdateChanges(result.shelves);
@@ -1110,9 +1213,7 @@ export function applyGraphSnapshot(index, snapshot, { force = false } = {}) {
 
   const selectedCommit = state.commits.find((commit) => commit.hash === previousSelectedHash);
 
-  if (selectedCommit) {
-    showDiff(state.graph, index, selectedCommit);
-  } else {
+  if (!selectedCommit) {
     clearDiffSelection(index, "Graph updated. The selected commit is no longer loaded.");
   }
 

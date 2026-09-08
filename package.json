@@ -7,7 +7,7 @@
   },
   "scripts": {
     "lint": "eslint .",
-    "test": "node --test test/*.test.mjs && node tb.mjs help >/dev/null"
+    "test": "node --import=./test/block-external-apis.mjs --test test/*.test.mjs && node --import=./test/block-external-apis.mjs tb.mjs help >/dev/null"
   },
   "author": "Alexander Schmitz<arschmitz@gmail.com>",
   "license": "ISC",

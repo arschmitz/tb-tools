@@ -88,3 +88,46 @@ test("review group assignees return cached group membership", async () => {
 
   assert.equal(projectSearches, 1);
 });
+
+test("review group assignees reuse persisted entries without remote lookups", async () => {
+  const assignees = await getReviewGroupAssignees({
+    reviewGroup: "#thunderbird-reviewers",
+    loadReviewGroupAssigneeCache: async ({ reviewGroup }) => {
+      assert.equal(reviewGroup, "thunderbird-reviewers");
+      return {
+        assignees: [{ email: "reviewer@example.com", name: "Review Er" }],
+        fresh: true,
+      };
+    },
+    phab: async () => {
+      throw new Error("A fresh persisted group must not query Phabricator.");
+    },
+    getUsersByMatches: async () => {
+      throw new Error("A fresh persisted group must not query Bugzilla.");
+    },
+  });
+
+  assert.deepEqual(assignees, [
+    { email: "reviewer@example.com", name: "Review Er" },
+  ]);
+});
+
+test("review group assignees retain a stale persisted entry when refresh fails", async () => {
+  const assignees = await getReviewGroupAssignees({
+    reviewGroup: "thunderbird-reviewers",
+    loadReviewGroupAssigneeCache: async () => ({
+      assignees: [{ email: "reviewer@example.com", name: "Review Er" }],
+      fresh: false,
+    }),
+    phab: async () => {
+      throw new Error("Phabricator rate limited the refresh.");
+    },
+    getUsersByMatches: async () => {
+      throw new Error("The group lookup should fail before Bugzilla.");
+    },
+  });
+
+  assert.deepEqual(assignees, [
+    { email: "reviewer@example.com", name: "Review Er" },
+  ]);
+});

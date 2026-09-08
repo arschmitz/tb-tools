@@ -1,5 +1,6 @@
 import {
   INTERACTIVE,
+  PHABRICATOR_REVISION_URL,
   amendDialog,
   amendError,
   amendMessage,
@@ -43,6 +44,7 @@ import {
   getLoadedGitCommitLimit,
   refreshGraphFromServer,
 } from "./command-sessions.js";
+import { showSystemConfirmation } from "./system-dialog.js";
 import {
   closeRebaseDialog,
   openRebaseFailureDialog,
@@ -50,7 +52,69 @@ import {
   setRebaseDialogError,
 } from "./rebase-dialog.js";
 
-export async function showDiff(graph, index, commit) {
+function getCommitPhabricatorRevision(commit, message = "") {
+  const haystack = [
+    commit?.subject,
+    ...(commit?.refs || []),
+    message,
+  ].filter(Boolean).join("\n");
+  const match = haystack.match(/\b(?:phab-)?(D\d{4,})\b/i);
+
+  return match ? match[1].toUpperCase() : "";
+}
+
+function configurePatchUpdateButton(button, { graph, index, commit, message = "" }) {
+  if (!button) {
+    return;
+  }
+
+  const revision = getCommitPhabricatorRevision(commit, message);
+  const repository = String(graph.repository || graph.label || "").toLowerCase();
+  const canUpdate = INTERACTIVE.aiEnabled && repository === "comm" &&
+    graph.checkout !== "review" && !isWorkingTreeCommit(commit) &&
+    Boolean(revision);
+
+  button.hidden = !canUpdate;
+
+  if (!canUpdate) {
+    return;
+  }
+
+  button.dataset.graphIndex = String(index);
+  button.dataset.revision = revision;
+  button.dataset.title = commit.subject || revision;
+  button.dataset.url = PHABRICATOR_REVISION_URL + revision.slice(1);
+}
+
+function isCommitReachableFromLoadedOriginMain(index, commit) {
+  const commits = graphStates[index]?.commits || [];
+  const commitsByHash = new Map(commits.map((candidate) => [candidate.hash, candidate]));
+  const reachable = new Set();
+  const pending = commits
+    .filter((candidate) => Array.isArray(candidate.refs) && candidate.refs.includes("origin/main"))
+    .map((candidate) => candidate.hash);
+
+  while (pending.length) {
+    const hash = pending.pop();
+
+    if (!hash || reachable.has(hash)) {
+      continue;
+    }
+
+    reachable.add(hash);
+    const current = commitsByHash.get(hash);
+
+    for (const parent of current?.parents || []) {
+      if (commitsByHash.has(parent)) {
+        pending.push(parent);
+      }
+    }
+  }
+
+  return reachable.has(commit.hash);
+}
+
+export async function showDiff(graph, index, commit, { loadIntegration = false } = {}) {
   const viewer = document.getElementById("diff-" + index);
   const title = viewer.querySelector(".diff-title");
   const meta = viewer.querySelector(".diff-meta");
@@ -61,6 +125,8 @@ export async function showDiff(graph, index, commit) {
   const checkoutButton = viewer.querySelector(".checkout-commit");
   const amendButton = viewer.querySelector(".amend-commit");
   const submitButton = viewer.querySelector(".submit-commit");
+  const patchUpdateButton = viewer.querySelector(".patch-update-commit");
+  const loadReviewButton = viewer.querySelector(".load-commit-review");
   const checkoutStatus = viewer.querySelector(".checkout-status");
   const diff = graph.diffs && graph.diffs[commit.hash];
 
@@ -84,20 +150,50 @@ export async function showDiff(graph, index, commit) {
   amendButton.dataset.label = graph.label;
   amendButton.dataset.changeId = commit.changeId || "";
   amendButton.dataset.includeChanges = String(isWorkingTreeCommit(commit));
-  submitButton.hidden = !INTERACTIVE.enabled || isWorkingTreeCommit(commit) || !isCurrentCommit(commit);
+  submitButton.hidden = !INTERACTIVE.enabled || isWorkingTreeCommit(commit) ||
+    isCommitReachableFromLoadedOriginMain(index, commit);
   submitButton.disabled = false;
   submitButton.dataset.graphIndex = String(index);
   submitButton.dataset.hash = commit.hash;
   submitButton.dataset.label = graph.label;
+  submitButton.dataset.isCurrent = String(isCurrentCommit(commit));
+  if (patchUpdateButton) {
+    configurePatchUpdateButton(patchUpdateButton, {
+      graph,
+      index,
+      commit,
+      message: commit.subject,
+    });
+  }
+  if (loadReviewButton) {
+    loadReviewButton.hidden = !INTERACTIVE.enabled || isWorkingTreeCommit(commit);
+    loadReviewButton.disabled = true;
+    loadReviewButton.textContent = "Load Review";
+    loadReviewButton.dataset.graphIndex = String(index);
+    loadReviewButton.dataset.hash = commit.hash;
+  }
   checkoutStatus.classList.remove("error");
   checkoutStatus.textContent = "";
   setDiffStats(stats, null);
 
   if (INTERACTIVE.enabled) {
     setDiffText(body, "Loading diff...");
-    loadSelectedCommitMessage(index, commit, commitMessage);
-    loadSelectedCommitIntegrationStatus(index, commit, integrationStatus);
-    const reviewPromise = fetchSelectedCommitReview(index, commit);
+    void loadSelectedCommitMessage(index, commit, commitMessage).then((message) => {
+      if (graphStates[index].selectedHash !== commit.hash) {
+        return;
+      }
+
+      configurePatchUpdateButton(patchUpdateButton, {
+        graph,
+        index,
+        commit,
+        message,
+      });
+    });
+
+    if (loadIntegration && !isWorkingTreeCommit(commit)) {
+      void loadSelectedCommitIntegrationStatus(index, commit, integrationStatus);
+    }
 
     try {
       const response = await fetch(
@@ -121,16 +217,19 @@ export async function showDiff(graph, index, commit) {
         setDiffText(body, result.text || "No diff for this commit.");
       }
 
-      renderSelectedCommitReview(index, commit, body, await reviewPromise);
+      if (loadReviewButton) {
+        loadReviewButton.disabled = false;
+      }
     } catch (error) {
-      await reviewPromise;
-
       if (graphStates[index].selectedHash !== commit.hash) {
         return;
       }
 
       setDiffStats(stats, null);
       setDiffText(body, error && error.message ? error.message : String(error));
+      if (loadReviewButton) {
+        loadReviewButton.disabled = false;
+      }
     }
 
     return;
@@ -153,6 +252,36 @@ export async function showDiff(graph, index, commit) {
   }
 
   setDiffText(body, diff.text || "No diff for this commit.");
+}
+
+export async function loadSelectedCommitReviewForCurrentSelection(button) {
+  const index = Number(button?.dataset.graphIndex);
+  const hash = button?.dataset.hash || "";
+  const state = graphStates[index];
+  const commit = state?.commits.find((candidate) => candidate.hash === hash);
+  const viewer = document.getElementById("diff-" + index);
+  const body = viewer?.querySelector(".diff-body");
+
+  if (!commit || !body || state.selectedHash !== hash) {
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = "Loading Review...";
+  const review = await fetchSelectedCommitReview(index, commit);
+
+  if (state.selectedHash !== hash) {
+    return;
+  }
+
+  renderSelectedCommitReview(index, commit, body, review);
+  if (review?.error) {
+    button.disabled = false;
+    button.textContent = "Retry Review";
+    return;
+  }
+
+  button.hidden = true;
 }
 
 function getRebaseModeLabel(mode = "") {
@@ -239,7 +368,12 @@ export async function runCommitAction(
   });
   const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
 
-  if (!confirm(details.confirm)) {
+  if (!await showSystemConfirmation({
+    title: "Confirm " + details.progress.replace(/\.\.\.$/, ""),
+    message: details.confirm,
+    confirmLabel: details.progress.replace(/\.\.\.$/, ""),
+    danger: action === "prune",
+  })) {
     return;
   }
 
@@ -579,8 +713,16 @@ export async function pollSubmitSession() {
 export async function openSubmitDialog(button, { patchUpdateSessionId = "" } = {}) {
   const graphIndex = Number(button.dataset.graphIndex);
   const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
+  const isCurrent = button.dataset.isCurrent === "true";
+  const commitLabel = String(button.dataset.hash || "").slice(0, 12);
 
-  if (!confirm("Submit the currently checked out commit in " + button.dataset.label + "?")) {
+  if (!await showSystemConfirmation({
+    title: "Submit patch",
+    message: isCurrent
+      ? "Submit the currently checked out commit in " + button.dataset.label + "?"
+      : "Check out " + commitLabel + " in " + button.dataset.label + " and submit it?",
+    confirmLabel: "Submit",
+  })) {
     return;
   }
 
@@ -617,7 +759,7 @@ export async function openSubmitDialog(button, { patchUpdateSessionId = "" } = {
       appliedSnapshot: false,
       status: result.status,
     };
-    submitTitle.textContent = "Submit " + button.dataset.label + " current commit";
+    submitTitle.textContent = "Submit " + button.dataset.label + " " + commitLabel;
     submitPrompt.hidden = true;
     submitQuestion.textContent = "";
     submitLinks.hidden = true;

@@ -927,7 +927,10 @@ export async function getCommitDiff({
 }
 
 export async function getCheckoutGraphMetadata({
+  id,
+  checkout,
   label,
+  repository = label,
   cwd,
   runCommand = run,
 }) {
@@ -940,7 +943,7 @@ export async function getCheckoutGraphMetadata({
     ]);
     const graphPath = root.trim() || absolutePath;
 
-    if (label === "comm" && runCommand === run) {
+    if (repository === "comm" && runCommand === run) {
       await installTbToolsCommitMsgHook({
         cwd: graphPath,
         runCommand,
@@ -948,6 +951,9 @@ export async function getCheckoutGraphMetadata({
     }
 
     return {
+      id,
+      checkout,
+      repository,
       label,
       path: graphPath,
       branch: branch.trim() || "(detached)",
@@ -957,6 +963,9 @@ export async function getCheckoutGraphMetadata({
     };
   } catch (error) {
     return {
+      id,
+      checkout,
+      repository,
       label,
       path: absolutePath,
       commits: [],
@@ -1031,7 +1040,10 @@ export async function getCheckoutCommitPage({
 }
 
 export async function getCheckoutGraphData({
+  id,
+  checkout,
   label,
+  repository = label,
   cwd,
   limit,
   diffs = true,
@@ -1049,7 +1061,7 @@ export async function getCheckoutGraphData({
     ]);
     const graphPath = root.trim() || absolutePath;
 
-    if (label === "comm" && runCommand === run) {
+    if (repository === "comm" && runCommand === run) {
       await installTbToolsCommitMsgHook({
         cwd: graphPath,
         runCommand,
@@ -1077,6 +1089,9 @@ export async function getCheckoutGraphData({
       : {};
 
     return {
+      id,
+      checkout,
+      repository,
       label,
       path: graphPath,
       branch: branch.trim() || "(detached)",
@@ -1088,6 +1103,9 @@ export async function getCheckoutGraphData({
     };
   } catch (error) {
     return {
+      id,
+      checkout,
+      repository,
       label,
       path: absolutePath,
       limit,

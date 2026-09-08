@@ -196,6 +196,23 @@ test("meta board derives every story column from points, ownership, patches, rev
   assert.deepEqual(data.columns["in-progress"].map((card) => card.id), ["100004"]);
   assert.deepEqual(data.columns["in-review"].map((card) => card.id), ["100005"]);
   assert.deepEqual(data.columns.complete.map((card) => card.id), ["100006"]);
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(data.columns)
+        .filter(([column]) => column !== "backlog")
+        .map(([column, cards]) => [
+          column,
+          cards.reduce((total, card) => total + (Number(card.points) || 0), 0),
+        ]),
+    ),
+    {
+      ready: 3,
+      assigned: 5,
+      "in-progress": 2,
+      "in-review": 1,
+      complete: 0,
+    },
+  );
   assert.equal(data.columns["in-review"][0].parentMeta.summary, "Polish stories");
   assert.deepEqual(data.assignees.map((assignee) => assignee.email), [
     "alice@example.com",
@@ -340,8 +357,20 @@ test("meta board details retain the latest saved description and update editable
     bugId: "100001",
     getBugsByIds: async (ids) => ids.map((id) => relations.get(String(id))).filter(Boolean),
     getBugComments: async () => [
-      { text: "Original description" },
-      { text: "TB-Tools story description:\n\nCurrent description" },
+      {
+        count: 0,
+        creator: "reporter@example.com",
+        creator_detail: { real_name: "Reporter" },
+        creation_time: "2026-09-07T12:00:00Z",
+        text: "Original description",
+      },
+      {
+        count: 1,
+        creator: "alice@example.com",
+        creation_time: "2026-09-07T13:00:00Z",
+        is_private: true,
+        text: "TB-Tools story description:\n\nCurrent description",
+      },
     ],
     getNotionStoriesByBugId: async () => ({
       stories: [{ title: "Story", url: "https://www.notion.so/story" }],
@@ -363,6 +392,24 @@ test("meta board details retain the latest saved description and update editable
   });
 
   assert.equal(detail.description, "Current description");
+  assert.deepEqual(detail.comments, [
+    {
+      id: "0",
+      author: "Reporter",
+      email: "reporter@example.com",
+      createdAt: "2026-09-07T12:00:00Z",
+      isPrivate: false,
+      text: "Original description",
+    },
+    {
+      id: "1",
+      author: "alice@example.com",
+      email: "alice@example.com",
+      createdAt: "2026-09-07T13:00:00Z",
+      isPrivate: true,
+      text: "TB-Tools story description:\n\nCurrent description",
+    },
+  ]);
   assert.equal(detail.dependsOn[0].summary, "Prerequisite");
   assert.equal(detail.blocks[0].summary, "Dependent");
   assert.equal(detail.notion.stories[0].url, "https://www.notion.so/story");

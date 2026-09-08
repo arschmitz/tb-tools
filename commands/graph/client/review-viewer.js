@@ -179,12 +179,16 @@ function reviewPathsMatch(firstPath, secondPath) {
   return [...firstVariants].some((path) => secondVariants.has(path));
 }
 
-function findReviewLine(body, inlineComment) {
-  const lineKeys = inlineComment.isNewFile === false
+export function findReviewLine(body, inlineComment) {
+  const lineKeys = inlineComment.contextLineSide === "old"
     ? ["oldLine"]
-    : inlineComment.isNewFile === true
+    : inlineComment.contextLineSide === "new"
       ? ["newLine"]
-      : ["newLine", "oldLine"];
+      : inlineComment.isNewFile === false
+        ? ["oldLine"]
+        : inlineComment.isNewFile === true
+          ? ["newLine"]
+          : ["newLine", "oldLine"];
   const lineNumber = String(inlineComment.lineNumber);
 
   for (const file of body.querySelectorAll(".pretty-file")) {
@@ -219,7 +223,7 @@ function revealReviewedContextLine(row) {
   row.classList.remove("collapsed-context");
 }
 
-function appendInlineReviewComment(row, comment) {
+export function appendInlineReviewComment(row, comment) {
   row.closest(".diff-table")?.classList.add("has-review-comments");
 
   let thread = row.nextElementSibling;
@@ -234,11 +238,19 @@ function appendInlineReviewComment(row, comment) {
     row.after(thread);
   }
 
-  thread.firstElementChild.append(createReviewComment(comment, { inline: true }));
+  const reviewComment = createReviewComment(comment, { inline: true });
+
+  thread.firstElementChild.append(reviewComment);
+  return reviewComment;
 }
 
 function createReviewDiscussion(review, unmatchedComments) {
-  if (!review.comments.length && !unmatchedComments.length && !review.error) {
+  if (
+    !review.comments.length &&
+    !unmatchedComments.length &&
+    !review.error &&
+    !review.historyTruncated
+  ) {
     return null;
   }
 
@@ -267,6 +279,14 @@ function createReviewDiscussion(review, unmatchedComments) {
     error.textContent = review.error;
     discussion.append(error);
     return discussion;
+  }
+
+  if (review.historyTruncated) {
+    const warning = document.createElement("p");
+
+    warning.className = "review-discussion-warning";
+    warning.textContent = "Showing the 400 most recent review transactions to protect Phabricator. Open the revision for older history.";
+    discussion.append(warning);
   }
 
   review.comments.forEach((comment) => {

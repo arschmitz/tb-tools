@@ -10,6 +10,11 @@ export const DEFAULT_SUBMIT_OUTPUT_LIMIT = 160000;
 export const DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS = 15 * 1000;
 export const DEFAULT_DASHBOARD_CACHE_MS = 5 * 60 * 1000;
 export const DEFAULT_META_BOARD_CACHE_MS = 2 * 60 * 1000;
+// Integration data is loaded from a user-selected commit and is shared by all
+// console tabs through the server. Keep it warm long enough that tab changes
+// cannot turn into repeated remote API traffic.
+export const DEFAULT_GRAPH_INTEGRATION_CACHE_MS = 5 * 60 * 1000;
+export const DEFAULT_GRAPH_REVIEW_CACHE_MS = 2 * 60 * 1000;
 export const DEFAULT_CONSOLE_PORT = 4310;
 export const CHECKIN_NEEDED_KEYWORD = "checkin-needed-tb";
 export const GRAPH_UPDATE_MODE_UPDATE = "update";
@@ -31,6 +36,7 @@ export const GRAPH_CLIENT_STYLESHEETS = [
 ];
 export const GRAPH_CLIENT_SCRIPTS = [
   { output: "graph-client/config.js", source: "config.js" },
+  { output: "graph-client/system-dialog.js", source: "system-dialog.js" },
   { output: "graph-client/commit-model.js", source: "commit-model.js" },
   { output: "graph-client/dom.js", source: "dom.js" },
   { output: "graph-client/pane-resizer.js", source: "pane-resizer.js" },
@@ -39,12 +45,16 @@ export const GRAPH_CLIENT_SCRIPTS = [
   { output: "graph-client/review-viewer.js", source: "review-viewer.js" },
   { output: "graph-client/diff-viewer.js", source: "diff-viewer.js" },
   { output: "graph-client/command-sessions.js", source: "command-sessions.js" },
+  { output: "graph-client/update-scope-dialog.js", source: "update-scope-dialog.js" },
   { output: "graph-client/rebase-dialog.js", source: "rebase-dialog.js" },
   { output: "graph-client/interactive-rebase-dialog.js", source: "interactive-rebase-dialog.js" },
   { output: "graph-client/commit-actions.js", source: "commit-actions.js" },
   { output: "graph-client/commit-dialog.js", source: "commit-dialog.js" },
+  { output: "graph-client/checkout-transfer-dialog.js", source: "checkout-transfer-dialog.js" },
+  { output: "graph-client/review-sync-dialog.js", source: "review-sync-dialog.js" },
   { output: "graph-client/view-router.js", source: "view-router.js" },
   { output: "graph-client/patch-update-dialog.js", source: "patch-update-dialog.js" },
+  { output: "graph-client/patch-review-dialog.js", source: "patch-review-dialog.js" },
   { output: "graph-client/dashboard.js", source: "dashboard.js" },
   { output: "graph-client/meta-board-colors.js", source: "meta-board-colors.js" },
   { output: "graph-client/markdown.js", source: "markdown.js" },

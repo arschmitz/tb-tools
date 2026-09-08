@@ -7,7 +7,6 @@ import {
   commitDialog,
   commitForm,
   commitReviewerInput,
-  commitReviewerList,
   commitReviewerPills,
   commitStatus,
   commitSubmit,
@@ -22,20 +21,12 @@ import {
   setUpdateBusy,
   setUpdateStatus,
 } from "./command-sessions.js";
-
-const MIN_REVIEWER_QUERY_LENGTH = 3;
-const REVIEWER_SEARCH_DEBOUNCE_MS = 300;
+import { showSystemNotice } from "./system-dialog.js";
 
 function createCommitDialogState() {
   return {
     metadata: null,
     reviewers: [],
-    results: [],
-    visibleResults: [],
-    activeResultIndex: -1,
-    searchCache: new Map(),
-    searchTimer: null,
-    searchController: null,
   };
 }
 
@@ -95,43 +86,6 @@ function getReviewerKey(reviewer) {
   return String(reviewer?.value || "").toLowerCase();
 }
 
-function getReviewerResultVariants(reviewer) {
-  const normalized = normalizeReviewerInputValue(reviewer?.value || reviewer);
-
-  if (!normalized.value) {
-    return [];
-  }
-
-  const base = {
-    ...reviewer,
-    value: normalized.value,
-    label: reviewer?.label || normalized.value,
-  };
-
-  return [
-    {
-      ...base,
-      blocking: false,
-    },
-    {
-      ...base,
-      blocking: true,
-      label: (base.label || base.value) + "!",
-      description: [base.description || base.type || "", "blocking review"]
-        .filter(Boolean)
-        .join(" - "),
-    },
-  ];
-}
-
-function setReviewerResultsExpanded(expanded) {
-  commitReviewerInput.setAttribute(
-    "aria-expanded",
-    expanded ? "true" : "false",
-  );
-  commitReviewerList.hidden = !expanded;
-}
-
 function renderCommitReviewerPills() {
   const state = getCommitDialogState();
 
@@ -169,45 +123,6 @@ function renderCommitReviewerPills() {
   );
 }
 
-function renderCommitReviewerResults() {
-  const state = getCommitDialogState();
-  const selected = new Set(state.reviewers.map(getReviewerKey));
-  const results = state.results
-    .filter((result) => !selected.has(getReviewerKey(result)))
-    .flatMap(getReviewerResultVariants);
-
-  state.visibleResults = results;
-  state.activeResultIndex = results.length
-    ? Math.max(0, Math.min(state.activeResultIndex, results.length - 1))
-    : -1;
-  commitReviewerList.replaceChildren(
-    ...results.map((result, index) => {
-      const option = document.createElement("button");
-      const label = document.createElement("span");
-      const description = document.createElement("span");
-
-      option.type = "button";
-      option.className =
-        "commit-reviewer-option" + (result.blocking ? " blocking" : "");
-      option.dataset.index = String(index);
-      option.dataset.value = result.value;
-      option.setAttribute("role", "option");
-      option.setAttribute(
-        "aria-selected",
-        index === state.activeResultIndex ? "true" : "false",
-      );
-      label.className = "commit-reviewer-option-label";
-      label.textContent = result.label || result.value;
-      description.className = "commit-reviewer-option-description";
-      description.textContent = result.description || result.type || "";
-      option.append(label, description);
-      return option;
-    }),
-  );
-
-  setReviewerResultsExpanded(Boolean(results.length));
-}
-
 function addCommitReviewer(reviewer) {
   const normalized = normalizeReviewerInputValue(reviewer?.value || reviewer);
   const value = normalized.value;
@@ -227,10 +142,8 @@ function addCommitReviewer(reviewer) {
       );
       existing.blocking = true;
       renderCommitReviewerPills();
-      renderCommitReviewerResults();
     }
     commitReviewerInput.value = "";
-    setReviewerResultsExpanded(false);
     return false;
   }
 
@@ -242,9 +155,7 @@ function addCommitReviewer(reviewer) {
     blocking,
   });
   commitReviewerInput.value = "";
-  state.activeResultIndex = -1;
   renderCommitReviewerPills();
-  renderCommitReviewerResults();
   return true;
 }
 
@@ -276,244 +187,17 @@ export function handleCommitReviewerPillEvent(event) {
   }
 
   renderCommitReviewerPills();
-  renderCommitReviewerResults();
   commitReviewerInput.focus();
   return true;
 }
 
-function getReviewerSearchCacheKey(query = "") {
-  return stripReviewerBlockingMarker(query).toLowerCase();
-}
-
-function getReviewerSearchTokens(query = "") {
-  return getReviewerSearchCacheKey(query)
-    .replace(/^#/, "")
-    .split(/[\s#,_-]+/)
-    .filter(Boolean);
-}
-
-function isReviewerGroupSearchQuery(query = "") {
-  return stripReviewerBlockingMarker(query).startsWith("#");
-}
-
-function getReviewerSearchTarget(query = "") {
-  return isReviewerGroupSearchQuery(query) ? "review groups" : "reviewers";
-}
-
-function getReviewerHaystack(reviewer = {}) {
-  return [reviewer.value, reviewer.label, reviewer.description]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-}
-
-function filterCachedReviewerResults(results = [], query = "") {
-  const tokens = getReviewerSearchTokens(query);
-
-  if (!tokens.length) {
-    return results;
-  }
-
-  return results.filter((reviewer) => {
-    const haystack = getReviewerHaystack(reviewer);
-
-    return tokens.every((token) => haystack.includes(token));
-  });
-}
-
-function renderCachedReviewerPrefixResults(query) {
-  const state = getCommitDialogState();
-  const key = getReviewerSearchCacheKey(query);
-  const prefixes = [...state.searchCache.keys()]
-    .filter((cachedKey) => key.startsWith(cachedKey) && cachedKey.length >= 2)
-    .sort((first, second) => second.length - first.length);
-
-  for (const prefix of prefixes) {
-    const filtered = filterCachedReviewerResults(
-      state.searchCache.get(prefix),
-      query,
-    );
-
-    if (filtered.length) {
-      state.results = filtered;
-      state.activeResultIndex = 0;
-      renderCommitReviewerResults();
-      return true;
-    }
-  }
-
-  return false;
-}
-
-export async function searchCommitReviewers() {
-  const state = getCommitDialogState();
-  const query = commitReviewerInput.value.trim();
-  const cacheKey = getReviewerSearchCacheKey(query);
-
-  if (cacheKey.length < MIN_REVIEWER_QUERY_LENGTH) {
-    if (state.searchController) {
-      state.searchController.abort();
-      state.searchController = null;
-    }
-
-    state.results = [];
-    state.activeResultIndex = -1;
-    renderCommitReviewerResults();
-    setCommitStatus(
-      `Type at least ${MIN_REVIEWER_QUERY_LENGTH} characters to search reviewers. Press Enter to add an exact reviewer.`,
-    );
-    return;
-  }
-
-  if (state.searchCache.has(cacheKey)) {
-    state.results = state.searchCache.get(cacheKey);
-    state.activeResultIndex = state.results.length ? 0 : -1;
-    renderCommitReviewerResults();
-    setCommitStatus("Reviewer results loaded from cache.");
-    return;
-  }
-
-  renderCachedReviewerPrefixResults(query);
-
-  if (state.searchController) {
-    state.searchController.abort();
-  }
-
-  state.searchController = new AbortController();
-
-  try {
-    const response = await fetch(
-      "/api/commit/reviewers?query=" +
-        encodeURIComponent(query) +
-        "&limit=20&token=" +
-        encodeURIComponent(INTERACTIVE.token),
-      { signal: state.searchController.signal },
-    );
-    const result = await response.json();
-
-    if (!response.ok) {
-      throw new Error(result.error || response.statusText);
-    }
-
-    state.results = Array.isArray(result.reviewers) ? result.reviewers : [];
-    if (!result.rateLimited) {
-      state.searchCache.set(cacheKey, state.results);
-    }
-    state.activeResultIndex = state.results.length ? 0 : -1;
-    renderCommitReviewerResults();
-
-    if (result.rateLimited) {
-      const seconds = Math.max(
-        1,
-        Math.ceil(Number(result.retryAfterMs || 0) / 1000),
-      );
-      setCommitStatus(
-        `Phabricator ${getReviewerSearchTarget(query)} search is rate limited. Try again in about ${seconds} seconds, or press Enter to add an exact reviewer.`,
-        { error: true },
-      );
-      return;
-    }
-
-    if (state.results.length) {
-      setCommitStatus("Reviewer results loaded.");
-      return;
-    }
-
-    setCommitStatus(
-      `No matching ${getReviewerSearchTarget(query)} found. ${isReviewerGroupSearchQuery(query) ? "" : "Start group searches with #."}`,
-    );
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      return;
-    }
-
-    state.results = [];
-    renderCommitReviewerResults();
-    setCommitStatus(error && error.message ? error.message : String(error), {
-      error: true,
-    });
-  }
-}
-
-export function scheduleCommitReviewerSearch() {
-  const state = getCommitDialogState();
-
-  if (state.searchTimer) {
-    window.clearTimeout(state.searchTimer);
-  }
-
-  state.searchTimer = window.setTimeout(() => {
-    state.searchTimer = null;
-    searchCommitReviewers();
-  }, REVIEWER_SEARCH_DEBOUNCE_MS);
-}
-
-function moveCommitReviewerSelection(direction) {
-  const state = getCommitDialogState();
-  const results = state.visibleResults || [];
-
-  if (!results.length) {
-    return;
-  }
-
-  state.activeResultIndex =
-    (state.activeResultIndex + direction + results.length) % results.length;
-  renderCommitReviewerResults();
-}
-
 export function handleCommitReviewerInputKeydown(event) {
-  const state = getCommitDialogState();
-
-  if (event.key === "ArrowDown") {
-    event.preventDefault();
-    moveCommitReviewerSelection(1);
-    return;
-  }
-
-  if (event.key === "ArrowUp") {
-    event.preventDefault();
-    moveCommitReviewerSelection(-1);
-    return;
-  }
-
-  if (event.key === "Escape") {
-    setReviewerResultsExpanded(false);
-    return;
-  }
-
   if (event.key !== "Enter" && event.key !== ",") {
     return;
   }
 
   event.preventDefault();
-
-  const results = state.visibleResults || [];
-  const result = results[state.activeResultIndex];
-
-  if (result) {
-    addCommitReviewer(result);
-    return;
-  }
-
   addCommitReviewer(commitReviewerInput.value);
-}
-
-export function addCommitReviewerFromEvent(event) {
-  const option = event.target.closest(".commit-reviewer-option");
-
-  if (!option) {
-    return false;
-  }
-
-  const state = getCommitDialogState();
-  const reviewer = (state.visibleResults || [])[Number(option.dataset.index)];
-
-  if (reviewer) {
-    addCommitReviewer(reviewer);
-    commitReviewerInput.focus();
-  }
-
-  return true;
 }
 
 function renderCommitMetadata(metadata) {
@@ -529,15 +213,16 @@ function renderCommitMetadata(metadata) {
 
 export async function openCommitDialog() {
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
   uiState.commitDialogState = createCommitDialogState();
   commitSummary.value = "";
   commitReviewerInput.value = "";
-  commitReviewerList.replaceChildren();
-  setReviewerResultsExpanded(false);
   renderCommitReviewerPills();
   commitBranchStatus.textContent = "Loading checkout...";
   setCommitStatus("Ready to commit changes.");
@@ -565,16 +250,6 @@ export async function openCommitDialog() {
 }
 
 export function closeCommitDialog() {
-  const state = getCommitDialogState();
-
-  if (state.searchTimer) {
-    window.clearTimeout(state.searchTimer);
-  }
-
-  if (state.searchController) {
-    state.searchController.abort();
-  }
-
   commitDialog.close();
 }
 
@@ -595,7 +270,10 @@ export async function submitCommitDialog(event) {
   event.preventDefault();
 
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 

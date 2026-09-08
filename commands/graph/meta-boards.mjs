@@ -486,6 +486,27 @@ function normalizeRelationBugs(bugs = []) {
   }));
 }
 
+function normalizeBugComments(comments = []) {
+  return comments.map((comment, index) => {
+    const email = String(comment?.creator || comment?.author || "").trim();
+    const author = String(
+      comment?.creator_detail?.real_name ||
+      comment?.creator_detail?.name ||
+      email ||
+      "Unknown user",
+    ).trim();
+
+    return {
+      id: String(comment?.count ?? comment?.id ?? index + 1),
+      author,
+      email,
+      createdAt: String(comment?.creation_time || comment?.creation_date || "").trim(),
+      isPrivate: Boolean(comment?.is_private),
+      text: String(comment?.text ?? comment?.body ?? ""),
+    };
+  });
+}
+
 export async function getMetaBoardBugDetail({
   bugId,
   appConfig = defaultConfig,
@@ -531,6 +552,7 @@ export async function getMetaBoardBugDetail({
       .map((id) => relationById.get(id))
       .filter(Boolean)),
     description: getDescription(comments),
+    comments: normalizeBugComments(comments),
     notion: notion || null,
   };
 }

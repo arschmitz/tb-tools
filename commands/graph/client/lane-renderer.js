@@ -373,7 +373,15 @@ export function showCommitContextMenu(event, index, commit) {
     workingTree,
   };
   contextMenu.querySelectorAll("button[data-action]").forEach((button) => {
-    const hidden = workingTree ? button.dataset.action !== "prune" : false;
+    const sourceGraph = graphStates[index]?.graph;
+    const hasCopyDestination = graphStates.some(({ graph }, graphIndex) => (
+      graphIndex !== index &&
+      graph.repository === sourceGraph?.repository &&
+      (graph.checkout || "working") !== (sourceGraph?.checkout || "working")
+    ));
+    const hidden = workingTree
+      ? button.dataset.action !== "prune"
+      : button.dataset.action === "copy" && !hasCopyDestination;
 
     button.hidden = hidden;
     button.style.display = hidden ? "none" : "";
@@ -507,12 +515,12 @@ export function addLaneCommitRow({ svg, index, row, messageX, width }) {
   group.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      showDiff(state.graph, index, commit);
+      showDiff(state.graph, index, commit, { loadIntegration: true });
     }
   });
   group.addEventListener("click", (event) => {
     event.stopPropagation();
-    showDiff(state.graph, index, commit);
+    showDiff(state.graph, index, commit, { loadIntegration: true });
   });
   group.addEventListener("contextmenu", (event) => showCommitContextMenu(event, index, commit));
   svg.append(group);
@@ -592,12 +600,12 @@ export function decorateCommitRows(index) {
       commitGroup.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          showDiff(state.graph, index, commit);
+          showDiff(state.graph, index, commit, { loadIntegration: true });
         }
       });
       hitbox.addEventListener("click", (event) => {
         event.stopPropagation();
-        showDiff(state.graph, index, commit);
+        showDiff(state.graph, index, commit, { loadIntegration: true });
       });
       commitGroup.addEventListener("contextmenu", (event) => showCommitContextMenu(event, index, commit));
     }

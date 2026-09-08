@@ -19,6 +19,7 @@ import {
   uiState,
 } from "./config.js";
 import {
+  getActiveGraphIndex,
   hasActiveCommandSession,
   hasActiveTestSession,
   setMachCancelButton,
@@ -26,6 +27,7 @@ import {
   setUpdateBusy,
   setUpdateStatus,
 } from "./command-sessions.js";
+import { showSystemNotice } from "./system-dialog.js";
 
 const ANSI_COLORS = {
   30: "ansi-black",
@@ -286,6 +288,7 @@ function showOnlyTestOutputTab() {
     return;
   }
 
+  document.body.classList.remove("graph-view-active");
   document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
   document.querySelectorAll(".panel").forEach((panel) => panel.classList.remove("active"));
   const dashboardPanel = document.querySelector(".dashboard-panel");
@@ -653,9 +656,12 @@ function renderGraphTestSession(session) {
   }
 }
 
-export function openTestDialog() {
+export async function openTestDialog() {
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -702,7 +708,10 @@ export async function startGraphTestSession(event, overrideOptions) {
   }
 
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -736,6 +745,7 @@ export async function startGraphTestSession(event, overrideOptions) {
       body: JSON.stringify({
         token: INTERACTIVE.token,
         options,
+        graphIndex: getActiveGraphIndex(),
       }),
     });
     const result = await response.json();

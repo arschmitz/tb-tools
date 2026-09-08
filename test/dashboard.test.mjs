@@ -68,6 +68,12 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
       id: 1003,
       statusName: "Accepted",
     }),
+    makeRevision({
+      bugId: "1004",
+      dateModified: NOW - (36 * HOUR),
+      id: 1004,
+      statusName: "Needs Review",
+    }),
   ];
   const groupRevisions = [
     makeRevision({
@@ -109,6 +115,15 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
     ]],
     ["PHID-DREV-1003", [
       transaction({ authorPHID: ME, dateCreated: NOW - (4 * HOUR), type: "update" }),
+    ]],
+    ["PHID-DREV-1004", [
+      transaction({ authorPHID: ME, dateCreated: NOW - (36 * HOUR), type: "update" }),
+      transaction({
+        authorPHID: REVIEWER,
+        content: "Please clarify the intent in the comment.",
+        dateCreated: NOW - (8 * HOUR),
+        type: "comment",
+      }),
     ]],
     ["PHID-DREV-2001", [
       transaction({ authorPHID: ME, dateCreated: NOW - (20 * HOUR), type: "accept" }),
@@ -185,8 +200,18 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
     ],
     now: NOW,
     phab: async ({ params, route }) => {
-      if (route === "user.query") {
+      if (route === "user.query" && params.usernames) {
         return { result: [{ phid: ME, realName: "Me", userName: "me" }] };
+      }
+
+      if (route === "user.query" && params.phids) {
+        return {
+          result: params.phids.map((phid) => ({
+            phid,
+            realName: phid === OTHER ? "Other Author" : phid,
+            userName: phid === OTHER ? "other" : phid,
+          })),
+        };
       }
 
       if (route === "project.search") {
@@ -237,7 +262,7 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
     },
   });
 
-  assert.deepEqual(dashboard.ownNeedsRevision.map((patch) => patch.id), ["D1001"]);
+  assert.deepEqual(dashboard.ownNeedsRevision.map((patch) => patch.id), ["D1004", "D1001"]);
   assert.equal(dashboard.ownNeedsRevision[0].ageState, "fresh");
   assert.deepEqual(dashboard.ownNeedsReview.map((patch) => patch.id), ["D1002"]);
   assert.equal(dashboard.ownNeedsReview[0].ageState, "attention");
@@ -245,9 +270,17 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
     dashboard.directlyAssignedWaitingOnReview.map((patch) => patch.id),
     ["D2004"],
   );
+  assert.equal(
+    dashboard.directlyAssignedWaitingOnReview[0].authorName,
+    "Other Author",
+  );
   assert.deepEqual(
     dashboard.groupWaitingForFirstReview.map((patch) => patch.id),
     ["D2002"],
+  );
+  assert.equal(
+    dashboard.groupWaitingForFirstReview[0].authorName,
+    "Other Author",
   );
   assert.equal(dashboard.groupWaitingForFirstReview[0].ageState, "overdue");
   assert.deepEqual(dashboard.assignedBugs.map((bug) => bug.id), ["3001"]);
@@ -256,6 +289,99 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
   assert.equal(dashboard.inProgressBugs[0].hasPatch, true);
   assert.deepEqual(dashboard.needinfoBugs.map((bug) => bug.id), ["4001", "4002"]);
   assert.equal(dashboard.needinfoBugs[0].requestedBy, "reviewer@example.com");
+});
+
+test("dashboard batches every reviewer group into one Phabricator revision query", async () => {
+  const groups = [
+    { phid: "PHID-PROJ-one", fields: { name: "One", slug: "one" } },
+    { phid: "PHID-PROJ-two", fields: { name: "Two", slug: "two" } },
+    { phid: "PHID-PROJ-three", fields: { name: "Three", slug: "three" } },
+  ];
+  const groupQueries = [];
+
+  await getDashboardData({
+    appConfig: {
+      bugzilla: { user: "me@example.com" },
+      phabricator: { user: "me" },
+    },
+    getAssignedOpenBugs: async () => [],
+    getNeedinfoOpenBugs: async () => [],
+    getBugsByIds: async () => [],
+    getBugsWithAttachmentsByIds: async () => [],
+    phab: async ({ params, route }) => {
+      if (route === "user.query" && params.usernames) {
+        return { result: [{ phid: ME, realName: "Me", userName: "me" }] };
+      }
+
+      if (route === "project.search") {
+        return { result: { data: groups } };
+      }
+
+      if (route === "differential.query" && params.authors) {
+        return { result: [] };
+      }
+
+      if (route === "differential.query" && params.reviewers) {
+        if (!params.reviewers.includes(ME)) {
+          groupQueries.push(params.reviewers);
+        }
+
+        return { result: [] };
+      }
+
+      if (route === "differential.getrevisioncomments" || route === "user.query") {
+        return { result: route === "user.query" ? [] : {} };
+      }
+
+      throw new Error(`Unexpected request: ${route}`);
+    },
+  });
+
+  assert.deepEqual(groupQueries, [[
+    "PHID-PROJ-one",
+    "PHID-PROJ-two",
+    "PHID-PROJ-three",
+  ]]);
+});
+
+test("dashboard reuses fresh persisted reviewer groups without identity lookups", async () => {
+  const cached = {
+    currentUser: { phid: ME, realName: "Me", userName: "me" },
+    fresh: true,
+    groups: [{
+      name: "Reviewers",
+      phid: GROUP,
+      slug: "reviewers",
+    }],
+  };
+  const requests = [];
+
+  await getDashboardData({
+    appConfig: {
+      bugzilla: { user: "me@example.com" },
+      phabricator: { user: "me" },
+    },
+    getAssignedOpenBugs: async () => [],
+    getBugsByIds: async () => [],
+    getBugsWithAttachmentsByIds: async () => [],
+    getNeedinfoOpenBugs: async () => [],
+    loadReviewerGroupCache: async () => cached,
+    phab: async (request) => {
+      requests.push(request);
+      assert.notEqual(request.route, "project.search");
+      assert.notEqual(request.route, "user.query");
+      return { result: [] };
+    },
+    saveReviewerGroupCache: async () => {
+      throw new Error("A fresh cache must not be rewritten.");
+    },
+  });
+
+  assert.deepEqual(requests.map((request) => request.route), [
+    "differential.query",
+    "differential.query",
+    "differential.query",
+  ]);
 });
 
 test("interactive dashboard endpoint shares an in-flight result and caches it", async (t) => {

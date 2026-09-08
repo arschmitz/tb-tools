@@ -16,6 +16,7 @@ import {
 } from "./config.js";
 import {
   applyGraphSnapshot,
+  getActiveGraphIndex,
   getSnapshotLimits,
   hasActiveCommandSession,
   hasActivePatchSession,
@@ -24,6 +25,7 @@ import {
   setUpdateBusy,
   setUpdateStatus,
 } from "./command-sessions.js";
+import { showSystemNotice } from "./system-dialog.js";
 
 export function updatePatchDialogFields() {
   if (patchRaw.checked) {
@@ -178,9 +180,12 @@ export async function pollGraphPatchSession() {
   }
 }
 
-export function openPatchDialog() {
+export async function openPatchDialog() {
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -255,7 +260,10 @@ export async function startGraphPatchSession(event) {
   event.preventDefault();
 
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -280,6 +288,7 @@ export async function startGraphPatchSession(event) {
       body: JSON.stringify({
         token: INTERACTIVE.token,
         options: getPatchDialogOptions(),
+        graphIndex: getActiveGraphIndex(),
         snapshotLimits: getSnapshotLimits(),
       }),
     });

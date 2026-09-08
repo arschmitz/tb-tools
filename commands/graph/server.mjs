@@ -30,6 +30,8 @@ import {
   DEFAULT_CLIENT_DISCONNECT_GRACE_MS,
   DEFAULT_BROWSER_SHUTDOWN_GRACE_MS,
   DEFAULT_DASHBOARD_CACHE_MS,
+  DEFAULT_GRAPH_INTEGRATION_CACHE_MS,
+  DEFAULT_GRAPH_REVIEW_CACHE_MS,
   DEFAULT_HEARTBEAT_TIMEOUT_MS,
   DEFAULT_META_BOARD_CACHE_MS,
   DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS,
@@ -71,9 +73,6 @@ import {
 import {
   createGraphCommit,
   getGraphCommitMetadata,
-  getReviewerSearchRoute,
-  isReviewerSearchRateLimitError,
-  searchGraphCommitReviewers,
 } from "./commit.mjs";
 import {
   amendCommitMessage,
@@ -87,6 +86,7 @@ import {
   getCheckoutGraphSnapshot,
   getCurrentGraphBase,
   getGraphCommitIntegrationStatus,
+  isGraphCommitOnOriginMain,
   getGraphOriginMainStatus,
   getGraphRustUpstreamStatus,
   getInteractiveRebasePlan,
@@ -100,19 +100,36 @@ import {
   startInteractiveRebase,
   unshelfGraphShelves,
 } from "./actions.mjs";
+import { copyGraphCommitsBetweenCheckouts } from "./checkout-transfer.mjs";
+import { syncReviewCheckoutFromWorking } from "./review-sync.mjs";
 import { getGraphCommitReview } from "./reviews.mjs";
 import {
   applyGraphPatchUpdateComment,
+  applyGraphPatchUpdateRecommendedChange,
+  acceptGraphPatchUpdateChange,
+  amendGraphPatchUpdateChanges,
   createGraphPatchUpdateSession,
   followUpGraphPatchUpdateComment,
-  getGraphPatchUpdateDraftBlock,
-  getGraphPatchUpdateSubmitMessage,
   isGraphAiEnabled,
   markGraphPatchUpdateCommentHandled,
   prepareGraphPatchUpdateSession,
+  revertGraphPatchUpdateChange,
+  resolveGraphPatchUpdateWorkingCheckout,
   saveGraphPatchUpdateReply,
   serializeGraphPatchUpdateSession,
+  steerGraphPatchUpdateSession,
 } from "./patch-update.mjs";
+import {
+  addGraphPatchReviewInline,
+  applyGraphPatchReviewSuggestion,
+  createGraphPatchReviewSession,
+  getGraphPatchReviewContext,
+  prepareGraphPatchReviewSession,
+  serializeGraphPatchReviewSession,
+  skipGraphPatchReviewIssue,
+  steerGraphPatchReviewSession,
+  submitGraphPatchReview,
+} from "./patch-review.mjs";
 import { saveGraphPatchUpdateMemory as defaultSavePatchUpdateMemory } from "./patch-update-memory.mjs";
 import {
   getGraphPatchUpdateHandledCommentIds as defaultGetPatchUpdateHandledCommentIds,
@@ -137,7 +154,6 @@ import {
 } from "./testing.mjs";
 import { createPhabricatorWebSession } from "./phab-auth.mjs";
 
-const REVIEWER_RATE_LIMIT_COOLDOWN_MS = 60_000;
 const DASHBOARD_RATE_LIMIT_COOLDOWN_MS = 60_000;
 const DEFAULT_NOTION_STORY_CACHE_MS = 10 * 60 * 1000;
 const DEFAULT_SPRINT_HISTORY_CACHE_MS = 5 * 60 * 1000;
@@ -259,6 +275,9 @@ export async function startInteractiveGraphServer({
   getPatchUpdateHandledCommentIds = defaultGetPatchUpdateHandledCommentIds,
   persistPatchUpdateHandledComment = defaultPersistPatchUpdateHandledComment,
   savePatchUpdateMemory = defaultSavePatchUpdateMemory,
+  acceptPatchUpdateChange = acceptGraphPatchUpdateChange,
+  preparePatchUpdateSession = prepareGraphPatchUpdateSession,
+  syncReviewCheckout = syncReviewCheckoutFromWorking,
   serverFactory = createServer,
 }) {
   const serverGraphs = graphs.map((graph) => ({
@@ -270,6 +289,7 @@ export async function startInteractiveGraphServer({
   }));
   const submitSessions = new Map();
   const patchUpdateSessions = new Map();
+  const patchReviewSessions = new Map();
   const machSessions = new Map();
   const lintSessions = new Map();
   const newPatchSessions = new Map();
@@ -278,9 +298,10 @@ export async function startInteractiveGraphServer({
   const landSessions = new Map();
   const testSessions = new Map();
   const rebaseSessions = new Map();
-  const reviewerSearchCache = new Map();
-  const reviewerSearchInflight = new Map();
-  const reviewerSearchRouteCooldowns = new Map();
+  const commitIntegrationCache = new Map();
+  const commitIntegrationInflight = new Map();
+  const commitReviewCache = new Map();
+  const commitReviewInflight = new Map();
   const notionStoryCache = new Map();
   const notionStoryInflight = new Map();
   let notionDisabled = false;
@@ -300,9 +321,46 @@ export async function startInteractiveGraphServer({
   let browserMonitorStarted = false;
   let lastBrowserActivity = 0;
   let shuttingDown = false;
-  let rustUpstreamStatus;
-  let rustUpstreamStatusCheckedAt = 0;
-  let rustUpstreamStatusPromise = null;
+  const rustUpstreamStatuses = new Map();
+  const rustUpstreamStatusCheckedAt = new Map();
+  const rustUpstreamStatusPromises = new Map();
+
+  async function completePatchUpdateComment({
+    event = "Review comment marked handled",
+    itemId,
+    session,
+  }) {
+    const item = session.items.find((candidate) => candidate.id === String(itemId));
+
+    if (!item) {
+      const error = new Error("Unknown review comment.");
+
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (item.changeApplied && !item.changeAccepted) {
+      const error = new Error(
+        "Keep or revert the prepared working-tree change before marking this comment handled.",
+      );
+
+      error.statusCode = 409;
+      throw error;
+    }
+
+    await persistPatchUpdateHandledComment({
+      revision: session.revision,
+      itemId: item.id,
+    });
+    markGraphPatchUpdateCommentHandled({ session, itemId: item.id });
+    await savePatchUpdateMemory({ event, session });
+    void applyGraphPatchUpdateRecommendedChange({
+      session,
+      runCommand,
+      saveMemory: savePatchUpdateMemory,
+    }).catch(() => {});
+    return item;
+  }
 
   function clearNoClientCloseTimer() {
     if (!noClientCloseTimer) {
@@ -479,6 +537,77 @@ export async function startInteractiveGraphServer({
     return snapshot;
   }
 
+  function getCommitCacheKey(graph, hash) {
+    return `${graph.path}\u0000${hash}`;
+  }
+
+  async function getCachedCommitData({
+    cache,
+    cacheMs,
+    getValue,
+    inflight,
+    key,
+    shouldCache = () => true,
+  }) {
+    const now = Date.now();
+    const cached = cache.get(key);
+
+    if (cached && now - cached.checkedAt < cacheMs) {
+      return cached.value;
+    }
+
+    if (inflight.has(key)) {
+      return inflight.get(key);
+    }
+
+    const request = Promise.resolve(getValue())
+      .then((value) => {
+        if (shouldCache(value)) {
+          cache.set(key, { checkedAt: Date.now(), value });
+        }
+
+        return value;
+      })
+      .finally(() => inflight.delete(key));
+
+    inflight.set(key, request);
+    return request;
+  }
+
+  async function getServerCommitIntegration(graph, hash) {
+    return getCachedCommitData({
+      cache: commitIntegrationCache,
+      cacheMs: DEFAULT_GRAPH_INTEGRATION_CACHE_MS,
+      getValue: () => getGraphCommitIntegrationStatus({
+        graph,
+        hash,
+        runCommand,
+        getBug,
+        phab,
+        getNotionStoriesByBugId: getServerNotionStoriesByBugId,
+      }),
+      inflight: commitIntegrationInflight,
+      key: getCommitCacheKey(graph, hash),
+      shouldCache: (value) => !value?.phabricator?.error,
+    });
+  }
+
+  async function getServerCommitReview(graph, hash) {
+    return getCachedCommitData({
+      cache: commitReviewCache,
+      cacheMs: DEFAULT_GRAPH_REVIEW_CACHE_MS,
+      getValue: () => getGraphCommitReview({
+        graph,
+        hash,
+        getWebSuggestions: phabWebSession.getSuggestions,
+        runCommand,
+        phab,
+      }),
+      inflight: commitReviewInflight,
+      key: getCommitCacheKey(graph, hash),
+    });
+  }
+
   function getRequestLimit(value) {
     return Math.max(1, Number(value || pageSize) || pageSize);
   }
@@ -535,6 +664,8 @@ export async function startInteractiveGraphServer({
     if (graph.error) {
       status = {
         label: graph.label,
+        checkout: graph.checkout || "working",
+        repository: graph.repository || graph.label,
         path: graph.path,
         branch: DEFAULT_BRANCH,
         state: "error",
@@ -550,6 +681,8 @@ export async function startInteractiveGraphServer({
       } catch (error) {
         status = {
           label: graph.label,
+          checkout: graph.checkout || "working",
+          repository: graph.repository || graph.label,
           path: graph.path,
           branch: DEFAULT_BRANCH,
           state: "error",
@@ -559,6 +692,12 @@ export async function startInteractiveGraphServer({
       }
     }
 
+    status = {
+      ...status,
+      checkout: status.checkout || getGraphCheckoutMode(graph),
+      repository: status.repository || graph.repository || graph.label,
+    };
+
     graph.originMainStatus = status;
     graph.originMainStatusCheckedAt = now;
     return status;
@@ -567,10 +706,12 @@ export async function startInteractiveGraphServer({
   async function getServerOriginMainStatuses({
     force = false,
     waitForRust = false,
+    checkout = "working",
   } = {}) {
+    const selectedGraphs = getServerGraphsForCheckout(checkout);
     const statuses = (
       await Promise.all(
-        serverGraphs.map((graph) =>
+        selectedGraphs.map((graph) =>
           getServerOriginMainStatus(graph, { force }),
         ),
       )
@@ -578,170 +719,123 @@ export async function startInteractiveGraphServer({
     statuses.push(await getServerRustUpstreamStatus({
       force,
       wait: waitForRust,
+      checkout,
     }));
 
     return statuses;
   }
 
-  function getServerRustUpstreamCheckingStatus() {
+  function getGraphCheckoutMode(graph = {}) {
+    return graph.checkout === "review" ? "review" : "working";
+  }
+
+  function getGraphRepository(graph = {}) {
+    return String(graph.repository || graph.label || "").trim().toLowerCase();
+  }
+
+  function getServerGraphsForCheckout(checkout = "working") {
+    const selectedCheckout = checkout === "review" ? "review" : "working";
+    const matchingGraphs = serverGraphs.filter(
+      (graph) => getGraphCheckoutMode(graph) === selectedCheckout,
+    );
+
+    return matchingGraphs.length || selectedCheckout !== "working"
+      ? matchingGraphs
+      : serverGraphs;
+  }
+
+  function getServerRustUpstreamCheckingStatus(checkout = "working") {
     return {
       type: "rust-upstream",
       label: "rust",
+      checkout,
       state: "checking",
       upToDate: null,
       message: "Checking Rust dependencies against Firefox remote main.",
     };
   }
 
-  async function refreshServerRustUpstreamStatus() {
-    if (rustUpstreamStatusPromise) {
-      return rustUpstreamStatusPromise;
+  async function refreshServerRustUpstreamStatus(checkout = "working") {
+    if (rustUpstreamStatusPromises.has(checkout)) {
+      return rustUpstreamStatusPromises.get(checkout);
     }
 
-    rustUpstreamStatus =
-      rustUpstreamStatus || getServerRustUpstreamCheckingStatus();
-    rustUpstreamStatusPromise = (async () => {
+    const graphs = getServerGraphsForCheckout(checkout);
+    const commGraph = graphs.find((graph) => getGraphRepository(graph) === "comm");
+    const firefoxGraph = graphs.find((graph) => getGraphRepository(graph) === "firefox");
+    rustUpstreamStatuses.set(
+      checkout,
+      rustUpstreamStatuses.get(checkout) || getServerRustUpstreamCheckingStatus(checkout),
+    );
+    const promise = (async () => {
       try {
-        rustUpstreamStatus = await getRustUpstreamStatus({
-          graphs: serverGraphs,
+        const status = await getRustUpstreamStatus({
+          graphs,
+          commGraph,
+          firefoxGraph,
           runCommand,
         });
+        rustUpstreamStatuses.set(checkout, { ...status, checkout });
       } catch (error) {
-        rustUpstreamStatus = {
+        rustUpstreamStatuses.set(checkout, {
           type: "rust-upstream",
           label: "rust",
+          checkout,
           state: "error",
           upToDate: false,
           message: error && error.message ? error.message : String(error),
-        };
+        });
       } finally {
-        rustUpstreamStatusCheckedAt = Date.now();
-        rustUpstreamStatusPromise = null;
+        rustUpstreamStatusCheckedAt.set(checkout, Date.now());
+        rustUpstreamStatusPromises.delete(checkout);
       }
 
-      return rustUpstreamStatus;
+      return rustUpstreamStatuses.get(checkout);
     })();
+    rustUpstreamStatusPromises.set(checkout, promise);
 
-    return rustUpstreamStatusPromise;
+    return promise;
   }
 
-  function isFreshRustUpstreamStatus(now) {
+  function isFreshRustUpstreamStatus(checkout, now) {
+    const status = rustUpstreamStatuses.get(checkout);
+
     return (
-      rustUpstreamStatus &&
-      rustUpstreamStatus.state !== "checking" &&
-      rustUpstreamStatusCheckedAt &&
-      now - rustUpstreamStatusCheckedAt < DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS
+      status &&
+      status.state !== "checking" &&
+      rustUpstreamStatusCheckedAt.get(checkout) &&
+      now - rustUpstreamStatusCheckedAt.get(checkout) < DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS
     );
   }
 
   async function getServerRustUpstreamStatus({
     force = false,
     wait = false,
+    checkout = "working",
   } = {}) {
     const now = Date.now();
 
-    if (!force && isFreshRustUpstreamStatus(now)) {
-      return rustUpstreamStatus;
+    if (!force && isFreshRustUpstreamStatus(checkout, now)) {
+      return rustUpstreamStatuses.get(checkout);
     }
 
     if (force) {
       if (wait) {
-        return refreshServerRustUpstreamStatus();
+        return refreshServerRustUpstreamStatus(checkout);
       }
 
-      rustUpstreamStatus = getServerRustUpstreamCheckingStatus();
-      refreshServerRustUpstreamStatus();
-      return rustUpstreamStatus;
+      rustUpstreamStatuses.set(checkout, getServerRustUpstreamCheckingStatus(checkout));
+      refreshServerRustUpstreamStatus(checkout);
+      return rustUpstreamStatuses.get(checkout);
     }
 
     if (wait) {
-      return refreshServerRustUpstreamStatus();
+      return refreshServerRustUpstreamStatus(checkout);
     }
 
-    refreshServerRustUpstreamStatus();
-    return rustUpstreamStatus || getServerRustUpstreamCheckingStatus();
-  }
-
-  async function getServerReviewerSearch({ query = "", limit = 30 } = {}) {
-    const normalizedLimit = Math.max(1, Math.min(100, Number(limit) || 30));
-    const normalizedQuery = String(query || "")
-      .trim()
-      .toLowerCase();
-    const key = `${normalizedLimit}:${normalizedQuery}`;
-    const now = Date.now();
-    const cached = reviewerSearchCache.get(key);
-
-    if (
-      cached &&
-      now - cached.checkedAt < DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS
-    ) {
-      return cached.result;
-    }
-
-    if (reviewerSearchInflight.has(key)) {
-      return reviewerSearchInflight.get(key);
-    }
-
-    const limitedRoutes = new Map();
-    const searchPhab = async (request) => {
-      const route = request.route;
-      const requestNow = Date.now();
-      const cooldownUntil = reviewerSearchRouteCooldowns.get(route) || 0;
-
-      if (cooldownUntil > requestNow) {
-        const error = new Error(
-          `Phabricator ${route} is temporarily rate limited.`,
-        );
-        error.statusCode = 429;
-        error.retryAfterMs = cooldownUntil - requestNow;
-        limitedRoutes.set(route, cooldownUntil);
-        throw error;
-      }
-
-      try {
-        return await phab(request);
-      } catch (error) {
-        if (isReviewerSearchRateLimitError(error)) {
-          const retryAt = Date.now() + REVIEWER_RATE_LIMIT_COOLDOWN_MS;
-          reviewerSearchRouteCooldowns.set(route, retryAt);
-          limitedRoutes.set(route, retryAt);
-        }
-
-        throw error;
-      }
-    };
-
-    const promise = searchGraphCommitReviewers({
-      query,
-      limit: normalizedLimit,
-      phab: searchPhab,
-    })
-      .then((reviewers) => {
-        const retryAt = Math.max(0, ...limitedRoutes.values());
-        const result = {
-          reviewers,
-          rateLimited: Boolean(limitedRoutes.size),
-          rateLimitedRoute: limitedRoutes.size
-            ? getReviewerSearchRoute(query)
-            : "",
-          retryAfterMs: retryAt ? Math.max(0, retryAt - Date.now()) : 0,
-        };
-
-        if (!result.rateLimited) {
-          reviewerSearchCache.set(key, {
-            checkedAt: Date.now(),
-            result,
-          });
-        }
-
-        return result;
-      })
-      .finally(() => {
-        reviewerSearchInflight.delete(key);
-      });
-
-    reviewerSearchInflight.set(key, promise);
-    return promise;
+    refreshServerRustUpstreamStatus(checkout);
+    return rustUpstreamStatuses.get(checkout) ||
+      getServerRustUpstreamCheckingStatus(checkout);
   }
 
   function getNotionStoryCacheMs() {
@@ -1180,31 +1274,42 @@ export async function startInteractiveGraphServer({
 
         validateToken(body.token, token);
         noteBrowserActivity();
-        const graphIndex = Number(body.graphIndex);
-        const graph = serverGraphs[graphIndex];
+        const requestedGraphIndex = Number(body.graphIndex);
+        const requestedGraph = serverGraphs[requestedGraphIndex];
 
-        if (!graph) {
+        if (!requestedGraph) {
           const error = new Error("Unknown graph checkout.");
 
           error.statusCode = 404;
           throw error;
         }
 
+        // A dashboard card can be opened while either checkout is displayed,
+        // but author-side patch work always belongs to the working comm clone.
+        const workingCheckout = resolveGraphPatchUpdateWorkingCheckout({
+          graphs: serverGraphs,
+        });
+
         const session = createGraphPatchUpdateSession({
-          graph,
-          graphIndex,
+          graph: workingCheckout.graph,
+          graphIndex: workingCheckout.graphIndex,
           revision: body.revision,
           aiEnabled: isGraphAiEnabled(appConfig),
           codexCommand: appConfig?.ai?.command,
+          snapshotLimit: getRequestLimit(body.snapshotLimit),
         });
 
         patchUpdateSessions.set(session.id, session);
-        void prepareGraphPatchUpdateSession({
+        void preparePatchUpdateSession({
           session,
-          graphs: serverGraphs,
-          getRustUpstreamStatus: () => getServerRustUpstreamStatus({ wait: true }),
+          graphs: workingCheckout.graphs,
+          getRustUpstreamStatus: () => getServerRustUpstreamStatus({
+            checkout: "working",
+            wait: true,
+          }),
           getSnapshot: getServerGraphSnapshot,
           getHandledCommentIds: getPatchUpdateHandledCommentIds,
+          getReview: ({ graph, hash }) => getServerCommitReview(graph, hash),
           phab,
           runCommand,
           saveMemory: savePatchUpdateMemory,
@@ -1213,6 +1318,153 @@ export async function startInteractiveGraphServer({
         sendJson(response, 200, {
           ok: true,
           ...serializeGraphPatchUpdateSession(session),
+        });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/review") {
+        const body = await readRequestJson(request);
+
+        validateToken(body.token, token);
+        noteBrowserActivity();
+        const session = createGraphPatchReviewSession({
+          graphs: serverGraphs,
+          revision: body.revision,
+          aiEnabled: isGraphAiEnabled(appConfig),
+          codexCommand: appConfig?.ai?.command,
+          snapshotLimit: getRequestLimit(body.snapshotLimit),
+        });
+
+        patchReviewSessions.set(session.id, session);
+        void prepareGraphPatchReviewSession({
+          session,
+          getSnapshot: getServerGraphSnapshot,
+          getReview: ({ graph, hash }) => getServerCommitReview(graph, hash),
+          runCommand,
+        }).catch(() => {});
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphPatchReviewSession(session),
+        });
+        return;
+      }
+
+      const patchReviewContextMatch = url.pathname.match(/^\/api\/review\/([^/]+)\/context$/);
+      if (request.method === "GET" && patchReviewContextMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        noteBrowserActivity();
+        const session = patchReviewSessions.get(
+          decodeURIComponent(patchReviewContextMatch[1]),
+        );
+
+        if (!session) {
+          const error = new Error("Unknown patch review session.");
+
+          error.statusCode = 404;
+          throw error;
+        }
+
+        sendJson(response, 200, {
+          ok: true,
+          ...getGraphPatchReviewContext(session),
+        });
+        return;
+      }
+
+      const patchReviewStatusMatch = url.pathname.match(/^\/api\/review\/([^/]+)$/);
+      if (request.method === "GET" && patchReviewStatusMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        noteBrowserActivity();
+        const session = patchReviewSessions.get(
+          decodeURIComponent(patchReviewStatusMatch[1]),
+        );
+
+        if (!session) {
+          const error = new Error("Unknown patch review session.");
+
+          error.statusCode = 404;
+          throw error;
+        }
+
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphPatchReviewSession(session),
+        });
+        return;
+      }
+
+      const patchReviewActionMatch = url.pathname.match(
+        /^\/api\/review\/([^/]+)\/(apply|inline|skip|submit|steer)$/,
+      );
+      if (request.method === "POST" && patchReviewActionMatch) {
+        const body = await readRequestJson(request);
+
+        validateToken(body.token, token);
+        noteBrowserActivity();
+        const session = patchReviewSessions.get(
+          decodeURIComponent(patchReviewActionMatch[1]),
+        );
+
+        if (!session) {
+          const error = new Error("Unknown patch review session.");
+
+          error.statusCode = 404;
+          throw error;
+        }
+
+        const [, , action] = patchReviewActionMatch;
+
+        if (action === "apply") {
+          await applyGraphPatchReviewSuggestion({
+            session,
+            itemId: body.itemId,
+          });
+        } else if (action === "inline") {
+          await addGraphPatchReviewInline({
+            session,
+            itemId: body.itemId,
+            kind: body.kind,
+            message: body.message,
+            codeSuggestion: body.codeSuggestion,
+            createInlineComment: ({
+              revision,
+              filePath,
+              isNewFile,
+              lineNumber,
+              lineLength,
+              content,
+            }) => phab({
+              route: "differential.createinline",
+              params: {
+                revisionID: Number(String(revision).replace(/^D/i, "")),
+                filePath,
+                isNewFile,
+                lineNumber,
+                lineLength,
+                content,
+              },
+            }),
+          });
+        } else if (action === "skip") {
+          skipGraphPatchReviewIssue({ session, itemId: body.itemId });
+        } else if (action === "steer") {
+          await steerGraphPatchReviewSession({
+            session,
+            instruction: body.instruction,
+          });
+        } else {
+          await submitGraphPatchReview({
+            session,
+            outcome: body.outcome,
+            message: body.message,
+            postComment,
+            publishReview: phabWebSession.publishRevisionReview,
+          });
+        }
+
+        sendJson(response, 200, {
+          ok: true,
+          ...serializeGraphPatchReviewSession(session),
         });
         return;
       }
@@ -1240,7 +1492,7 @@ export async function startInteractiveGraphServer({
       }
 
       const patchUpdateActionMatch = url.pathname.match(
-        /^\/api\/patch-update\/([^/]+)\/(apply|handled|comment|feedback)$/,
+        /^\/api\/patch-update\/([^/]+)\/(amend|apply|keep|revert|handled|comment|feedback|steer)$/,
       );
       if (request.method === "POST" && patchUpdateActionMatch) {
         const body = await readRequestJson(request);
@@ -1260,14 +1512,48 @@ export async function startInteractiveGraphServer({
 
         const [, , action] = patchUpdateActionMatch;
 
-        if (action === "apply") {
+        if (action === "amend") {
+          await amendGraphPatchUpdateChanges({
+            session,
+            runCommand,
+            saveMemory: savePatchUpdateMemory,
+          });
+          session.snapshot = await getServerGraphSnapshot(
+            session.graph,
+            getRequestLimit(body.snapshotLimit),
+          );
+        } else if (action === "steer") {
+          await steerGraphPatchUpdateSession({
+            session,
+            instruction: body.instruction,
+          });
+        } else if (action === "apply") {
           void applyGraphPatchUpdateComment({
             session,
             itemId: body.itemId,
-            persistHandledComment: persistPatchUpdateHandledComment,
             runCommand,
             saveMemory: savePatchUpdateMemory,
           }).catch(() => {});
+        } else if (action === "keep") {
+          await acceptPatchUpdateChange({
+            session,
+            itemId: body.itemId,
+            runCommand,
+            saveMemory: savePatchUpdateMemory,
+          });
+          await completePatchUpdateComment({
+            event: "Source change amended and review comment marked handled",
+            itemId: body.itemId,
+            session,
+          });
+          session.message = "Source change was amended into the current commit and the review comment was marked handled.";
+        } else if (action === "revert") {
+          await revertGraphPatchUpdateChange({
+            session,
+            itemId: body.itemId,
+            runCommand,
+            saveMemory: savePatchUpdateMemory,
+          });
         } else if (action === "feedback") {
           if (!session.aiEnabled) {
             const error = new Error("AI patch review is not enabled for this console.");
@@ -1283,21 +1569,23 @@ export async function startInteractiveGraphServer({
             throw error;
           }
 
-          void followUpGraphPatchUpdateComment({
-            session,
-            itemId: body.itemId,
-            instruction: body.instruction,
-            runCommand,
-            saveMemory: savePatchUpdateMemory,
-          }).catch(() => {});
+          void (async () => {
+            await followUpGraphPatchUpdateComment({
+              session,
+              itemId: body.itemId,
+              instruction: body.instruction,
+              runCommand,
+              saveMemory: savePatchUpdateMemory,
+            });
+            await applyGraphPatchUpdateRecommendedChange({
+              session,
+              runCommand,
+              saveMemory: savePatchUpdateMemory,
+            });
+          })().catch(() => {});
         } else if (action === "handled") {
-          await persistPatchUpdateHandledComment({
-            revision: session.revision,
+          await completePatchUpdateComment({
             itemId: body.itemId,
-          });
-          markGraphPatchUpdateCommentHandled({ session, itemId: body.itemId });
-          await savePatchUpdateMemory({
-            event: "Review comment marked handled",
             session,
           });
         } else {
@@ -1320,41 +1608,52 @@ export async function startInteractiveGraphServer({
             throw error;
           }
 
-          if (typeof phabWebSession.saveRevisionDraft !== "function") {
+          if (item.changeApplied && !item.changeAccepted) {
             const error = new Error(
-              "The authenticated Phabricator session cannot save reply drafts.",
+              "Keep or revert the prepared working-tree change before posting a reply.",
             );
 
-            error.statusCode = 501;
+            error.statusCode = 409;
+            throw error;
+          }
+
+          if (item.type !== "inline" || !item.parentCommentPHID) {
+            const error = new Error(
+              "This is revision-level feedback, not an inline thread. " +
+                "TB Tools will not post it as a detached reply.",
+            );
+
+            error.statusCode = 409;
             throw error;
           }
 
           const previousDraftReply = item.draftReply;
           const previousDraftSaved = item.draftSaved;
+          let replyPosted = false;
 
-          item.draftReply = message;
-          item.draftSaved = false;
           try {
-            await phabWebSession.saveRevisionDraft({
+            await phabWebSession.postInlineReply({
+              commentPHID: item.parentCommentPHID,
+              message,
               revision: session.revision,
-              draftBlock: getGraphPatchUpdateDraftBlock(session),
             });
-            await persistPatchUpdateHandledComment({
-              revision: session.revision,
-              itemId: item.id,
-            });
+            replyPosted = true;
             saveGraphPatchUpdateReply({
               session,
               itemId: item.id,
               message,
             });
-            await savePatchUpdateMemory({
-              event: "Phabricator reply draft saved",
+            await completePatchUpdateComment({
+              event: "Phabricator reply draft saved and review comment marked handled",
+              itemId: item.id,
               session,
             });
+            session.message = "Reply draft saved in Phabricator and the review comment was marked handled.";
           } catch (error) {
-            item.draftReply = previousDraftReply;
-            item.draftSaved = previousDraftSaved;
+            if (!replyPosted) {
+              item.draftReply = previousDraftReply;
+              item.draftSaved = previousDraftSaved;
+            }
             throw error;
           }
         }
@@ -1674,6 +1973,7 @@ export async function startInteractiveGraphServer({
         const statuses = await getServerOriginMainStatuses({
           force: url.searchParams.get("force") === "1",
           waitForRust: url.searchParams.get("wait") === "1",
+          checkout: url.searchParams.get("checkout") || "working",
         });
 
         sendJson(response, 200, { ok: true, statuses });
@@ -1897,14 +2197,7 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        const integration = await getGraphCommitIntegrationStatus({
-          graph,
-          hash,
-          runCommand,
-          getBug,
-          phab,
-          getNotionStoriesByBugId: getServerNotionStoriesByBugId,
-        });
+        const integration = await getServerCommitIntegration(graph, hash);
         sendJson(response, 200, { ok: true, ...integration });
         return;
       }
@@ -1937,13 +2230,7 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        const review = await getGraphCommitReview({
-          graph,
-          hash,
-          getWebSuggestions: phabWebSession.getSuggestions,
-          runCommand,
-          phab,
-        });
+        const review = await getServerCommitReview(graph, hash);
         sendJson(response, 200, { ok: true, ...review });
         return;
       }
@@ -1998,7 +2285,7 @@ export async function startInteractiveGraphServer({
         const graph = serverGraphs[Number(diffMatch[1])];
         const hash = decodeURIComponent(diffMatch[2]);
 
-        if (!graph?.knownHashes.has(hash)) {
+        if (!graph || (!isWorkingTreeCommitHash(hash) && !graph.knownHashes.has(hash))) {
           sendJson(response, 404, {
             ok: false,
             error: "Commit has not been loaded by this graph.",
@@ -2051,6 +2338,63 @@ export async function startInteractiveGraphServer({
           getRequestLimit(body.snapshotLimit),
         );
         sendJson(response, 200, { ok: true, ...result, snapshot });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/checkout-transfer") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        noteBrowserActivity();
+        const sourceIndex = Number(body.sourceGraphIndex);
+        const destinationIndex = Number(body.destinationGraphIndex);
+        const source = serverGraphs[sourceIndex];
+        const destination = serverGraphs[destinationIndex];
+        const hash = String(body.hash || "");
+
+        if (!source || !destination) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Unknown graph checkout.",
+          });
+          return;
+        }
+
+        if (!source.knownHashes.has(hash)) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Commit has not been loaded by this graph.",
+          });
+          return;
+        }
+
+        const result = await copyGraphCommitsBetweenCheckouts({
+          source,
+          destination,
+          hash,
+          mode: body.mode,
+          branch: body.branch,
+          discardDirty: body.discardDirty === true,
+          runCommand,
+        });
+        const snapshots = await getServerGraphSnapshots(body);
+
+        sendJson(response, 200, { ok: true, ...result, snapshots });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/review-sync") {
+        const body = await readRequestJson(request);
+
+        validateToken(body.token, token);
+        noteBrowserActivity();
+        const result = await syncReviewCheckout({
+          graphs: serverGraphs,
+          confirmation: body.confirmation,
+          runCommand,
+        });
+        const snapshots = await getServerGraphSnapshots(body);
+
+        sendJson(response, 200, { ok: true, ...result, snapshots });
         return;
       }
 
@@ -2170,12 +2514,11 @@ export async function startInteractiveGraphServer({
       ) {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
-        const reviewerSearch = await getServerReviewerSearch({
-          query: url.searchParams.get("query") || "",
-          limit: url.searchParams.get("limit") || 30,
+        sendJson(response, 200, {
+          ok: true,
+          disabled: true,
+          reviewers: [],
         });
-
-        sendJson(response, 200, { ok: true, ...reviewerSearch });
         return;
       }
 
@@ -2204,6 +2547,8 @@ export async function startInteractiveGraphServer({
           graphs: serverGraphs,
           mode: body.mode,
           dirtyAction: body.dirtyAction,
+          scope: body.scope,
+          graphIndex: body.graphIndex,
           runCommand,
         });
         const snapshots = await getServerGraphSnapshots(body);
@@ -2233,7 +2578,10 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const { graph, index } = chooseGraphMachCheckout(
+          serverGraphs,
+          body.graphIndex,
+        );
         const session = createGraphMachSession({
           graph,
           graphIndex: index,
@@ -2254,7 +2602,10 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const { graph, index } = chooseGraphMachCheckout(
+          serverGraphs,
+          body.graphIndex,
+        );
         const session = createGraphTrySession({
           graph,
           graphIndex: index,
@@ -2278,7 +2629,10 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const { graph, index } = chooseGraphMachCheckout(
+          serverGraphs,
+          body.graphIndex,
+        );
         const session = createGraphLintSession({
           graph,
           graphIndex: index,
@@ -2299,7 +2653,10 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const { graph, index } = chooseGraphMachCheckout(
+          serverGraphs,
+          body.graphIndex,
+        );
         const session = createGraphTestSession({
           graph,
           graphIndex: index,
@@ -2320,7 +2677,10 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const { graph, index } = chooseGraphMachCheckout(
+          serverGraphs,
+          body.graphIndex,
+        );
         const snapshotLimits = Array.isArray(body.snapshotLimits)
           ? body.snapshotLimits.map(getRequestLimit)
           : [];
@@ -2350,7 +2710,10 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(serverGraphs);
+        const { graph, index } = chooseGraphMachCheckout(
+          serverGraphs,
+          body.graphIndex,
+        );
         const session = createGraphPatchSession({
           graph,
           graphIndex: index,
@@ -2859,19 +3222,55 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        const current = await getCurrentGraphBase(graph, runCommand);
+        let current = await getCurrentGraphBase(graph, runCommand);
         const requestedHash = String(body.hash || current.hash);
 
-        if (requestedHash !== current.hash) {
+        if (isWorkingTreeCommitHash(requestedHash)) {
           sendJson(response, 409, {
             ok: false,
-            error:
-              "Submit is only available for the currently checked out commit.",
+            error: "Commit uncommitted changes before submitting a patch.",
           });
           return;
         }
 
-        let submitMessage = "";
+        if (!graph.knownHashes.has(requestedHash) && requestedHash !== current.hash) {
+          sendJson(response, 404, {
+            ok: false,
+            error: "Commit has not been loaded by this graph.",
+          });
+          return;
+        }
+
+        if (await isGraphCommitOnOriginMain({
+          graph,
+          hash: requestedHash,
+          runCommand,
+        })) {
+          sendJson(response, 409, {
+            ok: false,
+            error: "Submit is only available for commits not already on origin/main.",
+          });
+          return;
+        }
+
+        if (requestedHash !== current.hash) {
+          await checkoutGraphCommit({
+            graphs: serverGraphs,
+            graphIndex,
+            hash: requestedHash,
+            runCommand,
+          });
+          current = await getCurrentGraphBase(graph, runCommand);
+
+          if (current.hash !== requestedHash) {
+            sendJson(response, 409, {
+              ok: false,
+              error: "Could not check out the selected commit before submitting.",
+            });
+            return;
+          }
+        }
+
         let afterMozPhabSubmit;
         const patchUpdateSessionId = String(body.patchUpdateSessionId || "");
 
@@ -2902,18 +3301,7 @@ export async function startInteractiveGraphServer({
             return;
           }
 
-          submitMessage = getGraphPatchUpdateSubmitMessage(patchUpdateSession);
           afterMozPhabSubmit = async () => {
-            if (submitMessage) {
-              await phabWebSession.saveRevisionDraft({
-                revision: patchUpdateSession.revision,
-                draftBlock: "",
-              });
-              for (const item of patchUpdateSession.items) {
-                item.draftReply = "";
-                item.draftSaved = false;
-              }
-            }
             await savePatchUpdateMemory({
               event: "Patch submitted to Phabricator",
               session: patchUpdateSession,
@@ -2928,7 +3316,6 @@ export async function startInteractiveGraphServer({
           getSnapshot: getServerGraphSnapshot,
           runCommand,
           postComment,
-          submitMessage,
           afterMozPhabSubmit,
         });
 
@@ -3096,6 +3483,14 @@ export async function startInteractiveGraphServer({
 
       if (error?.output) {
         body.output = error.output;
+      }
+
+      if (error?.transfer) {
+        body.transfer = error.transfer;
+      }
+
+      if (error?.reviewSync) {
+        body.reviewSync = error.reviewSync;
       }
 
       attachRebaseConflict(body, error);

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { run } from "../../lib/utils.mjs";
+import { getTbToolsCommandEnvironment, run } from "../../lib/utils.mjs";
 import { getPhabUrl } from "../../lib/workflow.mjs";
 import { getPatchArgs } from "../patch.mjs";
 import { DEFAULT_SUBMIT_OUTPUT_LIMIT, GRAPH_MACH_TERMINAL_STATUSES } from "./constants.mjs";
@@ -146,6 +146,7 @@ export async function runInteractivePatchCommand({
   return new Promise((resolve, reject) => {
     const child = spawnCommand(command.cmd, command.args || [], {
       cwd: command.cwd,
+      env: getTbToolsCommandEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout = [];

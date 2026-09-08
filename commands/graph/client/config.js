@@ -51,6 +51,9 @@ export const graphStates = GRAPHS.map((graph) => {
     nextBranchColorIndex: 0,
   };
 });
+export const initialCheckoutMode = GRAPHS.some(
+  (graph) => graph.checkout === "working",
+) ? "working" : (GRAPHS[0]?.checkout || "working");
 export const contextMenu = document.getElementById("commit-context-menu");
 export const rebaseDialog = document.getElementById("rebase-dialog");
 export const rebaseStatus = rebaseDialog.querySelector(".rebase-status");
@@ -80,7 +83,6 @@ export const commitBug = commitDialog.querySelector(".commit-bug");
 export const commitSummary = commitDialog.querySelector(".commit-summary");
 export const commitReviewerPills = commitDialog.querySelector(".commit-reviewer-pills");
 export const commitReviewerInput = commitDialog.querySelector(".commit-reviewer-input");
-export const commitReviewerList = commitDialog.querySelector(".commit-reviewer-list");
 export const commitStatus = commitDialog.querySelector(".commit-status");
 export const commitClose = commitDialog.querySelector(".commit-close");
 export const commitSubmit = commitDialog.querySelector(".commit-submit");
@@ -155,6 +157,29 @@ export const testRerunAll = testOutputPanel.querySelector(".test-rerun-all");
 export const testOutputSummary = testOutputPanel.querySelector(".test-output-summary");
 export const testOutputFailures = testOutputPanel.querySelector(".test-output-failures");
 export const testOutputLog = testOutputPanel.querySelector(".test-output-log");
+export const updateScopeDialog = document.getElementById("update-scope-dialog");
+export const updateScopeTitle = updateScopeDialog.querySelector(".update-scope-title");
+export const updateScopeDescription = updateScopeDialog.querySelector(".update-scope-description");
+export const updateScopeCurrent = updateScopeDialog.querySelector(".update-scope-current");
+export const updateScopeBoth = updateScopeDialog.querySelector(".update-scope-both");
+export const updateScopeClose = updateScopeDialog.querySelector(".update-scope-close");
+export const checkoutTransferDialog = document.getElementById("checkout-transfer-dialog");
+export const checkoutTransferForm = checkoutTransferDialog.querySelector(".checkout-transfer-form");
+export const checkoutTransferTitle = checkoutTransferDialog.querySelector(".checkout-transfer-title");
+export const checkoutTransferDescription = checkoutTransferDialog.querySelector(".checkout-transfer-description");
+export const checkoutTransferBranch = checkoutTransferDialog.querySelector(".checkout-transfer-branch");
+export const checkoutTransferStatus = checkoutTransferDialog.querySelector(".checkout-transfer-status");
+export const checkoutTransferSubmit = checkoutTransferDialog.querySelector(".checkout-transfer-submit");
+export const checkoutTransferDiscard = checkoutTransferDialog.querySelector(".checkout-transfer-discard");
+export const checkoutTransferCancel = checkoutTransferDialog.querySelector(".checkout-transfer-cancel");
+export const checkoutTransferClose = checkoutTransferDialog.querySelector(".checkout-transfer-close");
+export const reviewSyncDialog = document.getElementById("review-sync-dialog");
+export const reviewSyncForm = reviewSyncDialog.querySelector(".review-sync-form");
+export const reviewSyncConfirmation = reviewSyncDialog.querySelector(".review-sync-confirmation");
+export const reviewSyncStatus = reviewSyncDialog.querySelector(".review-sync-status");
+export const reviewSyncSubmit = reviewSyncDialog.querySelector(".review-sync-submit");
+export const reviewSyncCancel = reviewSyncDialog.querySelector(".review-sync-cancel");
+export const reviewSyncClose = reviewSyncDialog.querySelector(".review-sync-close");
 export const uiState = {
   contextMenuState: null,
   amendDialogState: null,
@@ -186,8 +211,14 @@ export const uiState = {
   commandStatusStartedAt: 0,
   commandElapsedTimer: null,
   originMainStatusLoading: false,
+  originMainStatusRefreshQueued: false,
   originMainStatusRetryTimer: null,
+  originMainStatuses: [],
   rustUpstreamStatus: null,
+  checkoutMode: initialCheckoutMode,
   pendingPaneEnhancements: new Set(),
   loadObserver: null,
+  updateScopeState: null,
+  checkoutTransferState: null,
+  reviewSyncState: null,
 };

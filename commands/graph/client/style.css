@@ -23,7 +23,7 @@ body {
   color: #20242a;
 }
 header {
-  padding: 12px 16px 8px;
+  padding: 18px 16px 0;
   border-bottom: 1px solid #d6dae1;
   background: #fff;
   position: sticky;
@@ -36,7 +36,7 @@ header {
   flex-wrap: wrap;
   gap: 8px 14px;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 14px;
 }
 .title-row {
   align-items: center;
@@ -55,13 +55,52 @@ h1 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 14px;
-  justify-content: space-between;
+  justify-content: flex-start;
+}
+.console-footer {
+  align-items: stretch;
+  display: flex;
+  min-height: 34px;
+}
+.graph-toolbar {
+  align-self: center;
+  margin: 0 0 0 auto;
+}
+body:not(.graph-view-active) .graph-toolbar {
+  display: none;
+}
+.header-actions,
+.repository-navigation,
+.console-navigation {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+}
+.header-actions {
+  gap: 6px;
+  margin-left: auto;
+}
+.repository-navigation {
+  gap: 8px;
+  transform: translateY(-5px);
+}
+.console-navigation {
+  align-items: flex-end;
+  align-self: stretch;
+  background: transparent;
+  border: 0;
+  flex: 1 1 auto;
+  gap: 6px;
+  justify-content: flex-start;
+  margin: 0;
+  min-height: 34px;
+  padding: 0;
 }
 .tabs {
   display: flex;
   flex: 1 1 auto;
-  gap: 6px;
   flex-wrap: wrap;
+  gap: 6px;
 }
 .tab {
   border: 1px solid #b9c0cc;
@@ -75,6 +114,77 @@ h1 {
   background: #1f5f9f;
   border-color: #1f5f9f;
   color: #fff;
+}
+.checkout-mode-switch,
+.repository-switch {
+  border: 1px solid #b9c0cc;
+  border-radius: 5px;
+  display: inline-flex;
+  overflow: hidden;
+}
+.checkout-mode-button,
+.repository-button {
+  background: #fff;
+  border: 0;
+  border-radius: 0;
+  color: #20242a;
+  cursor: pointer;
+  font: inherit;
+  padding: 2px 9px;
+}
+.checkout-mode-button + .checkout-mode-button,
+.repository-button + .repository-button {
+  border-left: 1px solid #b9c0cc;
+}
+.checkout-mode-button.active,
+.repository-button.active {
+  background: #1f5f9f;
+  color: #fff;
+}
+.checkout-mode-button:focus-visible,
+.repository-button:focus-visible,
+.console-view-tab:focus-visible {
+  outline: 2px solid #1f5f9f;
+  outline-offset: -2px;
+}
+.console-view-tab {
+  align-self: stretch;
+  background: #e8ecf0;
+  border: 1px solid #c8d0d9;
+  border-bottom: 0;
+  border-radius: 5px 5px 0 0;
+  color: #38424e;
+  font-weight: 600;
+  margin: 0;
+  padding: 6px 11px;
+}
+.console-view-tab:hover,
+.console-view-tab:focus {
+  background: #dce9f7;
+  border-color: #769fc9;
+  color: #174b7d;
+  outline: none;
+}
+.console-view-tab.active {
+  background: #1f5f9f;
+  border-color: #1f5f9f;
+  box-shadow: none;
+  color: #fff;
+  font-weight: 700;
+}
+@media (max-width: 640px) {
+  .console-footer {
+    align-items: flex-end;
+    flex-wrap: wrap;
+  }
+  .graph-toolbar {
+    justify-content: flex-end;
+    margin-left: 0;
+    width: 100%;
+  }
+  .console-navigation {
+    flex-basis: 100%;
+  }
 }
 body.has-command-status main {
   padding-bottom: 52px;
@@ -105,7 +215,156 @@ body.has-command-status main {
   flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
-  margin-left: auto;
+  margin-left: 0;
+}
+.update-scope-dialog {
+  border: 1px solid #b9c0cc;
+  border-radius: 8px;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+  color: #20242a;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 0;
+  width: 480px;
+}
+.update-scope-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.36);
+}
+.update-scope-dialog-body {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+.update-scope-dialog-body header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+.update-scope-title {
+  font-size: 18px;
+  margin: 0;
+}
+.update-scope-description {
+  color: #59616d;
+  line-height: 1.45;
+  margin: 0;
+}
+.update-scope-actions {
+  display: grid;
+  gap: 8px;
+}
+.update-scope-current,
+.update-scope-both,
+.update-scope-close {
+  background: #fff;
+  border: 1px solid #1f5f9f;
+  border-radius: 4px;
+  color: #1f5f9f;
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 10px;
+  text-align: left;
+}
+.update-scope-current:hover,
+.update-scope-current:focus,
+.update-scope-both:hover,
+.update-scope-both:focus,
+.update-scope-close:hover,
+.update-scope-close:focus {
+  background: rgba(31, 95, 159, 0.08);
+  outline: none;
+}
+.update-scope-close {
+  font-size: 20px;
+  line-height: 1;
+  padding: 2px 7px;
+  text-align: center;
+}
+.update-scope-both {
+  background: #1f5f9f;
+  color: #fff;
+}
+.system-dialog {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-radius: 8px;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+  color: #20242a;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 0;
+  width: 440px;
+}
+.system-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.36);
+}
+.system-dialog-body {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+.system-dialog-body header {
+  border: 0;
+  padding: 0;
+  position: static;
+}
+.system-dialog-title {
+  font-size: 18px;
+  margin: 0;
+}
+.system-dialog-message {
+  color: #59616d;
+  line-height: 1.5;
+  margin: 0;
+  white-space: pre-wrap;
+}
+.system-dialog-choices {
+  display: grid;
+  gap: 8px;
+}
+.system-dialog-choice {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-radius: 5px;
+  color: #20242a;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 3px;
+  padding: 9px 10px;
+  text-align: left;
+}
+.system-dialog-choice:hover,
+.system-dialog-choice:focus {
+  background: #eef5fc;
+  border-color: #1f5f9f;
+  outline: none;
+}
+.system-dialog-choice span {
+  color: #59616d;
+  font-size: 13px;
+}
+.system-dialog-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.system-dialog-actions button {
+  background: #fff;
+  border: 1px solid #1f5f9f;
+  border-radius: 4px;
+  color: #1f5f9f;
+  cursor: pointer;
+  font: inherit;
+  padding: 7px 10px;
+}
+.system-dialog-confirm {
+  background: #1f5f9f !important;
+  color: #fff !important;
+}
+.system-dialog.danger .system-dialog-confirm {
+  background: #b42318 !important;
+  border-color: #b42318;
 }
 .command-status-bar {
   align-items: center;
@@ -547,6 +806,11 @@ body.is-resizing-panes {
   font-size: 12px;
   margin: 8px 12px;
 }
+.review-discussion-warning {
+  color: #7d4e00;
+  font-size: 12px;
+  margin: 8px 12px;
+}
 .review-comment {
   background: #fff;
   border-top: 1px solid #d8dee4;
@@ -847,6 +1111,7 @@ body.is-resizing-panes {
 .checkout-commit,
 .amend-commit,
 .submit-commit,
+.patch-update-commit,
 .load-more {
   border: 1px solid #1f5f9f;
   border-radius: 4px;
@@ -859,6 +1124,7 @@ body.is-resizing-panes {
 .checkout-commit:disabled,
 .amend-commit:disabled,
 .submit-commit:disabled,
+.patch-update-commit:disabled,
 .load-more:disabled {
   cursor: wait;
   opacity: 0.65;
@@ -1026,6 +1292,220 @@ body.is-resizing-panes {
 }
 .context-menu button[data-action="prune"] {
   color: #9b1c1c;
+}
+.checkout-transfer-dialog {
+  border: 1px solid #b9c0cc;
+  border-radius: 8px;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+  color: #20242a;
+  max-width: min(600px, calc(100vw - 32px));
+  padding: 0;
+  width: 560px;
+}
+.checkout-transfer-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.36);
+}
+.checkout-transfer-form {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+.checkout-transfer-form header {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+.checkout-transfer-kicker {
+  color: #1f5f9f;
+  font-size: 12px;
+  font-weight: 700;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+}
+.checkout-transfer-title {
+  font-size: 20px;
+  margin: 0;
+}
+.checkout-transfer-description,
+.checkout-transfer-status {
+  color: #59616d;
+  line-height: 1.45;
+  margin: 0;
+}
+.checkout-transfer-status.error {
+  color: #9b1c1c;
+}
+.checkout-transfer-mode {
+  border: 1px solid #d6dae1;
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px;
+}
+.checkout-transfer-mode legend {
+  color: #59616d;
+  font-size: 12px;
+  padding: 0 4px;
+  text-transform: uppercase;
+}
+.checkout-transfer-form > label {
+  display: grid;
+  gap: 6px;
+  font-weight: 600;
+}
+.checkout-transfer-branch {
+  border: 1px solid #b9c0cc;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  padding: 7px 8px;
+}
+.checkout-transfer-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: end;
+}
+.checkout-transfer-submit,
+.checkout-transfer-cancel,
+.checkout-transfer-discard,
+.checkout-transfer-close {
+  background: #fff;
+  border: 1px solid #1f5f9f;
+  border-radius: 4px;
+  color: #1f5f9f;
+  cursor: pointer;
+  font: inherit;
+  padding: 7px 10px;
+}
+.checkout-transfer-submit {
+  background: #1f5f9f;
+  color: #fff;
+}
+.checkout-transfer-discard {
+  border-color: #9b1c1c;
+  color: #9b1c1c;
+  margin-right: auto;
+}
+.checkout-transfer-close {
+  font-size: 20px;
+  line-height: 1;
+  padding: 2px 7px;
+}
+.checkout-transfer-submit:hover,
+.checkout-transfer-submit:focus,
+.checkout-transfer-cancel:hover,
+.checkout-transfer-cancel:focus,
+.checkout-transfer-discard:hover,
+.checkout-transfer-discard:focus,
+.checkout-transfer-close:hover,
+.checkout-transfer-close:focus {
+  background: rgba(31, 95, 159, 0.08);
+  outline: none;
+}
+.checkout-transfer-submit:hover,
+.checkout-transfer-submit:focus {
+  background: #164f85;
+}
+.review-sync-dialog {
+  border: 1px solid #c85b5b;
+  border-radius: 8px;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+  color: #20242a;
+  max-width: min(600px, calc(100vw - 32px));
+  padding: 0;
+  width: 560px;
+}
+.review-sync-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.5);
+}
+.review-sync-form {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+.review-sync-form header {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+.review-sync-kicker {
+  color: #9b1c1c;
+  font-size: 12px;
+  font-weight: 700;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+}
+.review-sync-title {
+  font-size: 20px;
+  margin: 0;
+}
+.review-sync-description,
+.review-sync-status {
+  color: #59616d;
+  line-height: 1.45;
+  margin: 0;
+}
+.review-sync-status.error {
+  color: #9b1c1c;
+}
+.review-sync-form > label {
+  display: grid;
+  gap: 6px;
+  font-weight: 600;
+}
+.review-sync-confirmation {
+  border: 1px solid #b9c0cc;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  padding: 7px 8px;
+}
+.review-sync-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: end;
+}
+.review-sync-submit,
+.review-sync-cancel,
+.review-sync-close {
+  background: #fff;
+  border: 1px solid #9b1c1c;
+  border-radius: 4px;
+  color: #9b1c1c;
+  cursor: pointer;
+  font: inherit;
+  padding: 7px 10px;
+}
+.review-sync-submit {
+  background: #9b1c1c;
+  color: #fff;
+}
+.review-sync-close {
+  font-size: 20px;
+  line-height: 1;
+  padding: 2px 7px;
+}
+.review-sync-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.review-sync-submit:not(:disabled):hover,
+.review-sync-submit:not(:disabled):focus {
+  background: #741616;
+  outline: none;
+}
+.review-sync-cancel:hover,
+.review-sync-cancel:focus,
+.review-sync-close:hover,
+.review-sync-close:focus {
+  background: rgba(155, 28, 28, 0.08);
+  outline: none;
 }
 .rebase-dialog {
   border: 1px solid #b9c0cc;
@@ -3148,12 +3628,51 @@ body.is-resizing-panes {
   min-height: 540px;
   padding: 4px;
 }
+.dashboard-panel[hidden] {
+  display: none;
+}
 .dashboard-header {
   align-items: center;
   display: flex;
   gap: 16px;
   justify-content: space-between;
   min-width: 0;
+}
+.dashboard-header-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+.loading-indicator {
+  align-items: center;
+  color: #59616d;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  white-space: nowrap;
+}
+.loading-indicator[hidden] {
+  display: none;
+}
+.loading-spinner {
+  animation: console-loading-spinner 0.75s linear infinite;
+  border: 2px solid #c8d1db;
+  border-radius: 50%;
+  border-top-color: #1f5f9f;
+  box-sizing: border-box;
+  display: inline-block;
+  flex: 0 0 auto;
+  height: 14px;
+  width: 14px;
+}
+@keyframes console-loading-spinner {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.dashboard-panel.is-loading .dashboard-workspace,
+.meta-boards-panel.is-loading .meta-board-kanban {
+  opacity: 0.72;
 }
 .dashboard-heading {
   min-width: 0;
@@ -3373,7 +3892,8 @@ body.is-resizing-panes {
   outline: none;
   text-decoration: underline;
 }
-.dashboard-patch-update {
+.dashboard-patch-update,
+.dashboard-patch-review {
   background: #1f5f9f;
   border: 1px solid #1f5f9f;
   border-radius: 4px;
@@ -3385,7 +3905,9 @@ body.is-resizing-panes {
   padding: 4px 8px;
 }
 .dashboard-patch-update:hover,
-.dashboard-patch-update:focus {
+.dashboard-patch-update:focus,
+.dashboard-patch-review:hover,
+.dashboard-patch-review:focus {
   background: #174b7d;
   outline: none;
 }
@@ -3393,6 +3915,7 @@ body.is-resizing-panes {
   color: #57606a;
 }
 .dashboard-groups,
+.dashboard-author,
 .dashboard-row-meta {
   color: #57606a;
   font-size: 12px;
@@ -3433,6 +3956,198 @@ body.is-resizing-panes {
 body.has-command-status .dashboard-panel {
   height: calc(100dvh - 164px);
 }
+.patch-review-dialog {
+  border: 1px solid #b9c0cc;
+  border-radius: 6px;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+  color: #20242a;
+  max-height: calc(100dvh - 48px);
+  max-width: 900px;
+  padding: 0;
+  width: min(calc(100vw - 48px), 900px);
+}
+.patch-review-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.36);
+}
+.patch-review-panel {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  padding: 20px 24px 24px;
+}
+.patch-review-header,
+.patch-review-issue header,
+.patch-review-issue-actions,
+.patch-review-final-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+.patch-review-header h2,
+.patch-review-issue h3,
+.patch-review-final h3,
+.patch-review-coverage h3,
+.patch-review-activity h3 {
+  margin: 0;
+}
+.patch-review-kicker {
+  color: #57606a;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+}
+.patch-review-close {
+  background: transparent;
+  border: 0;
+  color: #57606a;
+  cursor: pointer;
+  font-size: 28px;
+  line-height: 1;
+}
+.patch-review-status {
+  margin: 0;
+}
+.patch-review-status.error {
+  color: #cf222e;
+}
+.patch-review-activity,
+.patch-review-coverage,
+.patch-review-issue,
+.patch-review-final {
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  padding: 14px;
+}
+.patch-review-activity-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  padding-left: 20px;
+}
+.patch-review-activity-list li {
+  display: grid;
+  gap: 4px;
+}
+.patch-review-activity-list code,
+.patch-review-output,
+.patch-review-suggestion {
+  background: #f6f8fa;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+  padding: 6px;
+  white-space: pre-wrap;
+}
+.patch-review-output {
+  border: 1px solid #d0d7de;
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+}
+.patch-review-coverage dl {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+.patch-review-coverage dl div {
+  display: grid;
+  gap: 3px;
+}
+.patch-review-coverage dt {
+  color: #57606a;
+  font-size: 12px;
+  font-weight: 700;
+}
+.patch-review-coverage dd {
+  margin: 0;
+}
+.patch-review-severity,
+.patch-review-position {
+  color: #57606a;
+  font-size: 12px;
+  font-weight: 700;
+}
+.patch-review-severity {
+  background: #fff8c5;
+  border: 1px solid #d4a72c80;
+  border-radius: 999px;
+  color: #7d4e00;
+  padding: 2px 7px;
+}
+.patch-review-issue header {
+  align-items: baseline;
+  justify-content: flex-start;
+}
+.patch-review-position {
+  margin-left: auto;
+  overflow-wrap: anywhere;
+}
+.patch-review-rationale,
+.patch-review-validation,
+.patch-review-final > p {
+  line-height: 1.45;
+}
+.patch-review-issue label,
+.patch-review-final label {
+  display: grid;
+  font-weight: 600;
+  gap: 6px;
+  margin-top: 12px;
+}
+.patch-review-comment,
+.patch-review-suggestion,
+.patch-review-final-message {
+  border: 1px solid #8c959f;
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 400;
+  min-width: 0;
+  padding: 8px;
+  resize: vertical;
+}
+.patch-review-issue-actions,
+.patch-review-final-actions {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+.patch-review-issue-actions button,
+.patch-review-final-actions button {
+  background: #f6f8fa;
+  border: 1px solid #8c959f;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  padding: 7px 10px;
+}
+.patch-review-issue-actions button:hover,
+.patch-review-issue-actions button:focus,
+.patch-review-final-actions button:hover,
+.patch-review-final-actions button:focus {
+  background: #ddf4ff;
+  outline: none;
+}
+.patch-review-final-actions button[data-review-outcome="request-changes"] {
+  background: #cf222e;
+  border-color: #cf222e;
+  color: #fff;
+}
+.patch-review-final-actions button[data-review-outcome="accept"] {
+  background: #1a7f37;
+  border-color: #1a7f37;
+  color: #fff;
+}
+.patch-review-issue-actions button:disabled,
+.patch-review-final-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
 .patch-update-dialog {
   border: 1px solid #b9c0cc;
   border-radius: 6px;
@@ -3444,6 +4159,11 @@ body.has-command-status .dashboard-panel {
   overflow: hidden;
   padding: 0;
   width: calc(100vw - 24px);
+}
+html.patch-update-open,
+body.patch-update-open {
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 .patch-update-dialog::backdrop {
   background: rgba(15, 23, 42, 0.36);
@@ -3458,10 +4178,26 @@ body.has-command-status .dashboard-panel {
   padding: 20px 24px 0;
 }
 .patch-update-workspace {
-  flex: 1 1 auto;
+  display: grid;
+  flex: 1 1 0;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 0;
+  overflow: hidden;
+  padding-bottom: 20px;
+}
+.patch-update-review-column,
+.patch-update-analysis {
   min-height: 0;
   overflow: auto;
-  padding-bottom: 20px;
+}
+.patch-update-review-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  overflow: hidden;
+  padding-right: 4px;
 }
 .patch-update-header,
 .patch-update-comment-heading,
@@ -3505,16 +4241,241 @@ body.has-command-status .dashboard-panel {
   line-height: 1.5;
   margin: 0;
 }
+.patch-update-progress {
+  min-width: 0;
+}
+.patch-update-progress-summary {
+  align-items: center;
+  color: #24292f;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  list-style: none;
+  min-width: 0;
+  padding: 3px 0;
+}
+.patch-update-progress-summary::-webkit-details-marker {
+  display: none;
+}
+.patch-update-progress-toggle {
+  color: #57606a;
+  flex: 0 0 auto;
+  font-size: 14px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+.patch-update-progress-toggle::before {
+  content: ">";
+}
+.patch-update-progress[open] .patch-update-progress-toggle {
+  transform: rotate(90deg);
+}
+.patch-update-progress-label {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.patch-update-progress .patch-update-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.patch-update-progress[open] .patch-update-progress-summary {
+  margin-bottom: 8px;
+}
+.patch-update-progress-summary:hover .patch-update-progress-label,
+.patch-update-progress-summary:focus .patch-update-progress-label {
+  color: #0969da;
+}
 .patch-update-status.error {
   color: #9b1c1c;
+}
+.patch-update-steer {
+  align-items: center;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  padding: 8px 10px;
+}
+.patch-update-steer label {
+  color: #24292f;
+  font-size: 12px;
+  font-weight: 700;
+}
+.patch-update-steer > div {
+  align-items: end;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.patch-update-steer-input {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-radius: 4px;
+  box-sizing: border-box;
+  color: #24292f;
+  flex: 1 1 auto;
+  font: 13px/1.4 system-ui, sans-serif;
+  min-height: 48px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+.patch-update-steer-input:focus {
+  border-color: #0969da;
+  outline: 2px solid rgba(9, 105, 218, 0.2);
+  outline-offset: 0;
+}
+.patch-update-steer-submit {
+  align-self: stretch;
+  background: #0969da;
+  border: 1px solid #0550ae;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 12px;
+}
+.patch-update-steer-submit:hover,
+.patch-update-steer-submit:focus {
+  background: #0550ae;
+  outline: none;
+}
+.patch-update-steer-submit:disabled {
+  background: #8c959f;
+  border-color: #8c959f;
+  cursor: default;
+}
+.patch-update-context {
+  border: 1px solid #b6d7f2;
+  border-left: 4px solid #1f6feb;
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  max-height: none;
+  min-height: 0;
+  overflow: hidden;
+}
+.patch-update-context.is-expanded {
+  flex: 0 1 min(26dvh, 240px);
+  max-height: min(26dvh, 240px);
+}
+.patch-update-context-toggle {
+  align-items: center;
+  background: #eaf4ff;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  justify-content: space-between;
+  padding: 7px 10px;
+  text-align: left;
+  width: 100%;
+}
+.patch-update-context-heading {
+  margin: 0;
+}
+.patch-update-context-toggle:hover,
+.patch-update-context-toggle:focus {
+  background: #dceeff;
+  outline: none;
+}
+.patch-update-context-toggle::after {
+  border-bottom: 2px solid #0550ae;
+  border-right: 2px solid #0550ae;
+  content: "";
+  height: 6px;
+  margin: 0 3px 3px 10px;
+  transform: rotate(45deg);
+  transition: transform 120ms ease;
+  width: 6px;
+}
+.patch-update-context-toggle[aria-expanded="true"]::after {
+  margin-bottom: -3px;
+  transform: rotate(225deg);
+}
+.patch-update-context-toggle span {
+  color: #0550ae;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  margin: 0;
+  text-transform: uppercase;
+}
+.patch-update-context-details {
+  display: grid;
+  gap: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+}
+.patch-update-context-details[hidden] {
+  display: none;
+}
+.patch-update-context-details > div {
+  border-top: 1px solid #d8dee4;
+  min-width: 0;
+  padding: 9px 10px;
+}
+.patch-update-context-details > div:nth-child(odd) {
+  border-right: 1px solid #d8dee4;
+}
+.patch-update-context-details dt {
+  color: #57606a;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.patch-update-context-details dd {
+  color: #24292f;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .patch-update-activity {
   border: 1px solid #d0d7de;
   border-radius: 6px;
   display: grid;
   gap: 0;
+  min-height: 0;
   overflow: hidden;
   box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+}
+.patch-update-activity-status {
+  align-items: center;
+  background: #f3f6f9;
+  border-bottom: 1px solid #d8dee4;
+  display: flex;
+  min-height: 34px;
+  padding: 5px 10px;
+}
+.patch-update-activity-latest {
+  color: #24292f;
+  flex: 1 1 auto;
+  font:
+    12px/1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .patch-update-activity-heading {
   align-items: center;
@@ -3532,23 +4493,57 @@ body.has-command-status .dashboard-panel {
   margin: 0;
   text-transform: uppercase;
 }
-.patch-update-activity-count {
-  background: #eaeef2;
-  border-radius: 999px;
+.patch-update-activity-filter {
+  display: inline-flex;
+}
+.patch-update-activity-filter button {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-right-width: 0;
   color: #57606a;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  padding: 2px 7px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 9px;
+}
+.patch-update-activity-filter button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+.patch-update-activity-filter button:last-child {
+  border-radius: 0 4px 4px 0;
+  border-right-width: 1px;
+}
+.patch-update-activity-filter button:hover,
+.patch-update-activity-filter button:focus-visible {
+  background: #f6f8fa;
+  outline: none;
+}
+.patch-update-activity-filter button[aria-pressed="true"] {
+  background: #0969da;
+  border-color: #0969da;
+  color: #fff;
+}
+.patch-update-activity-filter button[aria-pressed="true"] + button {
+  border-left-color: #0969da;
 }
 .patch-update-activity-list {
   display: grid;
   gap: 0;
+  height: clamp(140px, 20dvh, 260px);
   list-style: none;
   margin: 0;
-  max-height: 196px;
+  min-height: 0;
   overflow: auto;
   padding: 0;
   scroll-behavior: smooth;
+}
+.patch-update-activity-empty {
+  align-items: center;
+  color: #57606a;
+  display: flex;
+  font-size: 13px;
+  min-height: 100%;
+  padding: 12px;
 }
 .patch-update-activity-entry {
   align-items: start;
@@ -3568,6 +4563,65 @@ body.has-command-status .dashboard-panel {
   color: #24292f;
   font-size: 12px;
   line-height: 1.45;
+}
+.patch-update-activity-command-row {
+  display: block;
+  padding: 0;
+}
+.patch-update-activity-command-disclosure {
+  min-width: 0;
+}
+.patch-update-activity-command-summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  list-style: none;
+  min-width: 0;
+  padding: 9px 12px;
+}
+.patch-update-activity-command-summary::-webkit-details-marker {
+  display: none;
+}
+.patch-update-activity-command-summary::before {
+  border-bottom: 2px solid currentcolor;
+  border-right: 2px solid currentcolor;
+  content: "";
+  flex: 0 0 auto;
+  height: 5px;
+  margin: 0 2px 3px 0;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+  width: 5px;
+}
+.patch-update-activity-command-disclosure[open] > .patch-update-activity-command-summary::before {
+  margin-bottom: 3px;
+  transform: rotate(45deg);
+}
+.patch-update-activity-command-summary strong {
+  flex: 0 0 auto;
+}
+.patch-update-activity-command-preview {
+  color: #57606a;
+  font:
+    11px/1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.patch-update-activity-command-disclosure > code {
+  border-top: 1px solid #d8dee4;
+  box-sizing: border-box;
+  display: block;
+  max-height: min(40dvh, 420px);
+  overflow: auto;
+  padding: 9px 12px;
+  white-space: pre-wrap;
 }
 .patch-update-activity-entry code {
   background: #f1f3f5;
@@ -3590,20 +4644,20 @@ body.has-command-status .dashboard-panel {
   color: #9b1c1c;
 }
 .patch-update-comment {
+  background: #fff;
   border: 1px solid #d0d7de;
   border-radius: 6px;
-  display: grid;
-  grid-template-areas:
-    "heading heading"
-    "reviewer assessment";
-  grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1.1fr);
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
   overflow: hidden;
 }
 .patch-update-comment-heading {
   background: #f3f6f9;
   border-bottom: 1px solid #d8dee4;
-  grid-area: heading;
-  padding: 12px 16px;
+  padding: 9px 12px;
 }
 .patch-update-comment-author {
   color: #24292f;
@@ -3631,12 +4685,14 @@ body.has-command-status .dashboard-panel {
   text-decoration: underline;
 }
 .patch-update-reviewer-context {
-  align-content: start;
-  display: grid;
-  gap: 14px;
-  grid-area: reviewer;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
   min-width: 0;
-  padding: 16px;
+  overflow: auto;
+  padding: 12px;
 }
 .patch-update-comment-location,
 .patch-update-change-summary {
@@ -3674,7 +4730,8 @@ body.has-command-status .dashboard-panel {
 .patch-update-comment-content {
   color: #24292f;
   line-height: 1.6;
-  max-height: 280px;
+  max-height: none;
+  overflow: visible;
 }
 .patch-update-code-suggestion {
   background: #ddf4ff;
@@ -3685,19 +4742,66 @@ body.has-command-status .dashboard-panel {
 }
 .patch-update-suggestion,
 .patch-update-rationale,
-.patch-update-change-plan,
-.patch-update-instruction-label {
+.patch-update-validation,
+.patch-update-reply-label {
   display: grid;
   gap: 7px;
 }
+.patch-update-comment-context {
+  border: 1px solid #b6d7f2;
+  border-radius: 4px;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 220px;
+  overflow: hidden;
+}
+.patch-update-comment-context-heading {
+  align-items: center;
+  background: #eaf4ff;
+  border-bottom: 1px solid #b6d7f2;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 7px 10px;
+}
+.patch-update-comment-context-heading h3 {
+  color: #0550ae;
+  font-size: 12px;
+  margin: 0;
+}
+.patch-update-comment-context-location {
+  color: #57606a;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.patch-update-comment-context-diff {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 220px;
+  overflow: auto;
+}
+.patch-update-comment-context-diff .pretty-file {
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+}
+.patch-update-comment-context-diff .pretty-file h3 {
+  display: none;
+}
+.patch-update-comment-context-diff .comment-context-line td {
+  background: #fff8c5;
+  box-shadow: inset 3px 0 #bf8700;
+}
 .patch-update-analysis {
   background: #fbfcfe;
-  border-left: 1px solid #d8dee4;
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
   display: grid;
   gap: 12px;
-  grid-area: assessment;
   min-width: 0;
-  padding: 16px;
+  padding: 14px;
 }
 .patch-update-analysis h3 {
   color: #24292f;
@@ -3726,6 +4830,7 @@ body.has-command-status .dashboard-panel {
   overflow-wrap: anywhere;
 }
 .patch-update-rationale,
+.patch-update-validation,
 .patch-update-change-plan {
   background: #fff;
   border: 1px solid #d8dee4;
@@ -3733,12 +4838,17 @@ body.has-command-status .dashboard-panel {
   padding: 10px;
 }
 .patch-update-rationale p,
+.patch-update-validation p,
 .patch-update-change-plan p {
   line-height: 1.5;
 }
 .patch-update-proposed-diff {
   border: 1px solid #d8dee4;
   border-radius: 4px;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  min-height: 220px;
   overflow: hidden;
 }
 .patch-update-proposed-diff-heading {
@@ -3759,6 +4869,8 @@ body.has-command-status .dashboard-panel {
   font-weight: 600;
 }
 .patch-update-proposed-diff-content {
+  flex: 1 1 auto;
+  min-height: 0;
   max-height: min(48dvh, 640px);
   overflow: auto;
 }
@@ -3770,7 +4882,12 @@ body.has-command-status .dashboard-panel {
 .patch-update-proposed-diff-content .pretty-file + .pretty-file {
   border-top: 1px solid #d8dee4;
 }
-.patch-update-instruction-label,
+.patch-update-proposed-diff-missing {
+  color: #9b1c1c;
+  line-height: 1.5;
+  margin: 0;
+  padding: 10px;
+}
 .patch-update-reply-label {
   color: #57606a;
   display: grid;
@@ -3778,7 +4895,6 @@ body.has-command-status .dashboard-panel {
   font-weight: 600;
   gap: 5px;
 }
-.patch-update-instruction,
 .patch-update-reply {
   border: 1px solid #b9c0cc;
   border-radius: 4px;
@@ -3790,17 +4906,25 @@ body.has-command-status .dashboard-panel {
   resize: vertical;
   width: 100%;
 }
-.patch-update-instruction {
-  background: #fff;
-  color: #20242a;
-}
 .patch-update-output {
   background: #f6f8fa;
   border: 1px solid #d0d7de;
   border-radius: 4px;
   color: #24292f;
-  max-height: 260px;
+  flex: 1 1 auto;
+  font-size: 13px;
+  line-height: 1.55;
+  min-height: 0;
   padding: 9px;
+}
+.patch-update-dialog.output-expanded .patch-update-workspace {
+  display: none;
+}
+.patch-update-dialog.output-expanded .patch-update-output {
+  min-height: 320px;
+}
+.patch-update-dialog.output-expanded .patch-update-activity-list {
+  height: clamp(100px, 16dvh, 180px);
 }
 .patch-update-actions {
   background: #fff;
@@ -3824,17 +4948,25 @@ body.has-command-status .dashboard-panel {
   background: #f6f8fa;
   outline: none;
 }
-.patch-update-actions .patch-update-apply,
+.patch-update-actions .patch-update-keep,
 .patch-update-actions .patch-update-submit {
   background: #1f5f9f;
   border-color: #1f5f9f;
   color: #fff;
 }
-.patch-update-actions .patch-update-apply:hover,
-.patch-update-actions .patch-update-apply:focus,
+.patch-update-actions .patch-update-keep:hover,
+.patch-update-actions .patch-update-keep:focus,
 .patch-update-actions .patch-update-submit:hover,
 .patch-update-actions .patch-update-submit:focus {
   background: #174b7d;
+}
+.patch-update-actions .patch-update-revert {
+  border-color: #cf222e;
+  color: #b42318;
+}
+.patch-update-actions .patch-update-revert:hover,
+.patch-update-actions .patch-update-revert:focus {
+  background: #ffebe9;
 }
 .patch-update-actions button:disabled {
   cursor: wait;
@@ -3862,17 +4994,24 @@ body.has-command-status .dashboard-panel {
     flex-basis: auto;
   }
 }
+@media (max-height: 760px) {
+  .patch-update-activity-list {
+    height: clamp(110px, 19dvh, 180px);
+  }
+  .patch-update-dialog.output-expanded .patch-update-output {
+    min-height: 180px;
+  }
+}
 @media (max-width: 900px) {
-  .patch-update-comment {
-    grid-template-areas:
-      "heading"
-      "reviewer"
-      "assessment";
+  .patch-update-workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(180px, 0.8fr) minmax(260px, 1.2fr);
+  }
+  .patch-update-context-details {
     grid-template-columns: 1fr;
   }
-  .patch-update-analysis {
-    border-left: 0;
-    border-top: 1px solid #d8dee4;
+  .patch-update-context-details > div:nth-child(odd) {
+    border-right: 0;
   }
 }
 @media (max-width: 980px) {
@@ -4120,6 +5259,15 @@ body.has-command-status .dashboard-panel {
 .meta-board-column header span {
   color: #57606a;
   font-size: 12px;
+}
+.meta-board-column-summary {
+  align-items: baseline;
+  display: flex;
+  gap: 6px;
+}
+.meta-board-column header .meta-board-column-points {
+  color: #0969da;
+  font-weight: 700;
 }
 .meta-board-cards {
   display: grid;
@@ -4595,6 +5743,89 @@ body.has-command-status .dashboard-panel {
   line-height: 1.45;
   resize: vertical;
 }
+.meta-board-detail-comments {
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  min-width: 0;
+}
+.meta-board-detail-comments summary {
+  align-items: center;
+  background: #f6f8fa;
+  color: #24292f;
+  cursor: pointer;
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  justify-content: space-between;
+  list-style: none;
+  padding: 8px 10px;
+}
+.meta-board-detail-comments summary::-webkit-details-marker {
+  display: none;
+}
+.meta-board-detail-comments summary::after {
+  border-bottom: 2px solid currentcolor;
+  border-right: 2px solid currentcolor;
+  content: "";
+  height: 5px;
+  margin: 0 2px 3px 10px;
+  transform: rotate(45deg);
+  transition: transform 120ms ease;
+  width: 5px;
+}
+.meta-board-detail-comments[open] summary::after {
+  margin-bottom: -3px;
+  transform: rotate(225deg);
+}
+.meta-board-detail-comments-count {
+  color: #57606a;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+.meta-board-detail-comments-list {
+  border-top: 1px solid #d8dee4;
+  max-height: min(48dvh, 520px);
+  overflow: auto;
+}
+.meta-board-detail-comment {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+.meta-board-detail-comment + .meta-board-detail-comment {
+  border-top: 1px solid #d8dee4;
+}
+.meta-board-detail-comment header {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.meta-board-detail-comment header strong {
+  color: #24292f;
+  font-size: 12px;
+}
+.meta-board-detail-comment-meta,
+.meta-board-detail-comments-empty {
+  color: #57606a;
+  font-size: 11px;
+}
+.meta-board-detail-comment pre {
+  color: #24292f;
+  font:
+    12px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.meta-board-detail-comments-empty {
+  margin: 0;
+  padding: 10px;
+}
 .meta-board-detail-error {
   color: #cf222e;
   font-size: 13px;
@@ -4782,6 +6013,13 @@ body.has-command-status .dashboard-panel {
   }
 }
 @media (prefers-color-scheme: dark) {
+  .loading-indicator {
+    color: #acb4c0;
+  }
+  .loading-spinner {
+    border-color: #424b59;
+    border-top-color: #79c0ff;
+  }
   :root {
     --diff-border: #30363d;
     --diff-header-bg: #161b22;
@@ -4821,6 +6059,9 @@ body.has-command-status .dashboard-panel {
   .meta-board-relation-add-form > label,
   .meta-board-description-header h3 {
     color: #acb4c0;
+  }
+  .meta-board-column header .meta-board-column-points {
+    color: #79c0ff;
   }
   .meta-board-manager-id,
   .meta-board-review-group,
@@ -4975,6 +6216,27 @@ body.has-command-status .dashboard-panel {
     background: #0d1117;
     border-color: #424b59;
   }
+  .meta-board-detail-comments {
+    background: #161b22;
+    border-color: #424b59;
+  }
+  .meta-board-detail-comments summary {
+    background: #1d232c;
+    color: #e6edf3;
+  }
+  .meta-board-detail-comments-list,
+  .meta-board-detail-comment + .meta-board-detail-comment {
+    border-color: #303845;
+  }
+  .meta-board-detail-comment header strong,
+  .meta-board-detail-comment pre {
+    color: #e6edf3;
+  }
+  .meta-board-detail-comment-meta,
+  .meta-board-detail-comments-count,
+  .meta-board-detail-comments-empty {
+    color: #acb4c0;
+  }
   .meta-board-relation-link + .meta-board-relation-link {
     border-color: #424b59;
   }
@@ -5067,10 +6329,32 @@ body.has-command-status .dashboard-panel {
   .summary,
   .graph,
   .diff-viewer,
-  .tab {
+  .tab,
+  .checkout-mode-button,
+  .repository-button {
     background: #191d23;
     color: #f1f3f6;
     border-color: #323844;
+  }
+  .checkout-mode-switch,
+  .repository-switch,
+  .checkout-mode-button + .checkout-mode-button,
+  .repository-button + .repository-button {
+    border-color: #323844;
+  }
+  .console-navigation {
+    background: transparent;
+  }
+  .console-view-tab {
+    background: #2a313c;
+    border-color: #485363;
+    color: #d7dee8;
+  }
+  .console-view-tab:hover,
+  .console-view-tab:focus {
+    background: #354152;
+    border-color: #79c0ff;
+    color: #e6f2ff;
   }
   .summary span,
   .diff-meta,
@@ -5092,6 +6376,9 @@ body.has-command-status .dashboard-panel {
   }
   .review-discussion-error {
     color: #ff9f9f;
+  }
+  .review-discussion-warning {
+    color: #f2cc60;
   }
   .review-comment {
     background: #191d23;
@@ -5431,6 +6718,17 @@ body.has-command-status .dashboard-panel {
     border-color: #4b9eff;
     color: #07111f;
   }
+  .checkout-mode-button.active,
+  .repository-button.active {
+    background: #4b9eff;
+    color: #07111f;
+  }
+  .console-view-tab.active {
+    background: #4b9eff;
+    border-color: #4b9eff;
+    box-shadow: none;
+    color: #07111f;
+  }
   .commit-hash {
     fill: #9aa4b2;
   }
@@ -5490,10 +6788,130 @@ body.has-command-status .dashboard-panel {
   .context-menu button[data-action="prune"] {
     color: #ff9f9f;
   }
+  .checkout-transfer-dialog {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .checkout-transfer-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.58);
+  }
+  .checkout-transfer-kicker {
+    color: #79c0ff;
+  }
+  .checkout-transfer-description,
+  .checkout-transfer-status,
+  .checkout-transfer-mode legend {
+    color: #acb4c0;
+  }
+  .checkout-transfer-status.error {
+    color: #ff9f9f;
+  }
+  .checkout-transfer-mode,
+  .checkout-transfer-branch {
+    border-color: #424b59;
+  }
+  .checkout-transfer-branch {
+    background: #0d1117;
+    color: #f1f3f6;
+  }
+  .checkout-transfer-cancel,
+  .checkout-transfer-close {
+    background: #191d23;
+    border-color: #424b59;
+    color: #79c0ff;
+  }
+  .checkout-transfer-discard {
+    border-color: #ff9f9f;
+    color: #ff9f9f;
+  }
+  .checkout-transfer-cancel:hover,
+  .checkout-transfer-cancel:focus,
+  .checkout-transfer-close:hover,
+  .checkout-transfer-close:focus {
+    background: #222832;
+  }
+  .checkout-transfer-submit {
+    background: #4b9eff;
+    border-color: #4b9eff;
+    color: #07111f;
+  }
+  .review-sync-dialog {
+    background: #191d23;
+    border-color: #f26d6d;
+    color: #f1f3f6;
+  }
+  .review-sync-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.66);
+  }
+  .review-sync-kicker {
+    color: #ff9f9f;
+  }
+  .review-sync-description,
+  .review-sync-status {
+    color: #acb4c0;
+  }
+  .review-sync-status.error {
+    color: #ff9f9f;
+  }
+  .review-sync-confirmation {
+    background: #0d1117;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .review-sync-cancel,
+  .review-sync-close {
+    background: #191d23;
+    border-color: #f26d6d;
+    color: #ff9f9f;
+  }
+  .review-sync-submit {
+    background: #f26d6d;
+    border-color: #f26d6d;
+    color: #07111f;
+  }
+  .review-sync-submit:not(:disabled):hover,
+  .review-sync-submit:not(:disabled):focus {
+    background: #ff9f9f;
+  }
+  .review-sync-cancel:hover,
+  .review-sync-cancel:focus,
+  .review-sync-close:hover,
+  .review-sync-close:focus {
+    background: #3b2327;
+  }
   .rebase-dialog {
     background: #191d23;
     border-color: #424b59;
     color: #f1f3f6;
+  }
+  .update-scope-dialog {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .update-scope-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.58);
+  }
+  .update-scope-description {
+    color: #acb4c0;
+  }
+  .update-scope-current,
+  .update-scope-close {
+    background: #191d23;
+    border-color: #424b59;
+    color: #79c0ff;
+  }
+  .update-scope-current:hover,
+  .update-scope-current:focus,
+  .update-scope-close:hover,
+  .update-scope-close:focus {
+    background: #222832;
+  }
+  .update-scope-both {
+    background: #4b9eff;
+    border-color: #4b9eff;
+    color: #07111f;
   }
   .rebase-dialog::backdrop {
     background: rgba(0, 0, 0, 0.58);
@@ -6165,6 +7583,1008 @@ body.has-command-status .dashboard-panel {
     border-color: #ff9f9f;
     color: #ff9f9f;
   }
+  .system-dialog {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .system-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.58);
+  }
+  .system-dialog-message,
+  .system-dialog-choice span {
+    color: #acb4c0;
+  }
+  .system-dialog-choice,
+  .system-dialog-actions button {
+    background: #191d23;
+    border-color: #424b59;
+    color: #e6edf3;
+  }
+  .system-dialog-choice:hover,
+  .system-dialog-choice:focus,
+  .system-dialog-actions button:hover,
+  .system-dialog-actions button:focus {
+    background: #0c2d4a;
+    border-color: #58a6ff;
+    outline: none;
+  }
+  .system-dialog-confirm {
+    background: #1f6feb !important;
+    border-color: #58a6ff !important;
+    color: #fff !important;
+  }
+  .system-dialog.danger .system-dialog-confirm {
+    background: #da3633 !important;
+    border-color: #f85149 !important;
+  }
+}
+
+/* Patch Review workspace */
+.patch-review-dialog {
+  border: 1px solid #b9c0cc;
+  border-radius: 6px;
+  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+  height: calc(100dvh - 24px);
+  max-height: none;
+  max-width: none;
+  overflow: hidden;
+  padding: 0;
+  width: calc(100vw - 24px);
+}
+html.patch-review-open,
+body.patch-review-open {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+.patch-review-panel {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 18px 22px 0;
+}
+.patch-review-header,
+.patch-review-context-diff-heading,
+.patch-review-experiment-diff-heading,
+.patch-review-issue > header,
+.patch-review-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+.patch-review-header h2 {
+  font-size: 22px;
+  margin: 0;
+}
+.patch-review-kicker {
+  color: #1f5f9f;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin: 0 0 2px;
+  text-transform: uppercase;
+}
+.patch-review-close {
+  border-radius: 4px;
+  padding: 2px 7px 5px;
+}
+.patch-review-close:hover,
+.patch-review-close:focus {
+  background: #f6f8fa;
+  color: #20242a;
+  outline: none;
+}
+.patch-review-progress {
+  min-width: 0;
+}
+.patch-review-progress-summary {
+  align-items: center;
+  color: #24292f;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  list-style: none;
+  min-width: 0;
+  padding: 3px 0;
+}
+.patch-review-progress-summary::-webkit-details-marker {
+  display: none;
+}
+.patch-review-progress-label {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.patch-review-progress-toggle {
+  color: #57606a;
+  flex: 0 0 auto;
+  font-size: 14px;
+  line-height: 1;
+  order: 1;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+.patch-review-progress-toggle::before {
+  content: ">";
+}
+.patch-review-progress[open] .patch-review-progress-toggle {
+  transform: rotate(90deg);
+}
+.patch-review-progress .patch-review-status {
+  color: #57606a;
+  flex: 1 1 auto;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+  min-width: 0;
+  order: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.patch-review-progress .patch-review-status.error {
+  color: #9b1c1c;
+}
+.patch-review-progress[open] .patch-review-progress-summary {
+  margin-bottom: 8px;
+}
+.patch-review-progress-summary:hover .patch-review-progress-label,
+.patch-review-progress-summary:focus .patch-review-progress-label {
+  color: #0969da;
+}
+.patch-review-activity {
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  display: grid;
+  gap: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.patch-review-activity-status,
+.patch-review-activity-heading {
+  align-items: center;
+  background: #f3f6f9;
+  border-bottom: 1px solid #d8dee4;
+  display: flex;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 5px 10px;
+}
+.patch-review-activity-latest {
+  color: #24292f;
+  flex: 1 1 auto;
+  font:
+    13px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.patch-review-activity-heading {
+  min-height: 0;
+  padding: 7px 10px;
+}
+.patch-review-activity-heading h3 {
+  color: #24292f;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  margin: 0;
+  text-transform: uppercase;
+}
+.patch-review-activity-filter {
+  display: inline-flex;
+}
+.patch-review-activity-filter button {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-right-width: 0;
+  color: #57606a;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 9px;
+}
+.patch-review-activity-filter button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+.patch-review-activity-filter button:last-child {
+  border-radius: 0 4px 4px 0;
+  border-right-width: 1px;
+}
+.patch-review-activity-filter button:hover,
+.patch-review-activity-filter button:focus-visible {
+  background: #f6f8fa;
+  outline: none;
+}
+.patch-review-activity-filter button[aria-pressed="true"] {
+  background: #0969da;
+  border-color: #0969da;
+  color: #fff;
+}
+.patch-review-activity-filter button[aria-pressed="true"] + button {
+  border-left-color: #0969da;
+}
+.patch-review-activity-list {
+  display: grid;
+  gap: 0;
+  height: clamp(120px, 18dvh, 220px);
+  list-style: none;
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 0;
+  scroll-behavior: smooth;
+}
+.patch-review-activity-empty {
+  align-items: center;
+  color: #57606a;
+  display: flex;
+  font-size: 13px;
+  min-height: 100%;
+  padding: 12px;
+}
+.patch-review-activity-entry {
+  align-items: start;
+  border-bottom: 1px solid #d8dee4;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(148px, 190px) minmax(0, 1fr);
+  padding: 9px 12px;
+}
+.patch-review-activity-entry:nth-child(even) {
+  background: #f8fafc;
+}
+.patch-review-activity-entry:last-child {
+  border-bottom: 0;
+}
+.patch-review-activity-entry strong {
+  color: #24292f;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.patch-review-activity-entry code {
+  background: #f1f3f5;
+  border-radius: 3px;
+  color: #57606a;
+  font:
+    13px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  overflow-wrap: anywhere;
+  padding: 1px 4px;
+}
+.patch-review-activity-command-row {
+  display: block;
+  padding: 0;
+}
+.patch-review-activity-command-disclosure {
+  min-width: 0;
+}
+.patch-review-activity-command-summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  list-style: none;
+  min-width: 0;
+  padding: 9px 12px;
+}
+.patch-review-activity-command-summary::-webkit-details-marker {
+  display: none;
+}
+.patch-review-activity-command-summary::before {
+  border-bottom: 2px solid currentcolor;
+  border-right: 2px solid currentcolor;
+  content: "";
+  flex: 0 0 auto;
+  height: 5px;
+  margin: 0 2px 3px 0;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+  width: 5px;
+}
+.patch-review-activity-command-disclosure[open] > .patch-review-activity-command-summary::before {
+  margin-bottom: 3px;
+  transform: rotate(45deg);
+}
+.patch-review-activity-command-summary strong {
+  flex: 0 0 auto;
+}
+.patch-review-activity-command-preview {
+  color: #57606a;
+  font:
+    13px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.patch-review-activity-command-disclosure > code {
+  border-top: 1px solid #d8dee4;
+  box-sizing: border-box;
+  display: block;
+  max-height: min(40dvh, 420px);
+  overflow: auto;
+  padding: 9px 12px;
+  white-space: pre-wrap;
+}
+.patch-review-activity-command-summary:focus-visible {
+  outline: 2px solid #0969da;
+  outline-offset: -2px;
+}
+.patch-review-activity-edit strong,
+.patch-review-activity-instruction strong {
+  color: #0550ae;
+}
+.patch-review-activity-error strong {
+  color: #9b1c1c;
+}
+.patch-review-steer {
+  align-items: center;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  padding: 8px 10px;
+}
+.patch-review-steer-label {
+  color: #24292f;
+  font-size: 12px;
+  font-weight: 700;
+}
+.patch-review-steer > div {
+  align-items: end;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.patch-review-steer-input {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-radius: 4px;
+  box-sizing: border-box;
+  color: #24292f;
+  flex: 1 1 auto;
+  font: 13px/1.4 system-ui, sans-serif;
+  min-height: 48px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+.patch-review-steer-submit {
+  align-self: stretch;
+  background: #0969da;
+  border: 1px solid #0550ae;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 12px;
+}
+.patch-review-steer-submit:disabled {
+  background: #8c959f;
+  border-color: #8c959f;
+  cursor: default;
+}
+.patch-review-output {
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  color: #24292f;
+  flex: 1 1 auto;
+  font:
+    12px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 9px;
+  white-space: pre-wrap;
+}
+.patch-review-workspace {
+  display: grid;
+  flex: 1 1 0;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 0;
+  overflow: hidden;
+  padding-bottom: 14px;
+}
+.patch-review-diff-column,
+.patch-review-analysis {
+  min-height: 0;
+  min-width: 0;
+}
+.patch-review-diff-column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+.patch-review-analysis {
+  background: #fbfcfe;
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  padding: 14px;
+}
+.patch-review-patch-context {
+  border: 1px solid #b6d7f2;
+  border-left: 4px solid #1f6feb;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+.patch-review-patch-context-toggle {
+  align-items: center;
+  background: #eaf4ff;
+  border: 0;
+  color: #0550ae;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  justify-content: space-between;
+  padding: 7px 10px;
+  text-align: left;
+  width: 100%;
+}
+.patch-review-patch-context-toggle::after {
+  border-bottom: 2px solid #0550ae;
+  border-right: 2px solid #0550ae;
+  content: "";
+  height: 6px;
+  margin: 0 3px 3px 10px;
+  transform: rotate(45deg);
+  transition: transform 120ms ease;
+  width: 6px;
+}
+.patch-review-patch-context-toggle[aria-expanded="true"]::after {
+  margin-bottom: -3px;
+  transform: rotate(225deg);
+}
+.patch-review-patch-context-toggle span {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.patch-review-patch-context-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  max-height: min(24dvh, 240px);
+  overflow: auto;
+}
+.patch-review-patch-context-details > div {
+  border-top: 1px solid #d8dee4;
+  min-width: 0;
+  padding: 9px 10px;
+}
+.patch-review-patch-context-details > div:nth-child(odd) {
+  border-right: 1px solid #d8dee4;
+}
+.patch-review-patch-context-details dt,
+.patch-review-coverage dt,
+.patch-review-rationale-section h4,
+.patch-review-validation-section h4 {
+  color: #57606a;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  margin: 0;
+  text-transform: uppercase;
+}
+.patch-review-patch-context-details dd,
+.patch-review-coverage dd {
+  color: #24292f;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.patch-review-discussion {
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  max-height: min(28dvh, 300px);
+  overflow: auto;
+}
+.patch-review-discussion > summary,
+.patch-review-coverage > summary {
+  align-items: center;
+  background: #f3f6f9;
+  color: #24292f;
+  cursor: pointer;
+  display: flex;
+  font-size: 14px;
+  font-weight: 700;
+  min-height: 38px;
+  padding: 8px 10px;
+}
+.patch-review-discussion[open] > summary,
+.patch-review-coverage[open] > summary {
+  border-bottom: 1px solid #d8dee4;
+}
+.patch-review-discussion-list {
+  border-top: 1px solid #d8dee4;
+}
+.patch-review-discussion-entry {
+  border-bottom: 1px solid #d8dee4;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+.patch-review-discussion-entry:nth-child(even) {
+  background: #f8fafc;
+}
+.patch-review-discussion-entry:last-child {
+  border-bottom: 0;
+}
+.patch-review-discussion-entry header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+.patch-review-discussion-entry strong {
+  color: #24292f;
+  font-size: 14px;
+}
+.patch-review-discussion-entry header span,
+.patch-review-discussion-entry a {
+  color: #57606a;
+  font-size: 13px;
+}
+.patch-review-discussion-entry a {
+  color: #0969da;
+  font-weight: 600;
+}
+.patch-review-discussion-entry p,
+.patch-review-discussion-entry pre {
+  font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.patch-review-discussion-entry pre {
+  background: #f6f8fa;
+  border: 1px solid #d8dee4;
+  border-radius: 4px;
+  padding: 8px;
+}
+.patch-review-discussion-notice {
+  color: #57606a;
+  font-size: 13px;
+  margin: 0;
+  padding: 10px;
+}
+.patch-review-context-diff,
+.patch-review-experiment-diff {
+  border: 1px solid #b6d7f2;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.patch-review-context-diff {
+  flex: 1 1 auto;
+}
+.patch-review-context-diff-heading,
+.patch-review-experiment-diff-heading {
+  background: #eaf4ff;
+  border-bottom: 1px solid #b6d7f2;
+  padding: 7px 10px;
+}
+.patch-review-context-diff-heading h3,
+.patch-review-experiment-diff-heading h3 {
+  color: #0550ae;
+  font-size: 12px;
+  margin: 0;
+}
+.patch-review-context-diff-location,
+.patch-review-experiment-diff-heading span {
+  color: #57606a;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.patch-review-context-diff-content,
+.patch-review-experiment-diff-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.patch-review-context-diff-content .pretty-file,
+.patch-review-experiment-diff-content .pretty-file {
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+}
+.patch-review-context-diff-content .pretty-file + .pretty-file,
+.patch-review-experiment-diff-content .pretty-file + .pretty-file {
+  border-top: 1px solid #d8dee4;
+}
+.patch-review-context-diff-content .pretty-file h3,
+.patch-review-experiment-diff-content .pretty-file h3 {
+  border-radius: 0;
+}
+.patch-review-context-line td {
+  background: #fff8c5;
+  box-shadow: inset 3px 0 #bf8700;
+}
+.patch-review-proposed-inline {
+  border-left: 4px solid #0969da;
+}
+.patch-review-existing-inline {
+  border-left: 4px solid #8250df;
+}
+.patch-review-diff-notice {
+  color: #57606a;
+  line-height: 1.5;
+  margin: 0;
+  padding: 12px;
+}
+.patch-review-diff-notice.error,
+.patch-review-discussion-notice.error {
+  color: #9b1c1c;
+}
+.patch-review-progress-summary:focus-visible,
+.patch-review-discussion > summary:focus-visible,
+.patch-review-coverage > summary:focus-visible,
+.patch-review-patch-context-toggle:focus-visible,
+.patch-review-activity-filter button:focus-visible {
+  outline: 2px solid #0969da;
+  outline-offset: -2px;
+}
+.patch-review-issue,
+.patch-review-coverage,
+.patch-review-final {
+  border: 1px solid #d8dee4;
+  border-radius: 4px;
+  padding: 12px;
+}
+.patch-review-issue {
+  display: grid;
+  gap: 12px;
+}
+.patch-review-issue > header {
+  align-items: baseline;
+  justify-content: flex-start;
+}
+.patch-review-issue h3,
+.patch-review-final h3 {
+  color: #24292f;
+  font-size: 15px;
+  margin: 0;
+}
+.patch-review-severity {
+  background: #fff8c5;
+  border: 1px solid #d4a72c80;
+  border-radius: 999px;
+  color: #7d4e00;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 7px;
+}
+.patch-review-position {
+  color: #57606a;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin-left: auto;
+  overflow-wrap: anywhere;
+}
+.patch-review-rationale-section,
+.patch-review-validation-section {
+  display: grid;
+  gap: 7px;
+}
+.patch-review-rationale-section,
+.patch-review-validation-section,
+.patch-review-final {
+  background: #fff;
+}
+.patch-review-rationale,
+.patch-review-validation,
+.patch-review-final > p {
+  color: #24292f;
+  line-height: 1.5;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.patch-review-issue label,
+.patch-review-final label {
+  color: #57606a;
+  display: grid;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 5px;
+}
+.patch-review-comment,
+.patch-review-suggestion,
+.patch-review-final-message {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-radius: 4px;
+  box-sizing: border-box;
+  color: #20242a;
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  min-width: 0;
+  padding: 9px 10px;
+  resize: vertical;
+  width: 100%;
+}
+.patch-review-suggestion {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.patch-review-coverage {
+  display: block;
+}
+.patch-review-coverage[open] > summary {
+  border-bottom: 1px solid #d8dee4;
+  margin: -12px -12px 0;
+}
+.patch-review-coverage dl {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+.patch-review-coverage dl div {
+  display: grid;
+  gap: 3px;
+}
+.patch-review-experiment-diff {
+  flex: 0 0 auto;
+  min-height: 200px;
+}
+.patch-review-experiment-diff-content {
+  max-height: min(34dvh, 420px);
+}
+.patch-review-experiment-diff-raw {
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+.patch-review-final {
+  display: grid;
+  gap: 10px;
+}
+.patch-review-actions {
+  background: #fff;
+  border-top: 1px solid #d8dee4;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin: 0 -22px;
+  padding: 12px 22px;
+}
+.patch-review-actions button {
+  background: #fff;
+  border: 1px solid #b9c0cc;
+  border-radius: 4px;
+  color: #20242a;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 10px;
+}
+.patch-review-actions button:hover,
+.patch-review-actions button:focus {
+  background: #f6f8fa;
+  outline: none;
+}
+.patch-review-actions [data-review-outcome="accept"] {
+  background: #1a7f37;
+  border-color: #1a7f37;
+  color: #fff;
+}
+.patch-review-actions [data-review-outcome="request-changes"] {
+  background: #cf222e;
+  border-color: #cf222e;
+  color: #fff;
+}
+.patch-review-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.patch-review-dialog.output-expanded .patch-review-workspace {
+  display: none;
+}
+.patch-review-dialog.output-expanded .patch-review-output {
+  min-height: 320px;
+}
+.patch-review-dialog.output-expanded .patch-review-activity-list {
+  height: clamp(100px, 16dvh, 180px);
+}
+@media (max-width: 900px) {
+  .patch-review-workspace {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+  .patch-review-diff-column,
+  .patch-review-analysis {
+    min-height: min(70dvh, 680px);
+  }
+}
+@media (max-width: 720px) {
+  .patch-review-dialog {
+    height: calc(100dvh - 12px);
+    width: calc(100vw - 12px);
+  }
+  .patch-review-panel {
+    padding: 14px 14px 0;
+  }
+  .patch-review-actions {
+    margin: 0 -14px;
+    padding: 10px 14px;
+  }
+  .patch-review-steer {
+    grid-template-columns: 1fr;
+  }
+  .patch-review-activity-entry {
+    grid-template-columns: 1fr;
+    row-gap: 3px;
+  }
+  .patch-review-patch-context-details {
+    grid-template-columns: 1fr;
+  }
+  .patch-review-patch-context-details > div:nth-child(odd) {
+    border-right: 0;
+  }
+}
+@media (prefers-color-scheme: dark) {
+  .patch-review-dialog {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .patch-review-close:hover,
+  .patch-review-close:focus {
+    background: #252d38;
+    color: #f1f3f6;
+  }
+  .patch-review-progress-summary,
+  .patch-review-activity-heading h3,
+  .patch-review-steer-label,
+  .patch-review-activity-latest,
+  .patch-review-patch-context-details dd,
+  .patch-review-discussion-entry strong,
+  .patch-review-issue h3,
+  .patch-review-final h3,
+  .patch-review-rationale,
+  .patch-review-validation {
+    color: #e6edf3;
+  }
+  .patch-review-progress .patch-review-status,
+  .patch-review-progress-toggle,
+  .patch-review-patch-context-details dt,
+  .patch-review-coverage dt,
+  .patch-review-rationale-section h4,
+  .patch-review-validation-section h4,
+  .patch-review-context-diff-location,
+  .patch-review-experiment-diff-heading span,
+  .patch-review-discussion-entry header span,
+  .patch-review-discussion-entry a,
+  .patch-review-position,
+  .patch-review-diff-notice,
+  .patch-review-discussion-notice,
+  .patch-review-activity-command-preview {
+    color: #acb4c0;
+  }
+  .patch-review-activity,
+  .patch-review-steer,
+  .patch-review-patch-context,
+  .patch-review-discussion,
+  .patch-review-context-diff,
+  .patch-review-experiment-diff,
+  .patch-review-analysis,
+  .patch-review-issue,
+  .patch-review-coverage,
+  .patch-review-final,
+  .patch-review-output {
+    border-color: #303845;
+  }
+  .patch-review-activity-status,
+  .patch-review-activity-heading,
+  .patch-review-context-diff-heading,
+  .patch-review-experiment-diff-heading {
+    background: #1d232c;
+    border-color: #303845;
+  }
+  .patch-review-activity-entry,
+  .patch-review-activity-command-disclosure > code,
+  .patch-review-discussion-list,
+  .patch-review-discussion-entry,
+  .patch-review-coverage[open] > summary {
+    border-color: #303845;
+  }
+  .patch-review-activity-entry:nth-child(even),
+  .patch-review-steer,
+  .patch-review-analysis,
+  .patch-review-rationale-section,
+  .patch-review-validation-section,
+  .patch-review-final,
+  .patch-review-actions {
+    background: #1b2129;
+  }
+  .patch-review-activity-entry code,
+  .patch-review-activity-list code,
+  .patch-review-output,
+  .patch-review-discussion-entry pre,
+  .patch-review-comment,
+  .patch-review-suggestion,
+  .patch-review-final-message,
+  .patch-review-steer-input {
+    background: #0d1117;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .patch-review-patch-context-toggle {
+    background: #102b40;
+    color: #79c0ff;
+  }
+  .patch-review-patch-context-toggle::after {
+    border-color: #79c0ff;
+  }
+  .patch-review-patch-context-details > div {
+    border-color: #303845;
+  }
+  .patch-review-context-diff-heading h3,
+  .patch-review-experiment-diff-heading h3 {
+    color: #79c0ff;
+  }
+  .patch-review-context-line td {
+    background: #3d3308;
+    box-shadow: inset 3px 0 #d29922;
+  }
+  .patch-review-actions button {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .patch-review-actions button:hover,
+  .patch-review-actions button:focus {
+    background: #252d38;
+  }
+  .patch-review-actions [data-review-outcome="accept"] {
+    background: #56d364;
+    border-color: #56d364;
+    color: #07111f;
+  }
+  .patch-review-actions [data-review-outcome="request-changes"] {
+    background: #f26d6d;
+    border-color: #f26d6d;
+    color: #07111f;
+  }
+  .patch-review-diff-notice.error,
+  .patch-review-discussion-notice.error,
+  .patch-review-progress .patch-review-status.error {
+    color: #ff9f9f;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -6172,6 +8592,7 @@ body.has-command-status .dashboard-panel {
   .dashboard-section-description,
   .dashboard-count,
   .dashboard-groups,
+  .dashboard-author,
   .dashboard-row-meta,
   .dashboard-bug-patches,
   .dashboard-empty {
@@ -6300,7 +8721,6 @@ body.has-command-status .dashboard-panel {
   .patch-update-comment-location,
   .patch-update-change-summary,
   .patch-update-comment-kind,
-  .patch-update-instruction-label,
   .patch-update-reply-label {
     color: #acb4c0;
   }
@@ -6312,12 +8732,86 @@ body.has-command-status .dashboard-panel {
   .patch-update-status.error {
     color: #ff9f9f;
   }
+  .patch-update-steer {
+    background: #1b2129;
+    border-color: #303845;
+  }
+  .patch-update-steer label {
+    color: #e6edf3;
+  }
+  .patch-update-steer-input {
+    background: #0d1117;
+    border-color: #4b5563;
+    color: #e6edf3;
+  }
+  .patch-update-steer-input:focus {
+    border-color: #58a6ff;
+    outline-color: rgba(88, 166, 255, 0.3);
+  }
+  .patch-update-steer-submit {
+    background: #1f6feb;
+    border-color: #388bfd;
+  }
+  .patch-update-steer-submit:hover,
+  .patch-update-steer-submit:focus {
+    background: #388bfd;
+  }
+  .patch-update-steer-submit:disabled {
+    background: #4b5563;
+    border-color: #4b5563;
+  }
+  .patch-update-context {
+    background: #161b22;
+    border-color: #285a8b;
+    border-left-color: #58a6ff;
+  }
+  .patch-update-context-toggle {
+    background: #102b40;
+  }
+  .patch-update-context-toggle:hover,
+  .patch-update-context-toggle:focus {
+    background: #153852;
+  }
+  .patch-update-context-toggle::after {
+    border-color: #79c0ff;
+  }
+  .patch-update-context-toggle span {
+    color: #79c0ff;
+  }
+  .patch-update-context-details dt {
+    color: #acb4c0;
+  }
+  .patch-update-context-details > div {
+    border-color: #303845;
+  }
+  .patch-update-context-details dd {
+    color: #e6edf3;
+  }
+  .patch-update-comment-context {
+    background: #161b22;
+    border-color: #285a8b;
+  }
+  .patch-update-comment-context-heading {
+    background: #102b40;
+    border-color: #285a8b;
+  }
+  .patch-update-comment-context-heading h3 {
+    color: #79c0ff;
+  }
+  .patch-update-comment-context-location {
+    color: #acb4c0;
+  }
+  .patch-update-comment-context-diff .comment-context-line td {
+    background: #3d3308;
+    box-shadow: inset 3px 0 #d29922;
+  }
   .patch-update-comment,
   .patch-update-output {
     background: #161b22;
     border-color: #303845;
   }
   .patch-update-comment-heading,
+  .patch-update-activity-status,
   .patch-update-activity-heading {
     background: #1d232c;
     border-color: #303845;
@@ -6330,6 +8824,7 @@ body.has-command-status .dashboard-panel {
     border-color: #303845;
   }
   .patch-update-rationale,
+  .patch-update-validation,
   .patch-update-change-plan,
   .patch-update-proposed-diff {
     background: #161b22;
@@ -6345,6 +8840,9 @@ body.has-command-status .dashboard-panel {
   .patch-update-proposed-diff-heading span {
     color: #acb4c0;
   }
+  .patch-update-proposed-diff-missing {
+    color: #ff9f9f;
+  }
   .patch-update-actions {
     background: #191d23;
     border-color: #303845;
@@ -6352,11 +8850,32 @@ body.has-command-status .dashboard-panel {
   .patch-update-activity {
     border-color: #303845;
   }
+  .patch-update-activity-status,
   .patch-update-activity-heading {
     background: #1d232c;
     border-color: #303845;
   }
-  .patch-update-activity-count,
+  .patch-update-activity-latest {
+    color: #e6edf3;
+  }
+  .patch-update-activity-filter button {
+    background: #161b22;
+    border-color: #6b7280;
+    color: #e6edf3;
+  }
+  .patch-update-activity-filter button:hover,
+  .patch-update-activity-filter button:focus-visible {
+    background: #252d38;
+  }
+  .patch-update-activity-filter button[aria-pressed="true"] {
+    background: #1f6feb;
+    border-color: #1f6feb;
+    color: #fff;
+  }
+  .patch-update-activity-filter button[aria-pressed="true"] + button {
+    border-left-color: #1f6feb;
+  }
+  .patch-update-activity-empty,
   .patch-update-activity-entry code {
     color: #acb4c0;
   }
@@ -6368,6 +8887,12 @@ body.has-command-status .dashboard-panel {
   }
   .patch-update-activity-entry code {
     background: #0d1117;
+  }
+  .patch-update-activity-command-preview {
+    color: #acb4c0;
+  }
+  .patch-update-activity-command-disclosure > code {
+    border-color: #303845;
   }
   .patch-update-activity-entry strong {
     color: #e6edf3;
@@ -6392,6 +8917,16 @@ body.has-command-status .dashboard-panel {
   .patch-update-analysis h4 {
     color: #acb4c0;
   }
+  .patch-update-progress-summary {
+    color: #f1f3f6;
+  }
+  .patch-update-progress-toggle {
+    color: #acb4c0;
+  }
+  .patch-update-progress-summary:hover .patch-update-progress-label,
+  .patch-update-progress-summary:focus .patch-update-progress-label {
+    color: #79c0ff;
+  }
   .patch-update-feedback-heading {
     color: #f1f3f6;
   }
@@ -6408,7 +8943,6 @@ body.has-command-status .dashboard-panel {
   .patch-update-analysis {
     border-color: #303845;
   }
-  .patch-update-instruction,
   .patch-update-reply {
     background: #0d1117;
     border-color: #424b59;
@@ -6423,17 +8957,25 @@ body.has-command-status .dashboard-panel {
   .patch-update-actions button:focus {
     background: #303845;
   }
-  .patch-update-actions .patch-update-apply,
+  .patch-update-actions .patch-update-keep,
   .patch-update-actions .patch-update-submit {
     background: #4b9eff;
     border-color: #4b9eff;
     color: #07111f;
   }
-  .patch-update-actions .patch-update-apply:hover,
-  .patch-update-actions .patch-update-apply:focus,
+  .patch-update-actions .patch-update-keep:hover,
+  .patch-update-actions .patch-update-keep:focus,
   .patch-update-actions .patch-update-submit:hover,
   .patch-update-actions .patch-update-submit:focus {
     background: #79c0ff;
+  }
+  .patch-update-actions .patch-update-revert {
+    border-color: #ff7b72;
+    color: #ff9f9f;
+  }
+  .patch-update-actions .patch-update-revert:hover,
+  .patch-update-actions .patch-update-revert:focus {
+    background: #3b1d23;
   }
 }
 
@@ -6972,5 +9514,162 @@ body.has-command-status .dashboard-panel {
     background: #4b9eff;
     border-color: #4b9eff;
     color: #07111f;
+  }
+}
+@media (prefers-color-scheme: dark) {
+  .patch-review-dialog {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .patch-review-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.58);
+  }
+  .patch-review-kicker,
+  .patch-review-close,
+  .patch-review-coverage dt,
+  .patch-review-severity,
+  .patch-review-position {
+    color: #acb4c0;
+  }
+  .patch-review-activity,
+  .patch-review-coverage,
+  .patch-review-issue,
+  .patch-review-final,
+  .patch-review-output {
+    border-color: #424b59;
+  }
+  .patch-review-activity-list code,
+  .patch-review-output,
+  .patch-review-suggestion {
+    background: #0d1117;
+  }
+  .patch-review-activity-entry,
+  .patch-review-activity-command-summary {
+    color: #e6edf3;
+  }
+  .patch-review-activity-entry strong,
+  .patch-review-activity-command-summary strong {
+    color: #f0f6fc;
+  }
+  .patch-review-activity-entry code,
+  .patch-review-activity-command-disclosure > code {
+    color: #e6edf3;
+  }
+  .patch-review-activity-command-preview,
+  .patch-review-activity-empty {
+    color: #c6d0dc;
+  }
+  .patch-review-activity-command-summary:focus-visible {
+    outline-color: #79c0ff;
+  }
+  .patch-review-comment,
+  .patch-review-suggestion,
+  .patch-review-final-message,
+  .patch-review-issue-actions button,
+  .patch-review-final-actions button {
+    background: #191d23;
+    border-color: #424b59;
+    color: #f1f3f6;
+  }
+  .patch-review-issue-actions button:hover,
+  .patch-review-issue-actions button:focus,
+  .patch-review-final-actions button:hover,
+  .patch-review-final-actions button:focus {
+    background: #222832;
+  }
+  .patch-review-final-actions button[data-review-outcome="request-changes"] {
+    background: #f26d6d;
+    border-color: #f26d6d;
+    color: #07111f;
+  }
+  .patch-review-final-actions button[data-review-outcome="accept"] {
+    background: #56d364;
+    border-color: #56d364;
+    color: #07111f;
+  }
+  .patch-review-progress-summary,
+  .patch-review-progress-label,
+  .patch-review-activity-heading h3,
+  .patch-review-discussion > summary,
+  .patch-review-coverage > summary,
+  .patch-review-issue h3,
+  .patch-review-final h3 {
+    color: #f0f6fc;
+  }
+  .patch-review-progress .patch-review-status,
+  .patch-review-progress-toggle,
+  .patch-review-patch-context-details dt,
+  .patch-review-coverage dt,
+  .patch-review-rationale-section h4,
+  .patch-review-validation-section h4,
+  .patch-review-context-diff-location,
+  .patch-review-experiment-diff-heading span,
+  .patch-review-discussion-entry header span,
+  .patch-review-position,
+  .patch-review-diff-notice,
+  .patch-review-discussion-notice,
+  .patch-review-issue label,
+  .patch-review-final label {
+    color: #c6d0dc;
+  }
+  .patch-review-discussion-entry p,
+  .patch-review-discussion-entry pre,
+  .patch-review-rationale,
+  .patch-review-validation,
+  .patch-review-final > p,
+  .patch-review-coverage dd {
+    color: #e6edf3;
+  }
+  .patch-review-discussion-entry a {
+    color: #79c0ff;
+  }
+  .patch-review-discussion > summary,
+  .patch-review-coverage > summary {
+    background: #1d232c;
+    border-color: #303845;
+  }
+  .patch-review-discussion-entry:nth-child(even) {
+    background: #1b2129;
+  }
+  .patch-review-activity-filter button {
+    background: #191d23;
+    border-color: #566170;
+    color: #d8e1ec;
+  }
+  .patch-review-activity-filter button:hover,
+  .patch-review-activity-filter button:focus-visible {
+    background: #252d38;
+    color: #f0f6fc;
+  }
+  .patch-review-activity-filter button[aria-pressed="true"] {
+    background: #0b5394;
+    border-color: #58a6ff;
+    color: #fff;
+  }
+  .patch-review-activity-filter button[aria-pressed="true"] + button {
+    border-left-color: #58a6ff;
+  }
+  .patch-review-activity-edit strong,
+  .patch-review-activity-instruction strong {
+    color: #79c0ff;
+  }
+  .patch-review-activity-error strong,
+  .patch-review-progress .patch-review-status.error,
+  .patch-review-diff-notice.error,
+  .patch-review-discussion-notice.error {
+    color: #ffb4ab;
+  }
+  .patch-review-severity {
+    background: #3d3308;
+    border-color: #d29922;
+    color: #f2cc60;
+  }
+  .patch-review-progress-summary:focus-visible,
+  .patch-review-discussion > summary:focus-visible,
+  .patch-review-coverage > summary:focus-visible,
+  .patch-review-patch-context-toggle:focus-visible,
+  .patch-review-activity-filter button:focus-visible {
+    outline-color: #79c0ff;
   }
 }

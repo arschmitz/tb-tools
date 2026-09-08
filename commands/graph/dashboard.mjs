@@ -8,6 +8,10 @@ import {
 import defaultPhab from "../../lib/phab.mjs";
 import { getBugIdFromText, getBugUrl, getPhabUrl } from "../../lib/workflow.mjs";
 import { CHECKIN_NEEDED_KEYWORD } from "./constants.mjs";
+import {
+  loadReviewerGroupCache as defaultLoadReviewerGroupCache,
+  saveReviewerGroupCache as defaultSaveReviewerGroupCache,
+} from "./reviewer-groups-cache.mjs";
 
 const CHANGE_TRANSACTION_TYPES = new Set([
   "diff",
@@ -126,11 +130,18 @@ function normalizeRevision(revision = {}) {
     status: revision.status || "",
     statusName: revision.statusName || revision.status || "Unknown",
     authorPHID: revision.authorPHID || "",
+    authorName: String(revision.authorName || revision.authorRealName || "").trim(),
     bugId: getBugIdFromText(revision.title || "") || "",
     dateCreated: getRecordTimestamp(revision),
     dateModified: normalizeTimestamp(revision.dateModified),
     reviewers: revision.reviewers || {},
   };
+}
+
+function getUserDisplayName(user = {}) {
+  return String(
+    user.realName || user.userName || user.username || user.phid || "",
+  ).trim();
 }
 
 function getRevisionTimeline({ revision, transactions = [], currentUserPhid }) {
@@ -161,6 +172,7 @@ function getRevisionTimeline({ revision, transactions = [], currentUserPhid }) {
   ));
 
   return {
+    currentReviewEventCount: currentReviewEvents.length,
     latestPatchUpdateAt,
     latestReviewAt: Math.max(...reviewEvents.map(getTransactionTimestamp), 0),
     latestCurrentReviewAt: Math.max(
@@ -172,6 +184,10 @@ function getRevisionTimeline({ revision, transactions = [], currentUserPhid }) {
       0,
     ),
   };
+}
+
+function hasReviewerFeedbackAwaitingUpdate(revision = {}, timeline = {}) {
+  return isNeedsReview(revision) && Number(timeline.currentReviewEventCount || 0) > 0;
 }
 
 function getAge(timestamp, now) {
@@ -294,37 +310,77 @@ async function getReviewerGroups({ currentUserPhid, phab }) {
   })).filter((group) => group.phid);
 }
 
-async function getGroupRevisions({ groups, phab }) {
-  const responses = await Promise.all(groups.map(async (group) => {
-    try {
-      const response = await phab({
-        route: "differential.query",
-        params: { reviewers: [group.phid], status: "status-open" },
-      });
+async function getDashboardIdentityAndReviewerGroups({
+  loadReviewerGroupCache,
+  now,
+  phab,
+  saveReviewerGroupCache,
+  username,
+}) {
+  const cached = await loadReviewerGroupCache({ now, username });
 
-      return { group, revisions: response?.result || [] };
-    } catch (error) {
-      return { group, revisions: [], error: String(error?.message || error) };
-    }
-  }));
-  const revisions = new Map();
-  const errors = responses.filter((response) => response.error).map((response) => (
-    `${response.group.name}: ${response.error}`
-  ));
-
-  for (const response of responses) {
-    for (const revision of response.revisions) {
-      const normalized = normalizeRevision(revision);
-
-      if (!normalized.id || isClosed(normalized)) {
-        continue;
-      }
-
-      revisions.set(normalized.id, normalized);
-    }
+  if (cached?.fresh) {
+    return cached;
   }
 
-  return { revisions: Array.from(revisions.values()), errors };
+  try {
+    const identityResponse = await phab({
+      route: "user.query",
+      params: { usernames: [username] },
+    });
+    const currentUser = identityResponse?.result?.[0];
+
+    if (!currentUser?.phid) {
+      throw new Error(`Could not find Phabricator user ${username}.`);
+    }
+
+    const groups = await getReviewerGroups({
+      currentUserPhid: currentUser.phid,
+      phab,
+    });
+
+    await saveReviewerGroupCache({ currentUser, groups, now, username });
+    return { currentUser, groups };
+  } catch (error) {
+    if (cached) {
+      return cached;
+    }
+
+    throw error;
+  }
+}
+
+async function getGroupRevisions({ groups, phab }) {
+  const reviewerPhids = getUniqueValues(groups.map((group) => group.phid));
+
+  if (!reviewerPhids.length) {
+    return { revisions: [], errors: [] };
+  }
+
+  try {
+    // differential.query treats reviewer PHIDs as an OR constraint. Asking once
+    // for every group can create a burst large enough to rate-limit the account.
+    const response = await phab({
+      route: "differential.query",
+      params: { reviewers: reviewerPhids, status: "status-open" },
+    });
+    const revisions = new Map();
+
+    for (const revision of response?.result || []) {
+      const normalized = normalizeRevision(revision);
+
+      if (normalized.id && !isClosed(normalized)) {
+        revisions.set(normalized.id, normalized);
+      }
+    }
+
+    return { revisions: Array.from(revisions.values()), errors: [] };
+  } catch (error) {
+    return {
+      revisions: [],
+      errors: [`Review groups: ${String(error?.message || error)}`],
+    };
+  }
 }
 
 async function getRevisionsByIds({ ids, phab }) {
@@ -346,6 +402,40 @@ async function getRevisionsByIds({ ids, phab }) {
   }
 
   return revisions;
+}
+
+async function getRevisionAuthorNames({ revisions, phab }) {
+  const authorsByPhid = new Map();
+  const authorPhids = getUniqueValues(
+    revisions
+      .filter((revision) => !revision.authorName)
+      .map((revision) => revision.authorPHID),
+  );
+
+  for (const phids of chunkValues(authorPhids)) {
+    const response = await phab({
+      route: "user.query",
+      params: { phids },
+    });
+
+    for (const [index, user] of (response?.result || []).entries()) {
+      const phid = String(user?.phid || phids[index] || "");
+      const name = getUserDisplayName(user);
+
+      if (phid && name) {
+        authorsByPhid.set(phid, name);
+      }
+    }
+  }
+
+  return authorsByPhid;
+}
+
+function withAuthorNames(revisions, authorsByPhid) {
+  return revisions.map((revision) => ({
+    ...revision,
+    authorName: revision.authorName || authorsByPhid.get(revision.authorPHID) || "",
+  }));
 }
 
 async function getAssignedBugAttachments({ bugs, getBugsWithAttachmentsByIds }) {
@@ -434,7 +524,12 @@ export function classifyDashboardRevisions({
 }) {
   const groupsByPhid = new Map(groups.map((group) => [group.phid, group.name]));
   const ownNeedsRevision = mine
-    .filter(isNeedsRevision)
+    .filter((revision) => {
+      const timeline = timelines.get(revision.id)?.timeline || {};
+
+      return isNeedsRevision(revision) ||
+        hasReviewerFeedbackAwaitingUpdate(revision, timeline);
+    })
     .map((revision) => {
       const timeline = timelines.get(revision.id)?.timeline || {};
 
@@ -443,6 +538,11 @@ export function classifyDashboardRevisions({
     .sort((first, second) => second.ageMs - first.ageMs);
   const ownNeedsReview = mine
     .filter(isNeedsReview)
+    .filter((revision) => {
+      const timeline = timelines.get(revision.id)?.timeline || {};
+
+      return !hasReviewerFeedbackAwaitingUpdate(revision, timeline);
+    })
     .map((revision) => {
       const timeline = timelines.get(revision.id)?.timeline || {};
 
@@ -501,12 +601,14 @@ export function classifyDashboardRevisions({
 
 export async function getDashboardData({
   appConfig = defaultConfig,
+  loadReviewerGroupCache = defaultLoadReviewerGroupCache,
   getAssignedOpenBugs = defaultGetAssignedOpenBugs,
   getBugsByIds = defaultGetBugsByIds,
   getBugsWithAttachmentsByIds = defaultGetBugsWithAttachmentsByIds,
   getNeedinfoOpenBugs = defaultGetNeedinfoOpenBugs,
   now = Date.now(),
   phab = defaultPhab,
+  saveReviewerGroupCache = defaultSaveReviewerGroupCache,
 } = {}) {
   const username = String(appConfig?.phabricator?.user || "").trim();
 
@@ -514,19 +616,16 @@ export async function getDashboardData({
     throw new Error("Set phabricator.user in ~/.tb.json to load the dashboard.");
   }
 
-  const identityResponse = await phab({
-    route: "user.query",
-    params: { usernames: [username] },
+  const { currentUser, groups } = await getDashboardIdentityAndReviewerGroups({
+    loadReviewerGroupCache,
+    now,
+    phab,
+    saveReviewerGroupCache,
+    username,
   });
-  const currentUser = identityResponse?.result?.[0];
-
-  if (!currentUser?.phid) {
-    throw new Error(`Could not find Phabricator user ${username}.`);
-  }
 
   const [
     mineResponse,
-    groups,
     assignedBugs,
     needinfoBugs,
     directReviewResponse,
@@ -535,7 +634,6 @@ export async function getDashboardData({
       route: "differential.query",
       params: { authors: [currentUser.phid], status: "status-open" },
     }),
-    getReviewerGroups({ currentUserPhid: currentUser.phid, phab }),
     getAssignedOpenBugs({ assignedTo: appConfig?.bugzilla?.user }),
     getNeedinfoOpenBugs({ requestee: appConfig?.bugzilla?.user }),
     phab({
@@ -594,6 +692,14 @@ export async function getDashboardData({
     bugsById,
     now,
   });
+  const reviewQueueRevisions = [
+    ...sections.directlyAssignedWaitingOnReview,
+    ...sections.groupWaitingForFirstReview,
+  ];
+  const authorsByPhid = await getRevisionAuthorNames({
+    revisions: reviewQueueRevisions,
+    phab,
+  });
   const assignedBugRows = buildAssignedBugRows({
     bugs: assignedBugs.filter((bug) => bug.is_open !== false),
     attachmentsByBugId,
@@ -610,6 +716,14 @@ export async function getDashboardData({
     groups,
     errors: groupErrors,
     ...sections,
+    directlyAssignedWaitingOnReview: withAuthorNames(
+      sections.directlyAssignedWaitingOnReview,
+      authorsByPhid,
+    ),
+    groupWaitingForFirstReview: withAuthorNames(
+      sections.groupWaitingForFirstReview,
+      authorsByPhid,
+    ),
     needinfoBugs: buildNeedinfoRows({ bugs: needinfoBugs, now }),
     inProgressBugs: assignedBugRows.filter((bug) => bug.hasPatch),
     assignedBugs: assignedBugRows.filter((bug) => !bug.hasPatch),

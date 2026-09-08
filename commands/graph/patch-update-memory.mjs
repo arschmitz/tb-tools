@@ -68,6 +68,7 @@ function formatItemMemory(item) {
     ["Codex recommendation", item.recommendation],
     ["Assessment", item.assessment],
     ["Rationale", item.rationale],
+    ["Validation", item.validation],
     ["Planned source change", item.changeSummary],
     ["Applied source change", item.appliedSummary],
     ["Draft reply", item.draftReply],

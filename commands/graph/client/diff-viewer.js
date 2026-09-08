@@ -8,6 +8,7 @@ import {
 import { isWorkingTreeCommit } from "./commit-model.js";
 import { updateCommitRowStates } from "./lane-renderer.js";
 import { showDiff } from "./commit-actions.js";
+import { showSystemConfirmation } from "./system-dialog.js";
 
 export function setDiffText(body, text) {
   const placeholder = document.createElement("pre");
@@ -59,6 +60,7 @@ export function clearDiffSelection(index, message = "Select a commit in the grap
   viewer.querySelector(".checkout-commit").hidden = true;
   viewer.querySelector(".amend-commit").hidden = true;
   viewer.querySelector(".submit-commit").hidden = true;
+  viewer.querySelector(".patch-update-commit")?.setAttribute("hidden", "");
   clearIntegrationStatus(viewer.querySelector(".integration-status"));
   viewer.querySelector(".checkout-status").textContent = "";
   setDiffStats(viewer.querySelector(".diff-stats"), null);
@@ -426,15 +428,24 @@ export function renderCommitIntegrationStatus(container, result, { index, commit
   container.hidden = false;
 }
 
-export async function loadSelectedCommitIntegrationStatus(index, commit, container) {
+export async function loadSelectedCommitIntegrationStatus(
+  index,
+  commit,
+  container,
+  { onLoaded } = {},
+) {
   if (!INTERACTIVE.enabled) {
     clearIntegrationStatus(container);
-    return;
+    onLoaded?.(null);
+    return null;
   }
 
   if (isWorkingTreeCommit(commit)) {
-    renderCommitIntegrationStatus(container, { tryRuns: commit.tryRuns || [] }, { index, commit });
-    return;
+    const result = { tryRuns: commit.tryRuns || [] };
+
+    renderCommitIntegrationStatus(container, result, { index, commit });
+    onLoaded?.(null);
+    return result;
   }
 
   container.hidden = false;
@@ -452,20 +463,29 @@ export async function loadSelectedCommitIntegrationStatus(index, commit, contain
     }
 
     if (graphStates[index].selectedHash !== commit.hash) {
-      return;
+      return null;
     }
 
     renderCommitIntegrationStatus(container, result, { index, commit });
+    onLoaded?.(result);
+    return result;
   } catch (error) {
+    const result = {
+      error: error && error.message ? error.message : String(error),
+    };
+
     if (graphStates[index].selectedHash === commit.hash) {
       container.replaceChildren(createStatusBadge({
         label: "Integrations",
         status: "Unavailable",
-        detail: error && error.message ? error.message : String(error),
+        detail: result.error,
         className: "error",
       }));
       container.hidden = false;
+      onLoaded?.(result);
     }
+
+    return result;
   }
 }
 
@@ -477,7 +497,11 @@ export async function markBugForCheckin(button) {
   const status = viewer.querySelector(".checkout-status");
   const container = viewer.querySelector(".integration-status");
 
-  if (!confirm("Add checkin-needed-tb to Bug " + bugId + "?")) {
+  if (!await showSystemConfirmation({
+    title: "Mark patch for checkin",
+    message: "Add checkin-needed-tb to Bug " + bugId + "?",
+    confirmLabel: "Mark for checkin",
+  })) {
     return;
   }
 
@@ -523,7 +547,7 @@ export async function markBugForCheckin(button) {
 export async function loadSelectedCommitMessage(index, commit, messageElement) {
   if (!INTERACTIVE.enabled || isWorkingTreeCommit(commit)) {
     setCommitMessage(messageElement, "");
-    return;
+    return "";
   }
 
   setCommitMessage(messageElement, "Loading commit message...");
@@ -540,14 +564,19 @@ export async function loadSelectedCommitMessage(index, commit, messageElement) {
     }
 
     if (graphStates[index].selectedHash !== commit.hash) {
-      return;
+      return "";
     }
 
-    setCommitMessage(messageElement, result.message || commit.subject);
+    const message = result.message || commit.subject;
+
+    setCommitMessage(messageElement, message);
+    return message;
   } catch (error) {
     if (graphStates[index].selectedHash === commit.hash) {
       setCommitMessage(messageElement, "Could not load commit message: " + (error && error.message ? error.message : String(error)));
     }
+
+    return "";
   }
 }
 

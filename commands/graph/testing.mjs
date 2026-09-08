@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { run } from "../../lib/utils.mjs";
+import { getTbToolsCommandEnvironment, run } from "../../lib/utils.mjs";
 import { getTestTargets } from "../test.mjs";
 import {
   DEFAULT_SUBMIT_OUTPUT_LIMIT,
@@ -760,7 +760,7 @@ export function runInteractiveTestCommand({
     const child = spawnCommand(processCommand.cmd, processCommand.args || [], {
       cwd: processCommand.cwd,
       env: {
-        ...process.env,
+        ...getTbToolsCommandEnvironment(),
         FORCE_COLOR: process.env.FORCE_COLOR || "1",
         MOZ_FORCE_COLOR: process.env.MOZ_FORCE_COLOR || "1",
       },

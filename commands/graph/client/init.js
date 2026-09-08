@@ -6,7 +6,6 @@ import {
   commitClose,
   commitForm,
   commitReviewerInput,
-  commitReviewerList,
   commitReviewerPills,
   contextMenu,
   graphStates,
@@ -55,7 +54,7 @@ import {
   closeGraphOptionsMenu,
   pollGraphUpdates,
   refreshOriginMainStatus,
-  runGraphUpdate,
+  renderOriginMainStatus,
   setGraphOptionsMenuOpen,
   setMachOutputPanel,
   dismissCommandStatus,
@@ -68,6 +67,18 @@ import {
   openTryDialog,
   updateTryDialogFields,
 } from "./command-sessions.js";
+import {
+  initializeUpdateScopeDialog,
+  openUpdateScopeDialog,
+} from "./update-scope-dialog.js";
+import {
+  initializeCheckoutTransferDialog,
+  openCheckoutTransferDialog,
+} from "./checkout-transfer-dialog.js";
+import {
+  initializeReviewSyncDialog,
+  openReviewSyncDialog,
+} from "./review-sync-dialog.js";
 import {
   answerLandPrompt,
   cancelOrCloseLandDialog,
@@ -113,6 +124,7 @@ import {
   closeAmendDialog,
   continueRebaseDialog,
   closeSubmitDialog,
+  loadSelectedCommitReviewForCurrentSelection,
   openAmendDialog,
   openSubmitDialog,
   runCommitAction,
@@ -120,16 +132,18 @@ import {
   submitAmendDialog,
 } from "./commit-actions.js";
 import {
-  addCommitReviewerFromEvent,
   closeCommitDialog,
   handleCommitReviewerPillEvent,
   handleCommitReviewerInputKeydown,
   openCommitDialog,
-  scheduleCommitReviewerSearch,
   submitCommitDialog,
 } from "./commit-dialog.js";
 import { initializeDashboard, showDashboard } from "./dashboard.js";
-import { initializePatchUpdateDialog } from "./patch-update-dialog.js";
+import {
+  initializePatchUpdateDialog,
+  openPatchUpdateDialog,
+} from "./patch-update-dialog.js";
+import { initializePatchReviewDialog } from "./patch-review-dialog.js";
 import {
   cancelPhabricatorAuthentication,
   closePhabricatorAuthDialog,
@@ -258,10 +272,21 @@ document.addEventListener("click", (event) => {
       openLandDialog();
     }
 
+    if (menuAction === "review-sync") {
+      openReviewSyncDialog();
+    }
+
     return;
   }
 
   const checkoutButton = event.target.closest(".checkout-commit");
+  const loadReviewButton = event.target.closest(".load-commit-review");
+
+  if (loadReviewButton) {
+    void loadSelectedCommitReviewForCurrentSelection(loadReviewButton);
+    return;
+  }
+
   if (checkoutButton) {
     checkoutSelectedCommit(checkoutButton);
     return;
@@ -279,6 +304,19 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  const patchUpdateButton = event.target.closest(".patch-update-commit");
+  if (patchUpdateButton) {
+    openPatchUpdateDialog({
+      patch: {
+        id: patchUpdateButton.dataset.revision,
+        title: patchUpdateButton.dataset.title,
+        url: patchUpdateButton.dataset.url,
+      },
+      graphIndex: Number(patchUpdateButton.dataset.graphIndex),
+    });
+    return;
+  }
+
   const checkinButton = event.target.closest(".checkin-needed-button");
   if (checkinButton) {
     markBugForCheckin(checkinButton);
@@ -287,7 +325,7 @@ document.addEventListener("click", (event) => {
 
   const updateButton = event.target.closest(".update-action");
   if (updateButton) {
-    runGraphUpdate(updateButton.dataset.mode);
+    openUpdateScopeDialog(updateButton.dataset.mode);
     return;
   }
 
@@ -378,6 +416,11 @@ contextMenu.addEventListener("click", (event) => {
     return;
   }
 
+  if (button.dataset.action === "copy") {
+    openCheckoutTransferDialog(actionState);
+    return;
+  }
+
   runCommitAction(button.dataset.action, actionState);
 });
 
@@ -396,17 +439,10 @@ interactiveRebaseForm
   .addEventListener("click", closeInteractiveRebaseDialog);
 commitForm.addEventListener("submit", submitCommitDialog);
 commitClose.addEventListener("click", closeCommitDialog);
-commitReviewerInput.addEventListener("focus", scheduleCommitReviewerSearch);
-commitReviewerInput.addEventListener("input", scheduleCommitReviewerSearch);
 commitReviewerInput.addEventListener(
   "keydown",
   handleCommitReviewerInputKeydown,
 );
-commitReviewerList.addEventListener("mousedown", (event) => {
-  if (addCommitReviewerFromEvent(event)) {
-    event.preventDefault();
-  }
-});
 commitReviewerPills.addEventListener("click", (event) => {
   handleCommitReviewerPillEvent(event);
 });
@@ -560,9 +596,10 @@ export function renderGraph(index) {
 
   if (INTERACTIVE.enabled) {
     if (!state.commits.length) {
-      loadMoreCommits(index);
+      void loadMoreCommits(index).then(() => selectCurrentCommit(index));
     } else {
       renderLoadedGraph(index);
+      selectCurrentCommit(index);
     }
 
     return;
@@ -592,12 +629,89 @@ export function renderGraph(index) {
   }
 }
 
+function selectCurrentCommit(index) {
+  const state = graphStates[index];
+
+  if (state.selectedHash || !state.currentHash) {
+    return;
+  }
+
+  const currentCommit = state.commits.find((commit) => (
+    commit.hash === state.currentHash
+  ));
+
+  if (currentCommit) {
+    void showDiff(state.graph, index, currentCommit);
+  }
+}
+
 let lastGraphTabIndex = Number(
   document.querySelector(".tab[data-index].active")?.dataset.index || 0,
 );
+const graphViewTab = document.querySelector(".graph-view-tab");
+
+function getGraphRepository(graph = {}) {
+  return String(graph.repository || graph.label || "").trim().toLowerCase();
+}
+
+function getGraphIndexForCheckout(repository, checkout) {
+  return graphStates.findIndex(({ graph }) => (
+    getGraphRepository(graph) === repository &&
+    (graph.checkout || "working") === checkout
+  ));
+}
+
+function updateCheckoutModeSwitch() {
+  document.querySelectorAll(".checkout-mode-button").forEach((button) => {
+    const active = button.dataset.checkout === uiState.checkoutMode;
+
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function updateRepositorySwitch(repository) {
+  document.querySelectorAll(".repository-button").forEach((button) => {
+    const active = button.dataset.repository === repository;
+
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function switchCheckoutMode(checkout) {
+  if (!checkout || checkout === uiState.checkoutMode) {
+    return;
+  }
+
+  const currentGraph = graphStates[lastGraphTabIndex]?.graph;
+  const currentRepository = getGraphRepository(currentGraph) || "comm";
+  const index = getGraphIndexForCheckout(currentRepository, checkout);
+  const fallbackIndex = graphStates.findIndex(({ graph }) => (
+    (graph.checkout || "working") === checkout
+  ));
+
+  if (index === -1 && fallbackIndex === -1) {
+    return;
+  }
+
+  uiState.checkoutMode = checkout;
+  uiState.originMainStatuses = [];
+  uiState.rustUpstreamStatus = null;
+  showTab(index === -1 ? fallbackIndex : index);
+  void refreshOriginMainStatus();
+}
 
 export function showTab(index) {
+  const graph = graphStates[index]?.graph;
+
+  if (!graph) {
+    return;
+  }
+
   lastGraphTabIndex = index;
+  document.body.classList.add("graph-view-active");
+  uiState.checkoutMode = graph.checkout || "working";
   clearConsoleRoute();
   document
     .querySelectorAll(".tab, .panel")
@@ -611,12 +725,19 @@ export function showTab(index) {
   hideSprints();
   testOutputPanel.hidden = true;
   testOutputTab.classList.remove("active");
-  document
-    .querySelector('.tab[data-index="' + index + '"]')
-    .classList.add("active");
+  const repository = getGraphRepository(graph);
+  const tab = document.querySelector(
+    '.tab[data-repository="' + repository + '"]',
+  ) || document.querySelector('.tab[data-index="' + index + '"]');
+
+  tab?.classList.add("active");
+  graphViewTab?.classList.add("active");
   document
     .querySelector('.panel[data-index="' + index + '"]')
     .classList.add("active");
+  updateCheckoutModeSwitch();
+  updateRepositorySwitch(repository);
+  renderOriginMainStatus(uiState.originMainStatuses);
   restoreGraphPaneWidth(index);
   renderGraph(index);
   scheduleGraphEnhancements(index);
@@ -626,8 +747,31 @@ document.querySelectorAll(".tab[data-index]").forEach((tab) => {
   tab.addEventListener("click", () => showTab(Number(tab.dataset.index)));
 });
 
+document.querySelectorAll(".tab[data-repository]").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const index = getGraphIndexForCheckout(
+      String(tab.dataset.repository || "").toLowerCase(),
+      uiState.checkoutMode,
+    );
+
+    if (index !== -1) {
+      showTab(index);
+    }
+  });
+});
+
+document.querySelectorAll(".checkout-mode-button").forEach((button) => {
+  button.addEventListener("click", () => switchCheckoutMode(button.dataset.checkout));
+});
+
+graphViewTab?.addEventListener("click", () => showTab(lastGraphTabIndex));
+
 initializeDashboard();
 initializePatchUpdateDialog();
+initializePatchReviewDialog();
+initializeUpdateScopeDialog();
+initializeCheckoutTransferDialog();
+initializeReviewSyncDialog();
 initializeMetaBoards();
 initializeSprints({ openBugDetail: openMetaBoardBugDetail });
 

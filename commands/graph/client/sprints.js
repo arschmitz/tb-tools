@@ -753,6 +753,7 @@ export async function showSprint({
     return;
   }
 
+  document.body.classList.remove("graph-view-active");
   document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
   document.querySelector(".dashboard-panel")?.setAttribute("hidden", "");
   document.querySelector(".meta-boards-panel")?.setAttribute("hidden", "");

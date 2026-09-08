@@ -24,6 +24,7 @@ import {
   setUpdateBusy,
   setUpdateStatus,
 } from "./command-sessions.js";
+import { showSystemNotice } from "./system-dialog.js";
 
 const LAND_TRY_STATUS_CONCURRENCY = 2;
 const landTryStatusQueue = [];
@@ -470,9 +471,12 @@ export async function pollGraphLandSession() {
   }
 }
 
-export function openLandDialog() {
+export async function openLandDialog() {
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -554,7 +558,10 @@ export async function cancelOrCloseLandDialog() {
 
 export async function startGraphLandSession() {
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 

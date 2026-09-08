@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, test } from "node:test";
 import {
   getAssignedOpenBugs,
@@ -17,7 +20,11 @@ import {
   isNotionAuthenticationError,
   NOTION_VERSION,
 } from "../lib/notion.mjs";
-import phab, { clearPhabricatorRequestState } from "../lib/phab.mjs";
+import phab, {
+  clearPhabricatorRequestState,
+  comment as postPhabricatorComment,
+  createInlineComment,
+} from "../lib/phab.mjs";
 
 const originalFetch = global.fetch;
 const originalPhabricatorConfig = config.phabricator
@@ -212,6 +219,48 @@ test("readJsonResponse includes status and retry metadata on API errors", async 
   );
 });
 
+test("Phabricator review helpers post final actions and pending inline comments", async () => {
+  useTestPhabricatorToken();
+  const requests = [];
+  global.fetch = async (_url, options) => {
+    requests.push(JSON.parse(String(options.body.get("params"))));
+    return new Response(JSON.stringify({ result: { ok: true } }), { status: 200 });
+  };
+
+  await postPhabricatorComment({
+    id: "D123456",
+    message: "Please address the inline feedback.",
+    action: "reject",
+    resolve: true,
+  });
+  await createInlineComment({
+    revision: "D123456",
+    filePath: "mail/example.mjs",
+    isNewFile: true,
+    lineNumber: 12,
+    content: "Use the shared helper.",
+  });
+
+  assert.deepEqual(requests, [
+    {
+      revision_id: "123456",
+      message: "Please address the inline feedback.",
+      action: "reject",
+      attach_inlines: true,
+      __conduit__: { token: "test-token" },
+    },
+    {
+      revisionID: 123456,
+      filePath: "mail/example.mjs",
+      isNewFile: true,
+      lineNumber: 12,
+      lineLength: 1,
+      content: "Use the shared helper.",
+      __conduit__: { token: "test-token" },
+    },
+  ]);
+});
+
 test("phab coalesces identical read-only requests", async () => {
   useTestPhabricatorToken();
 
@@ -241,6 +290,29 @@ test("phab coalesces identical read-only requests", async () => {
   assert.deepEqual(first, { result: [{ id: 123 }] });
   assert.deepEqual(second, { result: [{ id: 123 }] });
   assert.notEqual(first, second);
+});
+
+test("phab serializes distinct remote requests", async () => {
+  useTestPhabricatorToken();
+
+  let activeRequests = 0;
+  let maximumActiveRequests = 0;
+
+  global.fetch = async () => {
+    activeRequests++;
+    maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    activeRequests--;
+
+    return new Response(JSON.stringify({ result: [] }), { status: 200 });
+  };
+
+  await Promise.all([
+    phab({ route: "differential.query", params: { ids: [123] } }),
+    phab({ route: "project.search", params: { constraints: {} } }),
+  ]);
+
+  assert.equal(maximumActiveRequests, 1);
 });
 
 test("phab caches revision comment requests", async () => {
@@ -367,6 +439,63 @@ test("phab applies a rate-limit cooldown across every route", async () => {
   );
 
   assert.equal(calls, 1);
+});
+
+test("phab preserves a rate-limit cooldown across a request-state reset", async (t) => {
+  useTestPhabricatorToken();
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-phab-rate-limit-"));
+  const statePath = path.join(directory, "rate-limit.json");
+  const previousStatePath = process.env.TB_TOOLS_PHAB_RATE_LIMIT_STATE_PATH;
+  let networkRequests = 0;
+
+  process.env.TB_TOOLS_PHAB_RATE_LIMIT_STATE_PATH = statePath;
+  t.after(async () => {
+    if (previousStatePath === undefined) {
+      delete process.env.TB_TOOLS_PHAB_RATE_LIMIT_STATE_PATH;
+    } else {
+      process.env.TB_TOOLS_PHAB_RATE_LIMIT_STATE_PATH = previousStatePath;
+    }
+
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  global.fetch = async () => {
+    networkRequests++;
+    return new Response(JSON.stringify({ message: "too many requests" }), {
+      headers: { "retry-after": "30" },
+      status: 429,
+      statusText: "Too Many Requests",
+    });
+  };
+
+  await assert.rejects(
+    phab({ route: "differential.query", params: { ids: [123] } }),
+    /429 Too Many Requests/,
+  );
+
+  const persistedState = await readFile(statePath, "utf8");
+  const state = JSON.parse(persistedState);
+
+  assert.ok(state.globalCooldownUntil > Date.now());
+  assert.equal(state.recentRequests.length, 1);
+  assert.equal(state.recentRequests[0].route, "differential.query");
+
+  clearPhabricatorRequestState();
+  global.fetch = async () => {
+    networkRequests++;
+    throw new Error("The persisted cooldown should prevent this request.");
+  };
+
+  await assert.rejects(
+    phab({ route: "project.search", params: { constraints: {} } }),
+    (error) => {
+      assert.match(error.message, /temporarily rate limited/);
+      assert.equal(error.isLocalPhabricatorCooldown, true);
+      return true;
+    },
+  );
+  assert.equal(networkRequests, 1);
+  assert.equal(await readFile(statePath, "utf8"), persistedState);
 });
 
 test("buildNotionBugFilter matches supported bug property types", () => {

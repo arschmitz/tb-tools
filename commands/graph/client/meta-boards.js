@@ -10,6 +10,8 @@ import { setConsoleRoute } from "./view-router.js";
 const tab = document.querySelector(".meta-boards-tab");
 const panel = document.querySelector(".meta-boards-panel");
 const status = panel?.querySelector(".meta-boards-status");
+const loadingIndicator = panel?.querySelector(".meta-boards-loading");
+const loadingText = panel?.querySelector(".meta-boards-loading-text");
 const controls = panel?.querySelector(".meta-board-controls");
 const select = panel?.querySelector(".meta-board-select");
 const rootLinks = panel?.querySelector(".meta-board-root-links");
@@ -43,6 +45,9 @@ const detailBlocksLinks = dialog?.querySelector(".meta-board-detail-blocks-links
 const detailDescription = dialog?.querySelector(".meta-board-detail-description");
 const detailDescriptionRendered = dialog?.querySelector(".meta-board-detail-description-rendered");
 const detailDescriptionEdit = dialog?.querySelector(".meta-board-description-edit");
+const detailComments = dialog?.querySelector(".meta-board-detail-comments");
+const detailCommentsCount = dialog?.querySelector(".meta-board-detail-comments-count");
+const detailCommentsList = dialog?.querySelector(".meta-board-detail-comments-list");
 const detailError = dialog?.querySelector(".meta-board-detail-error");
 const detailSave = dialog?.querySelector(".meta-board-detail-save");
 const detailClose = dialog?.querySelector(".meta-board-detail-close");
@@ -383,6 +388,20 @@ function getFilteredCards(column) {
   ));
 }
 
+function getPointTotal(cards) {
+  return cards.reduce((total, card) => {
+    const points = Number(card.points);
+
+    return card.points === null || card.points === undefined || !Number.isFinite(points)
+      ? total
+      : total + points;
+  }, 0);
+}
+
+function formatPointTotal(points) {
+  return `${points} point${points === 1 ? "" : "s"}`;
+}
+
 function renderColumns() {
   if (!kanban) {
     return;
@@ -390,10 +409,15 @@ function renderColumns() {
 
   kanban.querySelectorAll(".meta-board-column").forEach((column) => {
     const cards = getFilteredCards(column.dataset.metaBoardColumn);
-    const count = column.querySelector("header span");
+    const count = column.querySelector(".meta-board-column-count");
+    const points = column.querySelector(".meta-board-column-points");
     const container = column.querySelector(".meta-board-cards");
 
     count.textContent = String(cards.length);
+    if (points) {
+      points.hidden = column.dataset.metaBoardColumn === "backlog";
+      points.textContent = formatPointTotal(getPointTotal(cards));
+    }
     clear(container);
 
     if (!cards.length) {
@@ -578,6 +602,13 @@ function renderBoard() {
 
 function setLoading(isLoading, message = "") {
   state.loading = isLoading;
+  panel?.classList.toggle("is-loading", isLoading);
+  panel?.setAttribute("aria-busy", String(isLoading));
+  loadingIndicator.hidden = !isLoading;
+
+  if (isLoading && loadingText) {
+    loadingText.textContent = message || "Loading meta bug board...";
+  }
 
   if (refresh) {
     refresh.disabled = isLoading;
@@ -744,6 +775,66 @@ function renderDetailDescription(description) {
   renderMarkdown(detailDescriptionRendered, description);
 }
 
+function formatBugCommentTimestamp(value) {
+  const timestamp = new Date(value);
+
+  if (Number.isNaN(timestamp.getTime())) {
+    return value || "";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(timestamp);
+}
+
+function renderDetailComments(comments = []) {
+  const items = Array.isArray(comments) ? comments : [];
+
+  if (detailComments) {
+    detailComments.open = false;
+  }
+  if (detailCommentsCount) {
+    detailCommentsCount.textContent = `(${items.length})`;
+  }
+  if (!detailCommentsList) {
+    return;
+  }
+
+  if (!items.length) {
+    const emptyMessage = document.createElement("p");
+
+    emptyMessage.className = "meta-board-detail-comments-empty";
+    emptyMessage.textContent = "No Bugzilla comments were returned for this bug.";
+    detailCommentsList.replaceChildren(emptyMessage);
+    return;
+  }
+
+  detailCommentsList.replaceChildren(...items.map((item) => {
+    const comment = document.createElement("article");
+    const header = document.createElement("header");
+    const author = document.createElement("strong");
+    const metadata = document.createElement("span");
+    const body = document.createElement("pre");
+
+    comment.className = "meta-board-detail-comment";
+    author.textContent = item.author || item.email || "Unknown user";
+    metadata.className = "meta-board-detail-comment-meta";
+    metadata.textContent = [
+      item.email && item.email !== item.author ? item.email : "",
+      formatBugCommentTimestamp(item.createdAt),
+      item.isPrivate ? "Private" : "",
+    ].filter(Boolean).join(" | ");
+    body.textContent = item.text || "(No comment text.)";
+    header.append(author);
+    if (metadata.textContent) {
+      header.append(metadata);
+    }
+    comment.append(header, body);
+    return comment;
+  }));
+}
+
 function setDetailDescriptionEditing(isEditing) {
   const editIcon = detailDescriptionEdit.querySelector('[data-mode="edit"]');
   const renderIcon = detailDescriptionEdit.querySelector('[data-mode="render"]');
@@ -812,6 +903,7 @@ function renderDetail(detail) {
   detailPoints.value = detail.points ?? "";
   detailAssignee.value = detail.assignee?.email || "";
   renderDetailDescription(detail.description || "");
+  renderDetailComments(detail.comments);
   detailError.textContent = "";
   renderDetailRelations();
   renderDetailAssigneeOptions();
@@ -1149,6 +1241,7 @@ export async function showMetaBoards({ boardId = "", updateLocation = true } = {
     return;
   }
 
+  document.body.classList.remove("graph-view-active");
   document.querySelectorAll(".tab, .panel").forEach((node) => {
     node.classList.remove("active");
   });
@@ -1158,11 +1251,15 @@ export async function showMetaBoards({ boardId = "", updateLocation = true } = {
   panel.hidden = false;
 
   if (!state.boards.length) {
+    setLoading(true, "Loading available meta bug boards...");
+
     try {
       await loadBoards();
     } catch (requestError) {
       setError(requestError?.message || String(requestError));
       return;
+    } finally {
+      setLoading(false);
     }
   }
 

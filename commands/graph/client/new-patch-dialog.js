@@ -20,6 +20,7 @@ import {
   setUpdateBusy,
   setUpdateStatus,
 } from "./command-sessions.js";
+import { showSystemNotice } from "./system-dialog.js";
 
 export function setNewPatchDialogBusy(busy) {
   newPatchForm.querySelectorAll("input").forEach((field) => {
@@ -133,9 +134,12 @@ export async function pollGraphNewPatchSession() {
   }
 }
 
-export function openNewPatchDialog() {
+export async function openNewPatchDialog() {
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
@@ -208,7 +212,10 @@ export async function startGraphNewPatchSession(event) {
   event.preventDefault();
 
   if (hasActiveCommandSession()) {
-    alert("A command is already active.");
+    await showSystemNotice({
+      title: "Command already active",
+      message: "Wait for the current command to finish or cancel it before starting another one.",
+    });
     return;
   }
 
