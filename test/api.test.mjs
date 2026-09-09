@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import {
+  clearBugzillaBugCache,
   getAssignedOpenBugs,
+  getBug,
   getBugHistoryByIds,
   getBugs,
   getBugsByIds,
@@ -24,6 +26,8 @@ import phab, {
   clearPhabricatorRequestState,
   comment as postPhabricatorComment,
   createInlineComment,
+  editRevision,
+  flushPhabricatorRequestLog,
 } from "../lib/phab.mjs";
 
 const originalFetch = global.fetch;
@@ -37,6 +41,7 @@ const originalNotionConfig = config.notion
 afterEach(() => {
   global.fetch = originalFetch;
   clearPhabricatorRequestState();
+  clearBugzillaBugCache();
 
   if (originalPhabricatorConfig) {
     config.phabricator = { ...originalPhabricatorConfig };
@@ -110,14 +115,38 @@ test("dashboard Bugzilla queries limit results to open assigned bugs", async () 
     requestedUrls[1].searchParams.get("include_fields"),
     "id,summary,status,resolution,is_open,product,component,last_change_time,flags",
   );
-  assert.deepEqual(requestedUrls[2].searchParams.getAll("ids"), [
-    "12345",
-    "67890",
-  ]);
+  assert.deepEqual(requestedUrls[2].searchParams.getAll("ids"), ["67890"]);
   assert.equal(
     requestedUrls[3].searchParams.get("include_fields"),
-    "id,attachments.id,attachments.file_name,attachments.content_type",
+    "id,attachments.id,attachments.file_name,attachments.content_type,attachments.is_obsolete,attachments.last_change_time,attachments.flags",
   );
+});
+
+test("Bugzilla bug records are shared across views and coalesced in flight", async () => {
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return new Response(JSON.stringify({
+      bugs: [{
+        id: 12345,
+        is_open: true,
+        status: "NEW",
+        summary: "Cached patch bug",
+      }],
+    }), { status: 200 });
+  };
+
+  const fields = "id,summary,status,resolution,is_open,keywords,assigned_to,assigned_to_detail,product,component,last_change_time";
+  const [first, second] = await Promise.all([
+    getBugsByIds([12345], { includeFields: fields }),
+    getBugsByIds([12345], { includeFields: fields }),
+  ]);
+  const fromCommitPill = await getBug(12345);
+
+  assert.equal(calls, 1);
+  assert.deepEqual(first, second);
+  assert.equal(fromCommitPill.bugs[0].summary, "Cached patch bug");
 });
 
 test("Bugzilla user lookup batches distinct match values", async () => {
@@ -219,7 +248,7 @@ test("readJsonResponse includes status and retry metadata on API errors", async 
   );
 });
 
-test("Phabricator review helpers post final actions and pending inline comments", async () => {
+test("Phabricator review helpers publish drafts and edit final review actions", async () => {
   useTestPhabricatorToken();
   const requests = [];
   global.fetch = async (_url, options) => {
@@ -229,9 +258,19 @@ test("Phabricator review helpers post final actions and pending inline comments"
 
   await postPhabricatorComment({
     id: "D123456",
-    message: "Please address the inline feedback.",
-    action: "reject",
+    message: "",
+    action: "comment",
     resolve: true,
+  });
+  await editRevision({
+    id: "D123456",
+    message: "Please address the focus regression.",
+    action: "reject",
+  });
+  await editRevision({
+    id: "D123456",
+    message: "",
+    action: "accept",
   });
   await createInlineComment({
     revision: "D123456",
@@ -244,9 +283,22 @@ test("Phabricator review helpers post final actions and pending inline comments"
   assert.deepEqual(requests, [
     {
       revision_id: "123456",
-      message: "Please address the inline feedback.",
-      action: "reject",
+      message: "",
+      action: "comment",
       attach_inlines: true,
+      __conduit__: { token: "test-token" },
+    },
+    {
+      objectIdentifier: "D123456",
+      transactions: [
+        { type: "comment", value: "Please address the focus regression." },
+        { type: "reject", value: true },
+      ],
+      __conduit__: { token: "test-token" },
+    },
+    {
+      objectIdentifier: "D123456",
+      transactions: [{ type: "accept", value: true }],
       __conduit__: { token: "test-token" },
     },
     {
@@ -349,6 +401,68 @@ test("phab caches revision comment requests", async () => {
   assert.deepEqual(first, { result: { 123: [] } });
   assert.deepEqual(second, { result: { 123: [] } });
   assert.notEqual(first, second);
+});
+
+test("phab persists a privacy-safe request ledger", async (t) => {
+  useTestPhabricatorToken();
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-phab-request-log-"));
+  const logPath = path.join(directory, "requests.jsonl");
+  const previousLogPath = process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH;
+
+  process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH = logPath;
+  t.after(async () => {
+    if (previousLogPath === undefined) {
+      delete process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH;
+    } else {
+      process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH = previousLogPath;
+    }
+
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  global.fetch = async () => new Response(JSON.stringify({ result: [] }), {
+    status: 200,
+  });
+
+  await phab({ route: "differential.query", params: { ids: [123456] } });
+  await phab({ route: "differential.query", params: { ids: [123456] } });
+  await flushPhabricatorRequestLog();
+
+  const entries = (await readFile(logPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+
+  assert.ok(entries.some((entry) => entry.event === "cache-miss"));
+  assert.ok(entries.some((entry) => entry.event === "network-start"));
+  assert.ok(entries.some((entry) => entry.event === "network-success"));
+  assert.ok(entries.some((entry) => entry.event === "cache-hit"));
+  assert.ok(entries.every((entry) => entry.route === "differential.query"));
+  assert.ok(entries.every((entry) => entry.params.ids.size === 1));
+  assert.doesNotMatch(JSON.stringify(entries), /test-token|123456/);
+});
+
+test("phab bypassCache refreshes a cached read-only response", async () => {
+  useTestPhabricatorToken();
+
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    return new Response(JSON.stringify({ result: [{ id: calls }] }), { status: 200 });
+  };
+
+  const first = await phab({ route: "differential.query", params: { ids: [123] } });
+  const refreshed = await phab({
+    route: "differential.query",
+    params: { ids: [123] },
+    bypassCache: true,
+  });
+  const cachedRefresh = await phab({ route: "differential.query", params: { ids: [123] } });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(first, { result: [{ id: 1 }] });
+  assert.deepEqual(refreshed, { result: [{ id: 2 }] });
+  assert.deepEqual(cachedRefresh, { result: [{ id: 2 }] });
 });
 
 test("phab caches user query reviewer names by PHID", async () => {

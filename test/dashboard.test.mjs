@@ -105,6 +105,7 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
     id: 2004,
     statusName: "Needs Review",
   });
+  directlyAssignedRevision.reviewers = { [ME]: ME };
   const transactions = new Map([
     ["PHID-DREV-1001", [
       transaction({ authorPHID: ME, dateCreated: NOW - (72 * HOUR), type: "update" }),
@@ -146,6 +147,7 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
       transaction({ authorPHID: OTHER, dateCreated: NOW - (20 * HOUR), type: "update" }),
     ]],
   ]);
+  let attachmentRevisionQueries = 0;
   const dashboard = await getDashboardData({
     appConfig: {
       bugzilla: { user: "me@example.com" },
@@ -231,13 +233,12 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
 
       if (route === "differential.query" && params.reviewers) {
         return {
-          result: params.reviewers.includes(ME)
-            ? [directlyAssignedRevision]
-            : groupRevisions,
+          result: [directlyAssignedRevision, ...groupRevisions],
         };
       }
 
       if (route === "differential.query" && params.ids) {
+        attachmentRevisionQueries++;
         const revisions = [
           ...mine,
           ...groupRevisions,
@@ -289,15 +290,20 @@ test("dashboard categorizes open patches, queues, and assigned bugs from live AP
   assert.equal(dashboard.inProgressBugs[0].hasPatch, true);
   assert.deepEqual(dashboard.needinfoBugs.map((bug) => bug.id), ["4001", "4002"]);
   assert.equal(dashboard.needinfoBugs[0].requestedBy, "reviewer@example.com");
+  assert.equal(
+    attachmentRevisionQueries,
+    0,
+    "a revision already returned by the dashboard queues is not refetched",
+  );
 });
 
-test("dashboard batches every reviewer group into one Phabricator revision query", async () => {
+test("dashboard batches direct and review-group patches into one Phabricator revision query", async () => {
   const groups = [
     { phid: "PHID-PROJ-one", fields: { name: "One", slug: "one" } },
     { phid: "PHID-PROJ-two", fields: { name: "Two", slug: "two" } },
     { phid: "PHID-PROJ-three", fields: { name: "Three", slug: "three" } },
   ];
-  const groupQueries = [];
+  const reviewerQueries = [];
 
   await getDashboardData({
     appConfig: {
@@ -322,9 +328,7 @@ test("dashboard batches every reviewer group into one Phabricator revision query
       }
 
       if (route === "differential.query" && params.reviewers) {
-        if (!params.reviewers.includes(ME)) {
-          groupQueries.push(params.reviewers);
-        }
+        reviewerQueries.push(params.reviewers);
 
         return { result: [] };
       }
@@ -337,7 +341,8 @@ test("dashboard batches every reviewer group into one Phabricator revision query
     },
   });
 
-  assert.deepEqual(groupQueries, [[
+  assert.deepEqual(reviewerQueries, [[
+    ME,
     "PHID-PROJ-one",
     "PHID-PROJ-two",
     "PHID-PROJ-three",
@@ -378,7 +383,6 @@ test("dashboard reuses fresh persisted reviewer groups without identity lookups"
   });
 
   assert.deepEqual(requests.map((request) => request.route), [
-    "differential.query",
     "differential.query",
     "differential.query",
   ]);

@@ -2,7 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { comment as defaultComment, createInlineComment as defaultCreateInlineComment } from "../../lib/phab.mjs";
+import {
+  comment as defaultComment,
+  createInlineComment as defaultCreateInlineComment,
+  editRevision as defaultEditRevision,
+} from "../../lib/phab.mjs";
 import { getPhabRevisionFromText } from "../../lib/workflow.mjs";
 import { startGraphCodexAppServer } from "./codex-app-server.mjs";
 import { formatPrettyDiffHtml } from "./diff-renderer.mjs";
@@ -16,6 +20,36 @@ const ACTIVITY_LIMIT = 200;
 const ACTIVITY_DETAIL_LIMIT = 1600;
 const DISCUSSION_COMMENT_LIMIT = 100;
 const DISCUSSION_PROMPT_LIMIT = 18000;
+const REVIEW_PATCH_TIMEOUT_MS = 90_000;
+const reviewCheckoutQueues = new Map();
+
+async function withReviewCheckoutLease(session, operation) {
+  const checkoutPath = path.resolve(session.graph.path);
+  const previous = reviewCheckoutQueues.get(checkoutPath) || Promise.resolve();
+  let release;
+  const acquired = new Promise((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.catch(() => {}).then(() => acquired);
+
+  reviewCheckoutQueues.set(checkoutPath, tail);
+  await previous.catch(() => {});
+
+  try {
+    if (session.cancelled) {
+      const error = new Error("Review checkout pull cancelled.");
+
+      error.code = "ABORT_ERR";
+      throw error;
+    }
+    return await operation();
+  } finally {
+    release();
+    if (reviewCheckoutQueues.get(checkoutPath) === tail) {
+      reviewCheckoutQueues.delete(checkoutPath);
+    }
+  }
+}
 
 function getRevision(value = "") {
   const match = String(value).trim().match(/^D?(\d+)$/i);
@@ -409,26 +443,48 @@ async function runCommandForReview({
   args,
   runCommand,
   recordOutput = true,
+  timeoutMs,
 }) {
   assertReviewCheckout(session.graph);
   appendOutput(session, `$ ${[cmd, ...args].join(" ")}\n`);
+  let receivedOutput = false;
+  const command = {
+    cmd,
+    args,
+    cwd: session.graph.path,
+    capture: true,
+    silent: true,
+    signal: session.abortController?.signal,
+  };
+
+  if (recordOutput) {
+    command.onStdout = (chunk) => {
+      receivedOutput = true;
+      appendOutput(session, chunk);
+    };
+    command.onStderr = (chunk) => {
+      receivedOutput = true;
+      appendOutput(session, chunk);
+    };
+  }
+
+  if (timeoutMs) {
+    command.killProcessGroup = true;
+    command.timeoutMs = timeoutMs;
+  }
 
   try {
-    const output = await runCommand({
-      cmd,
-      args,
-      cwd: session.graph.path,
-      capture: true,
-      silent: true,
-    });
+    const output = await runCommand(command);
 
-    if (recordOutput) {
+    if (recordOutput && !receivedOutput) {
       appendOutput(session, output);
     }
     return String(output || "");
   } catch (error) {
-    appendOutput(session, error?.stdout || "");
-    appendOutput(session, error?.stderr || "");
+    if (!receivedOutput) {
+      appendOutput(session, error?.stdout || "");
+      appendOutput(session, error?.stderr || "");
+    }
     throw error;
   }
 }
@@ -480,11 +536,15 @@ async function pullRevisionForReview({ session, runCommand }) {
     await runCommandForReview({
       session,
       cmd: "moz-phab",
-      args: ["patch", session.revision, "--apply-to", "here"],
+      args: ["patch", session.revision, "--apply-to", "here", "--yes"],
       runCommand,
+      timeoutMs: REVIEW_PATCH_TIMEOUT_MS,
     });
     return;
   } catch (error) {
+    if (session.cancelled || error?.code === "ABORT_ERR") {
+      throw error;
+    }
     appendActivity(session, {
       kind: "fallback",
       title: "Parent patch stack failed; retrying the selected patch",
@@ -505,8 +565,9 @@ async function pullRevisionForReview({ session, runCommand }) {
   await runCommandForReview({
     session,
     cmd: "moz-phab",
-    args: ["patch", session.revision, "--skip-dependencies", "--apply-to", "here"],
+    args: ["patch", session.revision, "--skip-dependencies", "--apply-to", "here", "--yes"],
     runCommand,
+    timeoutMs: REVIEW_PATCH_TIMEOUT_MS,
   });
 }
 
@@ -776,6 +837,7 @@ export function createGraphPatchReviewSession({
     rawPatchHash: "",
     reviewContextVersion: 0,
     currentHash: "",
+    reviewBranch: "",
     commitMessage: "",
     memoryContext: "",
     patchContext: null,
@@ -789,11 +851,32 @@ export function createGraphPatchReviewSession({
     codexAgent: null,
     codexSessionId: "",
     codexTurnId: "",
+    abortController: new AbortController(),
+    cancelled: false,
     workingTreeDiffVersion: 0,
     reviewOutcome: "",
     reviewMessage: "",
     error: "",
   };
+}
+
+export function cancelGraphPatchReviewSession({ session }) {
+  if (!session || ["cancelled", "complete", "error"].includes(session.status)) {
+    return session;
+  }
+
+  session.cancelled = true;
+  session.error = "";
+  session.status = "cancelled";
+  session.message = "Review checkout session cancelled.";
+  appendActivity(session, {
+    kind: "status",
+    title: "Cancelled Review checkout session",
+  });
+  session.abortController?.abort();
+  session.codexAgent?.client.close();
+
+  return session;
 }
 
 export function serializeGraphPatchReviewSession(session) {
@@ -811,6 +894,7 @@ export function serializeGraphPatchReviewSession(session) {
     rawPatchHash: session.rawPatchHash || "",
     reviewContextVersion: session.reviewContextVersion || 0,
     currentHash: session.currentHash || "",
+    reviewBranch: session.reviewBranch || "",
     codexTurnId: session.codexTurnId || "",
     issues: session.issues || [],
     currentIssueIndex: session.currentIssueIndex || 0,
@@ -840,7 +924,8 @@ export async function prepareGraphPatchReviewSession({
   makeTempDirectory = mkdtemp,
   writeRawPatch = writeFile,
 }) {
-  try {
+  return withReviewCheckoutLease(session, async () => {
+    try {
     assertReviewCheckout(session.graph);
     await resetReviewCheckoutMain({
       session,
@@ -851,9 +936,10 @@ export async function prepareGraphPatchReviewSession({
     const rawPatch = await runCommandForReview({
       session,
       cmd: "moz-phab",
-      args: ["patch", session.revision, "--raw", "--skip-dependencies"],
+      args: ["patch", session.revision, "--raw", "--skip-dependencies", "--yes"],
       runCommand,
       recordOutput: false,
+      timeoutMs: REVIEW_PATCH_TIMEOUT_MS,
     });
 
     if (!rawPatch.trim()) {
@@ -881,10 +967,22 @@ export async function prepareGraphPatchReviewSession({
       args: ["log", "-1", "--format=%B"],
       runCommand,
     });
+    session.reviewBranch = (await runCommandForReview({
+      session,
+      cmd: "git",
+      args: ["branch", "--show-current"],
+      runCommand,
+    })).trim();
+    const appliedRevision = getPhabRevisionFromText(
+      `${session.reviewBranch}\n${session.commitMessage}`,
+    );
 
-    if (getPhabRevisionFromText(session.commitMessage) !== session.revision) {
+    if (appliedRevision !== session.revision) {
+      const actualCheckout = session.reviewBranch || session.currentHash || "an unknown checkout";
       throw new Error(
-        `The Review checkout did not end on ${session.revision}; refusing to review a different local commit.`,
+        `The Review checkout did not end on ${session.revision}; moz-phab left it on ${actualCheckout}${
+          appliedRevision ? ` (${appliedRevision})` : ""
+        }. Refusing to review a different local commit.`,
       );
     }
 
@@ -964,17 +1062,24 @@ export async function prepareGraphPatchReviewSession({
       detail: session.coverage?.summary || "",
     });
     return session;
-  } catch (error) {
-    session.status = "error";
-    session.error = String(error?.message || error);
-    session.message = session.error;
-    appendActivity(session, {
-      kind: "error",
-      title: "Patch review could not be completed",
-      detail: session.error,
-    });
-    throw error;
-  }
+    } catch (error) {
+      if (session.cancelled || error?.code === "ABORT_ERR") {
+        session.status = "cancelled";
+        session.error = "";
+        session.message = "Review checkout session cancelled.";
+        return session;
+      }
+      session.status = "error";
+      session.error = String(error?.message || error);
+      session.message = session.error;
+      appendActivity(session, {
+        kind: "error",
+        title: "Patch review could not be completed",
+        detail: session.error,
+      });
+      throw error;
+    }
+  });
 }
 
 export async function addGraphPatchReviewInline({
@@ -1164,7 +1269,7 @@ export async function submitGraphPatchReview({
   outcome,
   message,
   postComment = defaultComment,
-  publishReview,
+  editRevision = defaultEditRevision,
 }) {
   if (!session.aiEnabled) {
     const error = new Error("AI patch review is not enabled for this console.");
@@ -1196,8 +1301,6 @@ export async function submitGraphPatchReview({
 
   const finalMessage = String(message || "").trim();
   const hasPendingInline = session.issues.some((issue) => issue.state === "pending");
-  const requiresVerifiedReviewAction = action !== "comment";
-
   if (action === "comment" && !finalMessage && !hasPendingInline) {
     const error = new Error("Enter an overall comment before posting a comment-only review.");
 
@@ -1207,25 +1310,28 @@ export async function submitGraphPatchReview({
 
   session.status = "posting";
   session.message = "Posting the final Phabricator review...";
+  let draftsPublished = false;
   try {
-    if (hasPendingInline || requiresVerifiedReviewAction) {
-      if (typeof publishReview !== "function") {
-        throw new Error(
-          "Sign in to Phabricator before posting an Accept or Request Changes review.",
-        );
-      }
-
-      await publishReview({
-        action,
-        message: finalMessage,
-        revision: session.revision,
-      });
-    } else {
+    if (hasPendingInline) {
       await postComment({
+        id: session.revision,
+        message: "",
+        action: "comment",
+        resolve: true,
+      });
+      draftsPublished = true;
+      for (const issue of session.issues) {
+        if (issue.state === "pending") {
+          issue.state = "posted";
+        }
+      }
+    }
+
+    if (action !== "comment" || finalMessage) {
+      await editRevision({
         id: session.revision,
         message: finalMessage,
         action,
-        resolve: true,
       });
     }
     session.status = "complete";
@@ -1235,7 +1341,10 @@ export async function submitGraphPatchReview({
     return session;
   } catch (error) {
     session.status = "review";
-    session.message = String(error?.message || error);
+    const errorMessage = String(error?.message || error);
+    session.message = draftsPublished
+      ? `Saved inline drafts were published, but the final review action was not applied: ${errorMessage}`
+      : errorMessage;
     throw error;
   }
 }

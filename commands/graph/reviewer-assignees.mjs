@@ -2,11 +2,10 @@ import { getUsersByMatches as defaultGetUsersByMatches } from "../../lib/bugzill
 import defaultPhab from "../../lib/phab.mjs";
 import {
   loadReviewGroupAssigneeCache as defaultLoadReviewGroupAssigneeCache,
-  REVIEWER_GROUP_CACHE_TTL_MS,
   saveReviewGroupAssigneeCache as defaultSaveReviewGroupAssigneeCache,
 } from "./reviewer-groups-cache.mjs";
 
-export const REVIEW_GROUP_ASSIGNEE_CACHE_MS = REVIEWER_GROUP_CACHE_TTL_MS;
+export const REVIEW_GROUP_ASSIGNEE_CACHE_MS = Number.POSITIVE_INFINITY;
 
 const cache = new Map();
 const inflight = new Map();
@@ -114,12 +113,14 @@ function mergeAssignees(assignees = []) {
 }
 
 async function loadReviewGroupAssignees({
+  force = false,
   reviewGroup,
   phab,
   getUsersByMatches,
 }) {
   const groupResponse = await phab({
     route: "project.search",
+    ...(force ? { bypassCache: true } : {}),
     params: {
       attachments: { members: true },
       constraints: { slugs: [reviewGroup] },
@@ -134,6 +135,7 @@ async function loadReviewGroupAssignees({
 
   const usersResponse = await phab({
     route: "user.query",
+    ...(force ? { bypassCache: true } : {}),
     params: { phids: memberPhids },
   });
   const phabricatorUsers = (usersResponse?.result || [])
@@ -154,6 +156,7 @@ export function clearReviewGroupAssigneeCache() {
 }
 
 export async function getReviewGroupAssignees({
+  force = false,
   reviewGroup,
   phab = defaultPhab,
   getUsersByMatches = defaultGetUsersByMatches,
@@ -168,7 +171,7 @@ export async function getReviewGroupAssignees({
 
   const cached = cache.get(slug);
 
-  if (cached && cached.expiresAt > Date.now()) {
+  if (!force && cached && cached.expiresAt > Date.now()) {
     return cached.assignees;
   }
 
@@ -179,23 +182,24 @@ export async function getReviewGroupAssignees({
   const request = (async () => {
     const persisted = await loadReviewGroupAssigneeCache({ reviewGroup: slug });
 
-    if (persisted?.fresh) {
+    if (!force && persisted?.fresh) {
       cache.set(slug, {
         assignees: persisted.assignees,
-        expiresAt: Date.now() + REVIEW_GROUP_ASSIGNEE_CACHE_MS,
+        expiresAt: Number.POSITIVE_INFINITY,
       });
       return persisted.assignees;
     }
 
     try {
       const assignees = await loadReviewGroupAssignees({
+        force,
         reviewGroup: slug,
         phab,
         getUsersByMatches,
       });
       cache.set(slug, {
         assignees,
-        expiresAt: Date.now() + REVIEW_GROUP_ASSIGNEE_CACHE_MS,
+        expiresAt: Number.POSITIVE_INFINITY,
       });
       await saveReviewGroupAssigneeCache({ assignees, reviewGroup: slug });
       return assignees;
@@ -206,7 +210,7 @@ export async function getReviewGroupAssignees({
 
       cache.set(slug, {
         assignees: persisted.assignees,
-        expiresAt: Date.now() + REVIEW_GROUP_ASSIGNEE_CACHE_MS,
+        expiresAt: Number.POSITIVE_INFINITY,
       });
       return persisted.assignees;
     }

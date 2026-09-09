@@ -64,6 +64,14 @@ function sortByName(first, second) {
   );
 }
 
+function sortSprintCardsByAssignee(first, second) {
+  const assigneeComparison = String(first?.assignee?.name || "Unassigned").localeCompare(
+    String(second?.assignee?.name || "Unassigned"),
+  );
+
+  return assigneeComparison || sortByName(first, second);
+}
+
 export function isSprintMetaBug(bug = {}) {
   const whiteboard = String(bug.whiteboard || "").toLowerCase();
   const keywords = Array.isArray(bug.keywords) ? bug.keywords : [];
@@ -306,7 +314,7 @@ export function getSprintData({
     )),
     backlog: sourceCards.filter((card) => card.column === "backlog"),
     ready: sourceCards.filter((card) => card.column === "ready"),
-    sprint: memberCards,
+    sprint: [...memberCards].sort(sortSprintCardsByAssignee),
   };
   const totalPoints = memberCards.reduce((total, card) => total + getPoints(card), 0);
   const completePoints = memberCards
@@ -403,6 +411,7 @@ export async function createSprint({
     platform: board.metaBug.platform || "All",
     product,
     summary: formatSprintSummary(name),
+    type: "task",
     version: board.metaBug.version || "unspecified",
     whiteboard: SPRINT_WHITEBOARD_TAG,
   });

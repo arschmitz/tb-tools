@@ -127,7 +127,7 @@ test("meta board store saves a review group for each board", async (t) => {
   );
 });
 
-test("meta board derives every story column from points, ownership, patches, reviews, and completion", async () => {
+test("meta board uses Bugzilla attachments and Phabricator revision status for story columns", async () => {
   const bugs = new Map([
     ["900000", makeBug({ id: "900000", summary: "Calendar meta", dependsOn: ["900100", "900200"] })],
     ["900100", makeBug({
@@ -154,6 +154,7 @@ test("meta board derives every story column from points, ownership, patches, rev
     ["100005", ["200005"]],
   ]);
   const requestedFields = [];
+  const phabricatorRequests = [];
   const data = await getMetaBoardData({
     metaBugId: "900000",
     getBugsByIds: async (ids, { includeFields }) => {
@@ -163,30 +164,34 @@ test("meta board derives every story column from points, ownership, patches, rev
     },
     getBugsWithAttachmentsByIds: async (ids) => ids.map((id) => ({
       id,
-      attachments: (attachmentIds.get(String(id)) || []).map((revision) => ({
-        content_type: "text/x-phabricator-request",
-        file_name: `request-D${revision}`,
-      })),
+      attachments: [
+        ...(attachmentIds.get(String(id)) || []).map((revision) => ({
+          content_type: "text/x-phabricator-request",
+          file_name: `request-D${revision}`,
+        })),
+        ...(String(id) === "100005" ? [{
+          content_type: "text/x-phabricator-request",
+          file_name: "request-D200000",
+          is_obsolete: true,
+        }] : []),
+      ],
     })),
-    phab: async ({ route, params }) => {
+    phab: async ({ route, params, cacheNamespace, cacheTtlMs }) => {
+      phabricatorRequests.push({ route, params, cacheNamespace, cacheTtlMs });
+
       if (route === "differential.query") {
         return {
           result: params.ids.map((id) => ({
             id: String(id),
-            status: "status-needs-review",
-            statusName: "Needs Review",
+            status: id === 200005 ? "status-needs-review" : "status-needs-revision",
+            statusName: id === 200005 ? "Needs Review" : "Needs Revision",
             title: `Revision ${id}`,
             uri: `https://phabricator.services.mozilla.com/D${id}`,
           })),
         };
       }
 
-      return {
-        result: {
-          200004: [],
-          200005: [{ action: "accept", authorPHID: "PHID-USER-reviewer" }],
-        },
-      };
+      throw new Error(`Unexpected Phabricator route: ${route}`);
     },
   });
 
@@ -214,11 +219,64 @@ test("meta board derives every story column from points, ownership, patches, rev
     },
   );
   assert.equal(data.columns["in-review"][0].parentMeta.summary, "Polish stories");
+  assert.deepEqual(data.cards.find((card) => card.id === "100005").patches, [{
+    id: "D200005",
+    numericId: "200005",
+    status: "status-needs-review",
+    statusName: "Needs Review",
+    title: "Revision 200005",
+    url: "https://phabricator.services.mozilla.com/D200005",
+    waitingForReview: true,
+  }]);
+  assert.deepEqual(phabricatorRequests.map((request) => request.route), [
+    "differential.query",
+  ]);
+  assert.ok(phabricatorRequests.every((request) => (
+    request.cacheNamespace === "meta-board" && request.cacheTtlMs === 15 * 60 * 1000
+  )));
   assert.deepEqual(data.assignees.map((assignee) => assignee.email), [
     "alice@example.com",
     "bob@example.com",
   ]);
   assert.ok(requestedFields.every((fields) => fields.includes("cf_fx_points")));
+});
+
+test("meta board keeps attached stories visible when Phabricator is rate limited", async () => {
+  const root = makeBug({ id: "900000", dependsOn: ["100001"] });
+  const story = makeBug({ id: "100001", points: 3, assignee: "owner@example.com" });
+  const rateLimitError = new Error("Phabricator 429 rate limit");
+
+  rateLimitError.statusCode = 429;
+
+  const data = await getMetaBoardData({
+    metaBugId: root.id,
+    getBugsByIds: async (ids) => ids.map((id) => (
+      String(id) === root.id ? root : story
+    )),
+    getBugsWithAttachmentsByIds: async () => [{
+      id: story.id,
+      attachments: [{
+        content_type: "text/x-phabricator-request",
+        file_name: "phabricator-D200001-url.txt",
+        is_obsolete: false,
+      }],
+    }],
+    phab: async () => {
+      throw rateLimitError;
+    },
+  });
+
+  assert.deepEqual(data.columns["in-progress"].map((card) => card.id), [story.id]);
+  assert.deepEqual(data.cards[0].patches, [{
+    id: "D200001",
+    numericId: "200001",
+    status: "",
+    statusName: "Attached",
+    title: "",
+    url: "https://phabricator.services.mozilla.com/D200001",
+    waitingForReview: false,
+  }]);
+  assert.deepEqual(data.errors, ["Phabricator 429 rate limit"]);
 });
 
 test("meta boards do not classify ordinary bugs with dependencies as child metas", async () => {
@@ -504,6 +562,7 @@ test("interactive graph server manages meta board endpoints and invalidates upda
 
 test("interactive graph server loads review group assignees without delaying the board", async (t) => {
   let boards = [{ id: "900000", metaBugId: "900000", reviewGroup: "" }];
+  const reviewGroupForces = [];
   const serverInfo = await startInteractiveGraphServer({
     assignMetaBoardColors: async () => ({ "100001": "#2563eb" }),
     getMetaBoardData: async ({ metaBugId }) => ({
@@ -517,8 +576,9 @@ test("interactive graph server loads review group assignees without delaying the
       id,
       summary: id === "900000" ? "Calendar meta" : `Bug ${id}`,
     })),
-    getReviewGroupAssignees: async ({ reviewGroup }) => {
+    getReviewGroupAssignees: async ({ force, reviewGroup }) => {
       assert.equal(reviewGroup, "thunderbird-reviewers");
+      reviewGroupForces.push(force);
       return [{ email: "reviewer@example.com", name: "Review Group Member" }];
     },
     graphs: [],
@@ -574,4 +634,13 @@ test("interactive graph server loads review group assignees without delaying the
   assert.deepEqual(mappedAssignees.assignees, [
     { email: "reviewer@example.com", name: "Review Group Member" },
   ]);
+
+  const refreshedAssignees = await (await fetch(
+    new URL("api/meta-boards/900000/review-group-assignees?token=secret&force=1", serverInfo.url),
+  )).json();
+
+  assert.deepEqual(refreshedAssignees.assignees, [
+    { email: "reviewer@example.com", name: "Review Group Member" },
+  ]);
+  assert.deepEqual(reviewGroupForces, [false, true]);
 });

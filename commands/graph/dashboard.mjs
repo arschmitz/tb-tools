@@ -350,37 +350,33 @@ async function getDashboardIdentityAndReviewerGroups({
   }
 }
 
-async function getGroupRevisions({ groups, phab }) {
-  const reviewerPhids = getUniqueValues(groups.map((group) => group.phid));
+function partitionReviewQueueRevisions({ currentUserPhid, groups, response }) {
+  const groupPhids = new Set(getUniqueValues(groups.map((group) => group.phid)));
+  const directlyAssignedRevisions = new Map();
+  const groupRevisions = new Map();
 
-  if (!reviewerPhids.length) {
-    return { revisions: [], errors: [] };
-  }
+  for (const revision of response?.result || []) {
+    const normalized = normalizeRevision(revision);
 
-  try {
-    // differential.query treats reviewer PHIDs as an OR constraint. Asking once
-    // for every group can create a burst large enough to rate-limit the account.
-    const response = await phab({
-      route: "differential.query",
-      params: { reviewers: reviewerPhids, status: "status-open" },
-    });
-    const revisions = new Map();
-
-    for (const revision of response?.result || []) {
-      const normalized = normalizeRevision(revision);
-
-      if (normalized.id && !isClosed(normalized)) {
-        revisions.set(normalized.id, normalized);
-      }
+    if (!normalized.id || isClosed(normalized)) {
+      continue;
     }
 
-    return { revisions: Array.from(revisions.values()), errors: [] };
-  } catch (error) {
-    return {
-      revisions: [],
-      errors: [`Review groups: ${String(error?.message || error)}`],
-    };
+    const reviewerPhids = Object.keys(normalized.reviewers || {});
+
+    if (reviewerPhids.includes(currentUserPhid)) {
+      directlyAssignedRevisions.set(normalized.id, normalized);
+    }
+
+    if (reviewerPhids.some((phid) => groupPhids.has(phid))) {
+      groupRevisions.set(normalized.id, normalized);
+    }
   }
+
+  return {
+    directlyAssignedRevisions: Array.from(directlyAssignedRevisions.values()),
+    groupRevisions: Array.from(groupRevisions.values()),
+  };
 }
 
 async function getRevisionsByIds({ ids, phab }) {
@@ -624,12 +620,11 @@ export async function getDashboardData({
     username,
   });
 
-  const [
-    mineResponse,
-    assignedBugs,
-    needinfoBugs,
-    directReviewResponse,
-  ] = await Promise.all([
+  const reviewerPhids = getUniqueValues([
+    currentUser.phid,
+    ...groups.map((group) => group.phid),
+  ]);
+  const [mineResponse, assignedBugs, needinfoBugs, reviewQueueResponse] = await Promise.all([
     phab({
       route: "differential.query",
       params: { authors: [currentUser.phid], status: "status-open" },
@@ -638,19 +633,19 @@ export async function getDashboardData({
     getNeedinfoOpenBugs({ requestee: appConfig?.bugzilla?.user }),
     phab({
       route: "differential.query",
-      params: { reviewers: [currentUser.phid], status: "status-open" },
+      // Reviewer PHIDs form an OR query, so this one request covers both the
+      // directly assigned queue and every review group.
+      params: { reviewers: reviewerPhids, status: "status-open" },
     }),
   ]);
   const mine = (mineResponse?.result || [])
     .map(normalizeRevision)
     .filter((revision) => revision.id && !isClosed(revision));
-  const { revisions: groupRevisions, errors: groupErrors } = await getGroupRevisions({
+  const { directlyAssignedRevisions, groupRevisions } = partitionReviewQueueRevisions({
+    currentUserPhid: currentUser.phid,
     groups,
-    phab,
+    response: reviewQueueResponse,
   });
-  const directlyAssignedRevisions = (directReviewResponse?.result || [])
-    .map(normalizeRevision)
-    .filter((revision) => revision.id && !isClosed(revision));
   const allDashboardRevisions = new Map([
     ...mine.map((revision) => [revision.id, revision]),
     ...groupRevisions.map((revision) => [revision.id, revision]),
@@ -672,9 +667,13 @@ export async function getDashboardData({
       getBugsWithAttachmentsByIds,
     }),
   ]);
-  const assignedRevisionIds = Array.from(attachmentsByBugId.values()).flat();
+  const assignedRevisionIds = getUniqueValues(
+    Array.from(attachmentsByBugId.values()).flat(),
+  );
   const attachedRevisions = await getRevisionsByIds({
-    ids: assignedRevisionIds,
+    ids: assignedRevisionIds.filter(
+      (id) => !allDashboardRevisions.has(`D${id}`),
+    ),
     phab,
   });
   const revisionsById = new Map([
@@ -714,7 +713,7 @@ export async function getDashboardData({
       username: currentUser.userName || username,
     },
     groups,
-    errors: groupErrors,
+    errors: [],
     ...sections,
     directlyAssignedWaitingOnReview: withAuthorNames(
       sections.directlyAssignedWaitingOnReview,

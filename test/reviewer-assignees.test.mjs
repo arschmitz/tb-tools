@@ -112,8 +112,9 @@ test("review group assignees reuse persisted entries without remote lookups", as
   ]);
 });
 
-test("review group assignees retain a stale persisted entry when refresh fails", async () => {
+test("review group assignees retain persisted entries when a manual refresh fails", async () => {
   const assignees = await getReviewGroupAssignees({
+    force: true,
     reviewGroup: "thunderbird-reviewers",
     loadReviewGroupAssigneeCache: async () => ({
       assignees: [{ email: "reviewer@example.com", name: "Review Er" }],
@@ -130,4 +131,28 @@ test("review group assignees retain a stale persisted entry when refresh fails",
   assert.deepEqual(assignees, [
     { email: "reviewer@example.com", name: "Review Er" },
   ]);
+});
+
+test("review group assignees refresh only when explicitly requested", async () => {
+  let projectSearches = 0;
+  const bypassCacheRequests = [];
+  const options = {
+    reviewGroup: "thunderbird-reviewers",
+    phab: async ({ bypassCache, route }) => {
+      assert.equal(route, "project.search");
+      projectSearches++;
+      bypassCacheRequests.push(bypassCache);
+      return { result: { data: [] } };
+    },
+    getUsersByMatches: async () => {
+      throw new Error("The empty group should not query Bugzilla.");
+    },
+  };
+
+  await getReviewGroupAssignees(options);
+  await getReviewGroupAssignees(options);
+  await getReviewGroupAssignees({ ...options, force: true });
+
+  assert.equal(projectSearches, 2);
+  assert.deepEqual(bypassCacheRequests, [undefined, true]);
 });

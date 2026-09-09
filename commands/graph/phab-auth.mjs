@@ -720,7 +720,6 @@ export function createPhabricatorWebSession({
         const actionInput = form?.querySelector(
           "input[name='editengine.actions']",
         );
-
         if (!form || !actionInput) {
           throw new Error("Phabricator did not provide the revision comment form.");
         }

@@ -65,7 +65,7 @@ test("reviewer group cache persists resolved board assignees", async (t) => {
 
   const cached = await loadReviewGroupAssigneeCache({
     cachePath,
-    now: now + REVIEWER_GROUP_CACHE_TTL_MS - 1,
+    now: now + 10 * 365 * 24 * 60 * 60 * 1000,
     reviewGroup: "thunderbird-reviewers",
   });
 

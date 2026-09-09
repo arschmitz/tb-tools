@@ -4,7 +4,11 @@ import {
   getAccessibleAssigneePillStyle,
 } from "./meta-board-colors.js";
 import { renderMarkdown } from "./markdown.js";
-import { openSprintCreateDialog, showSprint } from "./sprints.js";
+import {
+  openSprintCreateDialog,
+  setSprintStoryMembership,
+  showSprint,
+} from "./sprints.js";
 import { setConsoleRoute } from "./view-router.js";
 
 const tab = document.querySelector(".meta-boards-tab");
@@ -50,6 +54,7 @@ const detailCommentsCount = dialog?.querySelector(".meta-board-detail-comments-c
 const detailCommentsList = dialog?.querySelector(".meta-board-detail-comments-list");
 const detailError = dialog?.querySelector(".meta-board-detail-error");
 const detailSave = dialog?.querySelector(".meta-board-detail-save");
+const detailSprintMembership = dialog?.querySelector(".meta-board-detail-sprint-membership");
 const detailClose = dialog?.querySelector(".meta-board-detail-close");
 const detailCancel = dialog?.querySelector(".meta-board-detail-cancel");
 const relationAddButtons = dialog?.querySelectorAll(".meta-board-relation-add");
@@ -89,10 +94,12 @@ const state = {
   currentBoardId: "",
   currentDetail: null,
   detailRelations: { dependsOn: [], blocks: [] },
+  activeSprintId: "",
   relationAddType: "",
   loading: false,
   assigneeColors: new Map(),
   metaColors: new Map(),
+  pendingCardIds: new Set(),
 };
 
 function getApiUrl(path, parameters = {}) {
@@ -337,6 +344,15 @@ function createCard(card) {
     state.metaColors.get(card.parentMeta.id) || META_COLORS[0],
   );
   heading.className = "meta-board-card-heading";
+  if (state.pendingCardIds.has(card.id)) {
+    const pending = document.createElement("span");
+
+    pending.className = "meta-board-card-pending";
+    pending.setAttribute("aria-label", "Saving Bugzilla update");
+    pending.setAttribute("role", "status");
+    pending.title = "Saving Bugzilla update";
+    heading.append(pending);
+  }
   title.textContent = card.summary;
   meta.className = "meta-board-card-meta";
   meta.append(document.createTextNode(formatPoints(card.points)));
@@ -522,6 +538,7 @@ function renderBoardManager() {
     const reviewGroup = document.createElement("input");
     const actions = document.createElement("div");
     const saveReviewGroup = document.createElement("button");
+    const refreshReviewGroup = document.createElement("button");
     const open = document.createElement("button");
     const removeButton = document.createElement("button");
 
@@ -544,6 +561,15 @@ function renderBoardManager() {
     saveReviewGroup.dataset.boardId = board.id;
     saveReviewGroup.type = "button";
     saveReviewGroup.textContent = "Save";
+    refreshReviewGroup.className = "meta-board-review-group-save";
+    refreshReviewGroup.dataset.metaBoardAction = "refresh-review-group";
+    refreshReviewGroup.dataset.boardId = board.id;
+    refreshReviewGroup.disabled = !board.reviewGroup;
+    refreshReviewGroup.title = board.reviewGroup
+      ? `Refresh #${board.reviewGroup} members from Phabricator`
+      : "Save a review group before refreshing its members";
+    refreshReviewGroup.type = "button";
+    refreshReviewGroup.textContent = "Refresh members";
     open.className = "meta-board-internal-link";
     open.dataset.metaBoardAction = "open";
     open.dataset.boardId = board.id;
@@ -554,7 +580,7 @@ function renderBoardManager() {
     removeButton.dataset.boardId = board.id;
     removeButton.type = "button";
     removeButton.textContent = "Remove";
-    actions.append(saveReviewGroup, open, removeButton);
+    actions.append(saveReviewGroup, refreshReviewGroup, open, removeButton);
     row.append(title, settings, actions);
     managerList.append(row);
   });
@@ -659,7 +685,6 @@ async function loadBoard(boardId, { force = false, updateLocation = true } = {})
     if (updateLocation) {
       updateMetaBoardRoute();
     }
-    void loadReviewGroupAssignees(boardId, result);
   } catch (requestError) {
     setError(requestError.message || String(requestError));
   } finally {
@@ -907,13 +932,34 @@ function renderDetail(detail) {
   detailError.textContent = "";
   renderDetailRelations();
   renderDetailAssigneeOptions();
+  renderDetailSprintMembership();
 }
 
-async function openBugDetail(bugId) {
+function isCurrentDetailInSprint() {
+  return state.detailRelations.blocks.some((bug) => bug.id === state.activeSprintId);
+}
+
+function renderDetailSprintMembership() {
+  if (!detailSprintMembership) {
+    return;
+  }
+
+  const hasSprint = Boolean(state.activeSprintId && state.currentDetail);
+
+  detailSprintMembership.hidden = !hasSprint;
+  if (hasSprint) {
+    detailSprintMembership.textContent = isCurrentDetailInSprint()
+      ? "Remove from Sprint"
+      : "Add to Sprint";
+  }
+}
+
+async function openBugDetail(bugId, { sprintId = "" } = {}) {
   if (!state.currentBoardId) {
     return;
   }
 
+  state.activeSprintId = String(sprintId || "");
   if (!dialog.open) {
     dialog.showModal();
   }
@@ -928,6 +974,7 @@ async function openBugDetail(bugId) {
     );
 
     renderDetail(detail);
+    void loadReviewGroupAssignees(state.currentBoardId, state.currentBoard);
   } catch (requestError) {
     showDetailError(requestError);
   } finally {
@@ -935,12 +982,57 @@ async function openBugDetail(bugId) {
   }
 }
 
-export async function openMetaBoardBugDetail(bugId, { boardId = state.currentBoardId } = {}) {
+export async function openMetaBoardBugDetail(bugId, {
+  boardId = state.currentBoardId,
+  sprintId = "",
+} = {}) {
   if (boardId && boardId !== state.currentBoardId) {
     state.currentBoardId = boardId;
   }
 
-  return openBugDetail(bugId);
+  return openBugDetail(bugId, { sprintId });
+}
+
+async function toggleDetailSprintMembership() {
+  if (!state.currentDetail || !state.currentBoardId || !state.activeSprintId) {
+    return;
+  }
+
+  if (Object.keys(getDetailChanges()).length) {
+    detailError.textContent = "Save the other bug changes before changing sprint membership.";
+    return;
+  }
+
+  const member = !isCurrentDetailInSprint();
+
+  detailSprintMembership.disabled = true;
+  detailError.textContent = "";
+  detailStatus.textContent = member ? "Adding to sprint..." : "Removing from sprint...";
+  try {
+    await setSprintStoryMembership({
+      boardId: state.currentBoardId,
+      member,
+      sprintId: state.activeSprintId,
+      storyId: state.currentDetail.id,
+    });
+    const relation = state.currentBoard?.sprints?.find((sprint) => sprint.id === state.activeSprintId) || {
+      id: state.activeSprintId,
+      summary: `Sprint ${state.activeSprintId}`,
+      url: getBugUrl(state.activeSprintId),
+    };
+
+    state.detailRelations.blocks = member
+      ? [...state.detailRelations.blocks, relation]
+      : state.detailRelations.blocks.filter((bug) => bug.id !== state.activeSprintId);
+    state.currentDetail.blocks = [...state.detailRelations.blocks];
+    detailStatus.textContent = member ? "Added to sprint." : "Removed from sprint.";
+    renderDetailRelations();
+    renderDetailSprintMembership();
+  } catch (requestError) {
+    detailError.textContent = requestError?.message || String(requestError);
+  } finally {
+    detailSprintMembership.disabled = false;
+  }
 }
 
 function getRelationLabel(relationType) {
@@ -1025,6 +1117,114 @@ function getDetailChanges() {
   return changes;
 }
 
+function getBoardCard(id) {
+  return state.currentBoard?.cards?.find((card) => card.id === String(id)) || null;
+}
+
+function getBoardCardColumn(card) {
+  return Object.entries(state.currentBoard?.columns || {}).find(([, cards]) => cards.includes(card))?.[0] || "";
+}
+
+function getOptimisticColumn(card) {
+  if (["complete", "in-progress", "in-review"].includes(card.column)) {
+    return card.column;
+  }
+
+  if (card.assignee) {
+    return "assigned";
+  }
+
+  return card.points === null || card.points === undefined ? "backlog" : "ready";
+}
+
+function getAssignee(email) {
+  const normalizedEmail = String(email || "").trim();
+
+  if (!normalizedEmail) {
+    return null;
+  }
+
+  return state.currentBoard?.assignees?.find((assignee) => assignee.email === normalizedEmail) || {
+    email: normalizedEmail,
+    name: normalizedEmail,
+  };
+}
+
+function moveBoardCard(card, fromColumn, toColumn) {
+  if (!card || !fromColumn || !toColumn || fromColumn === toColumn) {
+    return;
+  }
+
+  const source = state.currentBoard.columns[fromColumn] || [];
+  const destination = state.currentBoard.columns[toColumn] || [];
+  const sourceIndex = source.indexOf(card);
+
+  if (sourceIndex !== -1) {
+    source.splice(sourceIndex, 1);
+  }
+  destination.push(card);
+  card.column = toColumn;
+}
+
+function applyCardChanges(card, changes) {
+  if (Object.hasOwn(changes, "summary")) {
+    card.summary = String(changes.summary || "").trim();
+  }
+
+  if (Object.hasOwn(changes, "points")) {
+    const value = String(changes.points ?? "").trim();
+
+    card.points = value ? Number(value) : null;
+  }
+
+  if (Object.hasOwn(changes, "assignee")) {
+    card.assignee = getAssignee(changes.assignee);
+  }
+}
+
+function beginOptimisticCardUpdate(detail, changes) {
+  const card = getBoardCard(detail.id);
+
+  if (!card || !state.currentBoard) {
+    return () => {};
+  }
+
+  const original = {
+    assignee: card.assignee ? { ...card.assignee } : null,
+    column: getBoardCardColumn(card),
+    points: card.points,
+    summary: card.summary,
+  };
+  const originalIndex = state.currentBoard.columns[original.column]?.indexOf(card) ?? -1;
+
+  state.pendingCardIds.add(card.id);
+  applyCardChanges(card, changes);
+  moveBoardCard(card, original.column, getOptimisticColumn(card));
+  renderColumns();
+
+  return ({ detail: savedDetail, revert = false } = {}) => {
+    if (revert) {
+      applyCardChanges(card, original);
+      const currentColumn = getBoardCardColumn(card);
+
+      moveBoardCard(card, currentColumn, original.column);
+      const cards = state.currentBoard.columns[original.column] || [];
+      const currentIndex = cards.indexOf(card);
+
+      if (currentIndex !== -1 && originalIndex >= 0) {
+        cards.splice(currentIndex, 1);
+        cards.splice(originalIndex, 0, card);
+      }
+    } else if (savedDetail) {
+      applyCardChanges(card, savedDetail);
+      moveBoardCard(card, getBoardCardColumn(card), getOptimisticColumn(card));
+    }
+
+    state.pendingCardIds.delete(card.id);
+    renderBoard();
+  };
+}
+
 async function saveDetail(event) {
   event.preventDefault();
 
@@ -1042,6 +1242,7 @@ async function saveDetail(event) {
   detailSave.disabled = true;
   detailError.textContent = "";
   detailStatus.textContent = "Saving Bugzilla changes...";
+  const finishOptimisticUpdate = beginOptimisticCardUpdate(state.currentDetail, changes);
 
   try {
     const detail = await request(
@@ -1050,8 +1251,9 @@ async function saveDetail(event) {
     );
 
     renderDetail(detail);
-    await loadBoard(state.currentBoardId, { force: true });
+    finishOptimisticUpdate({ detail });
   } catch (requestError) {
+    finishOptimisticUpdate({ revert: true });
     detailError.textContent = requestError?.message || String(requestError);
   } finally {
     detailSave.disabled = false;
@@ -1154,7 +1356,6 @@ async function saveBoardReviewGroup(boardId, reviewGroup) {
     if (state.currentBoardId === boardId) {
       state.currentBoard = result.board;
       renderBoard();
-      void loadReviewGroupAssignees(boardId, result.board);
     }
 
     renderBoardManager();
@@ -1163,6 +1364,45 @@ async function saveBoardReviewGroup(boardId, reviewGroup) {
         ? `Review group #${result.board.reviewGroup.slug} saved.`
         : "Review group cleared.",
     );
+  } catch (requestError) {
+    setError(requestError?.message || String(requestError));
+    setManagerStatus(requestError?.message || String(requestError));
+  } finally {
+    setManagerBusy(false);
+  }
+}
+
+async function refreshBoardReviewGroup(boardId) {
+  const board = getSavedBoard(boardId);
+
+  if (!board?.reviewGroup) {
+    return;
+  }
+
+  setManagerBusy(true);
+  setManagerStatus(`Refreshing #${board.reviewGroup} members...`);
+  setError("");
+
+  try {
+    const result = await request(
+      `/api/meta-boards/${encodeURIComponent(boardId)}/review-group-assignees`,
+      { parameters: { force: "1" } },
+    );
+
+    if (result.error) {
+      throw new Error(result.error);
+    }
+
+    if (state.currentBoardId === boardId && state.currentBoard) {
+      state.currentBoard.assignees = mergeMetaBoardAssignees(
+        state.currentBoard.assignees || [],
+        result.assignees || [],
+      );
+      renderBoard();
+      renderDetailAssigneeOptions();
+    }
+
+    setManagerStatus(`Refreshed #${board.reviewGroup} members.`);
   } catch (requestError) {
     setError(requestError?.message || String(requestError));
     setManagerStatus(requestError?.message || String(requestError));
@@ -1203,6 +1443,11 @@ async function handleBoardManagerClick(event) {
     const reviewGroup = row?.querySelector(".meta-board-review-group");
 
     await saveBoardReviewGroup(boardId, reviewGroup?.value || "");
+    return;
+  }
+
+  if (action.dataset.metaBoardAction === "refresh-review-group") {
+    await refreshBoardReviewGroup(boardId);
   }
 }
 
@@ -1318,6 +1563,9 @@ export function initializeMetaBoards() {
   managerClose.addEventListener("click", () => managerDialog.close());
   managerCancel.addEventListener("click", () => managerDialog.close());
   detailForm.addEventListener("submit", saveDetail);
+  detailSprintMembership?.addEventListener("click", () => {
+    toggleDetailSprintMembership();
+  });
   detailClose.addEventListener("click", () => dialog.close());
   detailCancel.addEventListener("click", () => dialog.close());
   detailDescriptionEdit.addEventListener("click", toggleDetailDescription);

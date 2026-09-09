@@ -80,7 +80,7 @@ function normalizeEntry(entry, now) {
   };
 }
 
-function normalizeAssigneeEntry(entry, now) {
+function normalizeAssigneeEntry(entry) {
   const checkedAt = Number(entry?.checkedAt || 0);
 
   if (!checkedAt) {
@@ -90,7 +90,9 @@ function normalizeAssigneeEntry(entry, now) {
   return {
     assignees: normalizeAssignees(entry.assignees),
     checkedAt,
-    fresh: now - checkedAt < REVIEWER_GROUP_CACHE_TTL_MS,
+    // Board review groups change rarely. They remain valid until the user
+    // explicitly refreshes them from the Meta Board settings.
+    fresh: true,
   };
 }
 
@@ -162,7 +164,6 @@ export async function saveReviewerGroupCache({
 
 export async function loadReviewGroupAssigneeCache({
   cachePath,
-  now = Date.now(),
   reviewGroup,
 } = {}) {
   const resolvedPath = getCachePath(cachePath);
@@ -176,7 +177,7 @@ export async function loadReviewGroupAssigneeCache({
     const contents = await readFile(resolvedPath, "utf8");
     const store = JSON.parse(contents);
 
-    return normalizeAssigneeEntry(store?.reviewGroupAssignees?.[key], now);
+    return normalizeAssigneeEntry(store?.reviewGroupAssignees?.[key]);
   } catch {
     return null;
   }

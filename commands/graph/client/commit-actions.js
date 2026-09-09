@@ -114,7 +114,12 @@ function isCommitReachableFromLoadedOriginMain(index, commit) {
   return reachable.has(commit.hash);
 }
 
-export async function showDiff(graph, index, commit, { loadIntegration = false } = {}) {
+export async function showDiff(
+  graph,
+  index,
+  commit,
+  { loadCurrentIntegration = false, loadIntegration = false } = {},
+) {
   const viewer = document.getElementById("diff-" + index);
   const title = viewer.querySelector(".diff-title");
   const meta = viewer.querySelector(".diff-meta");
@@ -189,6 +194,14 @@ export async function showDiff(graph, index, commit, { loadIntegration = false }
         commit,
         message,
       });
+
+      if (
+        loadCurrentIntegration &&
+        !isWorkingTreeCommit(commit) &&
+        getCommitPhabricatorRevision(commit, message)
+      ) {
+        void loadSelectedCommitIntegrationStatus(index, commit, integrationStatus);
+      }
     });
 
     if (loadIntegration && !isWorkingTreeCommit(commit)) {

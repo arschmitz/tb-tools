@@ -64,9 +64,9 @@ const state = {
   boardId: "",
   current: null,
   loading: false,
-  metaColors: new Map(),
   openBugDetail: null,
   pendingRollover: null,
+  pendingStoryIds: new Set(),
   sprintId: "",
   view: "overview",
 };
@@ -149,6 +149,18 @@ function getCardPoints(cards = []) {
   return cards.reduce((total, card) => total + (Number(card.points) || 0), 0);
 }
 
+function compareCardsByAssignee(left, right) {
+  const leftAssignee = left.assignee?.name || "Unassigned";
+  const rightAssignee = right.assignee?.name || "Unassigned";
+  const assigneeComparison = leftAssignee.localeCompare(rightAssignee);
+
+  if (assigneeComparison) {
+    return assigneeComparison;
+  }
+
+  return left.summary.localeCompare(right.summary) || left.id.localeCompare(right.id);
+}
+
 function matchesFilters(card) {
   return (
     (!assigneeFilter?.value || card.assignee?.email === assigneeFilter.value) &&
@@ -156,10 +168,10 @@ function matchesFilters(card) {
   );
 }
 
-function createBugLink(card) {
+function createSprintBugLink(card) {
   const link = document.createElement("a");
 
-  link.className = "meta-board-card-id";
+  link.className = "sprint-story-id";
   link.href = card.url;
   link.target = "_blank";
   link.rel = "noreferrer";
@@ -174,28 +186,29 @@ function openBug(card) {
     return;
   }
 
-  state.openBugDetail(card.id, { boardId: state.boardId });
+  state.openBugDetail(card.id, { boardId: state.boardId, sprintId: state.sprintId });
 }
 
-function createCard(card, { member = false } = {}) {
+function createStoryRow(card) {
   const element = document.createElement("article");
-  const heading = document.createElement("div");
-  const title = document.createElement("h4");
+  const summary = document.createElement("button");
   const meta = document.createElement("div");
-  const parent = document.createElement("div");
-  const parentButton = document.createElement("button");
-  const action = document.createElement("button");
 
-  element.className = "meta-board-card sprint-card";
-  element.tabIndex = 0;
-  element.style.setProperty(
-    "--meta-board-card-color",
-    state.metaColors.get(card.parentMeta?.id) || "#2563eb",
-  );
-  heading.className = "meta-board-card-heading";
-  heading.append(createBugLink(card));
-  title.textContent = card.summary;
-  meta.className = "meta-board-card-meta";
+  element.className = "sprint-story-row";
+  summary.className = "sprint-story-summary";
+  summary.type = "button";
+  summary.textContent = card.summary;
+  summary.addEventListener("click", () => openBug(card));
+  meta.className = "sprint-story-meta";
+  if (state.pendingStoryIds.has(card.id)) {
+    const pending = document.createElement("span");
+
+    pending.className = "sprint-story-pending";
+    pending.setAttribute("aria-label", "Saving sprint membership");
+    pending.setAttribute("role", "status");
+    pending.title = "Saving sprint membership";
+    meta.append(pending);
+  }
   meta.append(document.createTextNode(formatPoints(card.points)));
 
   if (card.assignee) {
@@ -204,38 +217,15 @@ function createCard(card, { member = false } = {}) {
       state.assigneeColors.get(card.assignee.email) || ASSIGNEE_COLORS[0],
     );
 
-    assignee.className = "meta-board-assignee";
-    assignee.style.setProperty("--meta-board-assignee-accent", pillStyle.accent);
-    assignee.style.setProperty("--meta-board-assignee-background", pillStyle.background);
-    assignee.style.setProperty("--meta-board-assignee-foreground", pillStyle.foreground);
+    assignee.className = "sprint-story-assignee";
+    assignee.style.setProperty("--sprint-story-assignee-accent", pillStyle.accent);
+    assignee.style.setProperty("--sprint-story-assignee-background", pillStyle.background);
+    assignee.style.setProperty("--sprint-story-assignee-foreground", pillStyle.foreground);
     assignee.textContent = card.assignee.name;
     meta.append(assignee);
   }
 
-  parent.className = "meta-board-card-parent";
-  parentButton.className = "meta-board-card-parent-link";
-  parentButton.type = "button";
-  parentButton.textContent = card.parentMeta?.summary || "Meta board";
-  parentButton.addEventListener("click", (event) => {
-    event.stopPropagation();
-    openBug({ id: card.parentMeta?.id });
-  });
-  parent.append(parentButton);
-  action.className = "sprint-card-membership";
-  action.type = "button";
-  action.textContent = member ? "Remove" : "Add to Sprint";
-  action.addEventListener("click", (event) => {
-    event.stopPropagation();
-    setMembership(card.id, !member).catch((requestError) => setError(requestError.message));
-  });
-  element.append(heading, title, meta, parent, action);
-  element.addEventListener("click", () => openBug(card));
-  element.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      openBug(card);
-    }
-  });
+  element.append(createSprintBugLink(card), summary, meta);
   return element;
 }
 
@@ -387,7 +377,7 @@ function renderOverviewGroups(groups = []) {
     title.textContent = group.name;
     points.textContent = formatPoints(group.points);
     heading.append(title, points);
-    group.cards.filter(matchesFilters).forEach((card) => cards.append(createCard(card, { member: true })));
+    group.cards.filter(matchesFilters).forEach((card) => cards.append(createStoryRow(card)));
     if (!cards.childElementCount) {
       cards.textContent = "No matching stories";
     }
@@ -406,34 +396,14 @@ function renderPlanning() {
     const cards = (state.current.columns?.[columnId]?.cards || []).filter(matchesFilters);
     const headerValue = column.querySelector("header span");
     const container = column.querySelector(".sprint-cards");
+    const orderedCards = columnId === "sprint" ? cards.sort(compareCardsByAssignee) : cards;
 
     clear(container);
     headerValue.textContent = formatPoints(getCardPoints(cards));
 
-    if (columnId !== "sprint") {
-      cards.forEach((card) => container.append(createCard(card)));
-    } else {
-      state.current.groups.forEach((group) => {
-        const groupCards = group.cards.filter(matchesFilters);
-
-        if (!groupCards.length) {
-          return;
-        }
-
-        const groupElement = document.createElement("section");
-        const heading = document.createElement("header");
-        const name = document.createElement("h4");
-        const points = document.createElement("span");
-
-        groupElement.className = "sprint-story-group";
-        name.textContent = group.name;
-        points.textContent = formatPoints(getCardPoints(groupCards));
-        heading.append(name, points);
-        groupElement.append(heading);
-        groupCards.forEach((card) => groupElement.append(createCard(card, { member: true })));
-        container.append(groupElement);
-      });
-    }
+    orderedCards.forEach((card) => {
+      container.append(createStoryRow(card));
+    });
 
     if (!container.childElementCount) {
       const empty = document.createElement("p");
@@ -452,7 +422,6 @@ function render() {
     return;
   }
 
-  state.metaColors = new Map(Object.entries(sprint.metaColors || {}));
   state.assigneeColors = createColorAssignments(
     [
       ...(sprint.cards || []),
@@ -492,6 +461,139 @@ function render() {
   setView(state.view, { updateLocation: false });
 }
 
+function getSprintStoryLocation(storyId) {
+  return Object.entries(state.current?.columns || {}).find(([, column]) => (
+    column.cards.some((card) => card.id === String(storyId))
+  ))?.[0] || "";
+}
+
+function getSprintPlanningColumn(card) {
+  if (!card) {
+    return "";
+  }
+
+  return ["assigned", "in-progress", "in-review", "complete"].includes(card.column)
+    ? "assigned"
+    : card.column;
+}
+
+function getSprintStoryCards() {
+  return state.current?.columns?.sprint?.cards || [];
+}
+
+function updateSprintDerivedData() {
+  const cards = getSprintStoryCards();
+  const groups = new Map();
+  const people = new Map();
+  const totalPoints = getCardPoints(cards);
+  const completePoints = getCardPoints(cards.filter((card) => card.column === "complete"));
+  const inProgressPoints = getCardPoints(cards.filter((card) => (
+    ["in-progress", "in-review"].includes(card.column)
+  )));
+
+  cards.forEach((card) => {
+    const assignee = card.assignee || { email: "", name: "Unassigned" };
+    const key = assignee.email || "unassigned";
+    const group = groups.get(key) || { cards: [], name: assignee.name || "Unassigned", points: 0 };
+    const person = people.get(key) || {
+      completePoints: 0,
+      name: assignee.name || "Unassigned",
+      points: 0,
+      remainingPoints: 0,
+    };
+    const points = Number(card.points) || 0;
+
+    group.cards.push(card);
+    group.points += points;
+    person.points += points;
+    if (card.column === "complete") {
+      person.completePoints += points;
+    } else {
+      person.remainingPoints += points;
+    }
+    groups.set(key, group);
+    people.set(key, person);
+  });
+  state.current.cards = [...cards];
+  state.current.groups = Array.from(groups.values()).sort((first, second) => (
+    first.name.localeCompare(second.name)
+  ));
+  state.current.stats = {
+    ...state.current.stats,
+    completePoints,
+    inProgressPoints,
+    people: Array.from(people.values()).sort((first, second) => first.name.localeCompare(second.name)),
+    peopleWithPoints: Array.from(people.values()).filter((person) => person.points > 0).length,
+    remainingPoints: Math.max(0, totalPoints - completePoints),
+    totalPoints,
+  };
+}
+
+export async function setSprintStoryMembership({ boardId, member, sprintId, storyId } = {}) {
+  const hasCurrentSprint = Boolean(
+    state.current && state.boardId === String(boardId) && state.sprintId === String(sprintId),
+  );
+  const snapshot = hasCurrentSprint
+    ? {
+      cards: [...(state.current?.cards || [])],
+      columns: Object.fromEntries(Object.entries(state.current?.columns || {}).map(([id, column]) => [
+        id,
+        [...column.cards],
+      ])),
+      groups: [...(state.current?.groups || [])],
+      stats: { ...state.current?.stats },
+    }
+    : null;
+
+  if (hasCurrentSprint) {
+    const sourceColumn = getSprintStoryLocation(storyId);
+    const destinationColumn = member
+      ? "sprint"
+      : getSprintPlanningColumn(
+        state.current.columns.sprint.cards.find((card) => card.id === String(storyId)),
+      );
+    const source = state.current.columns[sourceColumn]?.cards || [];
+    const destination = state.current.columns[destinationColumn]?.cards || [];
+    const story = source.find((card) => card.id === String(storyId));
+
+    if (!story || !destinationColumn || sourceColumn === destinationColumn) {
+      throw new Error("The story is not available for this sprint membership change.");
+    }
+
+    source.splice(source.indexOf(story), 1);
+    destination.push(story);
+    state.pendingStoryIds.add(story.id);
+    updateSprintDerivedData();
+    render();
+  }
+
+  try {
+    const result = await request(
+      `/api/meta-boards/${encodeURIComponent(boardId)}/sprints/${encodeURIComponent(sprintId)}/stories/${encodeURIComponent(storyId)}`,
+      { body: { member }, method: "PUT" },
+    );
+
+    if (hasCurrentSprint) {
+      state.pendingStoryIds.delete(String(storyId));
+      state.current = result.sprint;
+      render();
+    }
+    return result.sprint;
+  } catch (requestError) {
+    if (hasCurrentSprint && snapshot) {
+      state.current.cards = snapshot.cards;
+      Object.entries(snapshot.columns).forEach(([id, cards]) => {
+        state.current.columns[id].cards = cards;
+      });
+      state.current.groups = snapshot.groups;
+      state.current.stats = snapshot.stats;
+      state.pendingStoryIds.delete(String(storyId));
+      render();
+    }
+    throw requestError;
+  }
+}
+
 function setLoading(isLoading, message = "") {
   state.loading = isLoading;
   refresh.disabled = isLoading;
@@ -523,22 +625,6 @@ async function loadSprint({ force = false } = {}) {
   } finally {
     setLoading(false);
   }
-}
-
-async function setMembership(storyId, member) {
-  if (!state.current) {
-    return;
-  }
-
-  setError("");
-  setStatus(member ? "Adding story to sprint..." : "Removing story from sprint...");
-  const result = await request(
-    `/api/meta-boards/${encodeURIComponent(state.boardId)}/sprints/${encodeURIComponent(state.sprintId)}/stories/${encodeURIComponent(storyId)}`,
-    { body: { member }, method: "PUT" },
-  );
-
-  state.current = result.sprint;
-  render();
 }
 
 async function saveSprintDetails() {

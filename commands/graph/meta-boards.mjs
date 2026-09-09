@@ -44,13 +44,7 @@ const BOARD_BUG_FIELDS = [
 ].join(",");
 const PHABRICATOR_BATCH_SIZE = 100;
 const MAX_META_BOARD_BUGS = 1500;
-const REVIEW_ACTIONS = new Set([
-  "accept",
-  "reject",
-  "request",
-  "request-changes",
-  "resign",
-]);
+const META_BOARD_PHABRICATOR_CACHE_TTL_MS = 15 * 60 * 1000;
 const DESCRIPTION_COMMENT_PREFIX = "TB-Tools story description:";
 
 function uniqueIds(values = []) {
@@ -87,6 +81,10 @@ function normalizeAttachments(attachments) {
 
 function getRevisionIds(attachments) {
   return normalizeAttachments(attachments).flatMap((attachment) => {
+    if (attachment?.is_obsolete) {
+      return [];
+    }
+
     if (attachment?.content_type !== "text/x-phabricator-request") {
       return [];
     }
@@ -122,6 +120,12 @@ function getStoryPoints(bug, storyPointsField) {
   return Number.isFinite(points) ? points : value;
 }
 
+function isWaitingForReview(revision = {}) {
+  const status = `${revision.status || ""} ${revision.statusName || ""}`.toLowerCase();
+
+  return status.includes("needs review") || status.includes("status-needs-review");
+}
+
 function getAssignee(bug) {
   const detail = bug?.assigned_to_detail || {};
   const email = String(detail.email || detail.name || bug?.assigned_to || "").trim();
@@ -145,30 +149,12 @@ function isComplete(bug) {
   );
 }
 
-function hasReview(transactions = []) {
-  return transactions.some((transaction) => {
-    const action = String(transaction?.action || transaction?.type || "")
-      .trim()
-      .toLowerCase();
-    const content = String(
-      transaction?.content?.raw ??
-      transaction?.content ??
-      transaction?.comments?.[0]?.content?.raw ??
-      transaction?.comments?.[0]?.content ??
-      "",
-    ).trim();
-
-    return REVIEW_ACTIONS.has(action) ||
-      ((action === "comment" || action === "inline") && Boolean(content));
-  });
-}
-
 function getBoardColumn({ bug, patches, points, assignee }) {
   if (isComplete(bug)) {
     return "complete";
   }
 
-  if (patches.some((patch) => patch.hasReview)) {
+  if (patches.some((patch) => patch.waitingForReview)) {
     return "in-review";
   }
 
@@ -183,7 +169,7 @@ function getBoardColumn({ bug, patches, points, assignee }) {
   return points === null ? "backlog" : "ready";
 }
 
-function normalizeRevision(revision, transactions = []) {
+function normalizeRevision(revision) {
   const numericId = String(revision?.id || "").replace(/^D/i, "");
 
   return {
@@ -193,7 +179,7 @@ function normalizeRevision(revision, transactions = []) {
     statusName: revision?.statusName || revision?.status || "Unknown",
     title: revision?.title || "",
     url: revision?.uri || getPhabUrl(`D${numericId}`),
-    hasReview: hasReview(transactions),
+    waitingForReview: isWaitingForReview(revision),
   };
 }
 
@@ -341,14 +327,18 @@ async function getStoryPatches({ stories, getBugsWithAttachmentsByIds, phab }) {
     uniqueIds(getRevisionIds(bug.attachments)),
   ]));
   const revisionIds = uniqueIds(Array.from(revisionIdsByStoryId.values()).flat());
-  const revisionsById = new Map();
-  const transactionsByRevisionId = new Map();
+  const revisionsById = new Map(revisionIds.map((id) => [
+    id,
+    { id, statusName: "Attached" },
+  ]));
 
   for (const ids of chunk(revisionIds)) {
     try {
       const response = await phab({
         route: "differential.query",
         params: { ids: ids.map(Number) },
+        cacheNamespace: "meta-board",
+        cacheTtlMs: META_BOARD_PHABRICATOR_CACHE_TTL_MS,
       });
 
       for (const revision of response?.result || []) {
@@ -363,21 +353,6 @@ async function getStoryPatches({ stories, getBugsWithAttachmentsByIds, phab }) {
     }
   }
 
-  for (const ids of chunk(Array.from(revisionsById.keys()))) {
-    try {
-      const response = await phab({
-        route: "differential.getrevisioncomments",
-        params: { ids: ids.map(Number), inlines: false },
-      });
-
-      for (const id of ids) {
-        transactionsByRevisionId.set(id, response?.result?.[id] || []);
-      }
-    } catch (error) {
-      errors.push(String(error?.message || error));
-    }
-  }
-
   return {
     errors,
     patchesByStoryId: new Map(storyIds.map((storyId) => [
@@ -385,10 +360,7 @@ async function getStoryPatches({ stories, getBugsWithAttachmentsByIds, phab }) {
       (revisionIdsByStoryId.get(storyId) || [])
         .map((id) => revisionsById.get(id))
         .filter(Boolean)
-        .map((revision) => normalizeRevision(
-          revision,
-          transactionsByRevisionId.get(String(revision.id)) || [],
-        )),
+        .map(normalizeRevision),
     ])),
   };
 }

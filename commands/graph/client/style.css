@@ -22,7 +22,7 @@ body {
   background: #f6f7f9;
   color: #20242a;
 }
-header {
+body > header {
   padding: 18px 16px 0;
   border-bottom: 1px solid #d6dae1;
   background: #fff;
@@ -5305,6 +5305,22 @@ body.patch-update-open {
   color: #57606a;
   font-size: 12px;
 }
+.meta-board-card-pending {
+  animation: meta-board-card-spin 0.8s linear infinite;
+  border: 2px solid #c6e2ff;
+  border-right-color: #0969da;
+  border-radius: 50%;
+  display: inline-block;
+  height: 10px;
+  margin-right: 5px;
+  vertical-align: -1px;
+  width: 10px;
+}
+@keyframes meta-board-card-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
 .meta-board-card-id {
   color: inherit;
   text-decoration: underline;
@@ -6060,6 +6076,10 @@ body.patch-update-open {
   .meta-board-description-header h3 {
     color: #acb4c0;
   }
+  .meta-board-card-pending {
+    border-color: #164a72;
+    border-right-color: #79c0ff;
+  }
   .meta-board-column header .meta-board-column-points {
     color: #79c0ff;
   }
@@ -6325,6 +6345,7 @@ body.patch-update-open {
   .server-stopped-message p {
     color: #acb4c0;
   }
+  body > header,
   header,
   .summary,
   .graph,
@@ -9023,8 +9044,7 @@ body.patch-review-open {
 .sprint-save-details,
 .sprint-view-tab,
 .sprint-create-submit,
-.sprint-rollover-submit,
-.sprint-card-membership {
+.sprint-rollover-submit {
   background: #fff;
   border: 1px solid #1f5f9f;
   border-radius: 4px;
@@ -9041,9 +9061,7 @@ body.patch-review-open {
 .sprint-save-details:hover,
 .sprint-save-details:focus,
 .sprint-view-tab:hover,
-.sprint-view-tab:focus,
-.sprint-card-membership:hover,
-.sprint-card-membership:focus {
+.sprint-view-tab:focus {
   background: #ddf4ff;
   outline: none;
 }
@@ -9123,6 +9141,10 @@ body.patch-review-open {
 .sprint-overview {
   display: grid;
   gap: 14px;
+}
+.sprint-overview[hidden],
+.sprint-planning[hidden] {
+  display: none;
 }
 .sprint-metrics {
   display: grid;
@@ -9262,8 +9284,10 @@ body.patch-review-open {
   border: 1px solid #d8dee4;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  max-height: calc(100vh - 280px);
-  min-height: 360px;
+  height: calc(100dvh - 280px);
+  min-height: 240px;
+  min-width: 0;
+  overflow: hidden;
 }
 .sprint-column > header {
   background: #f6f8fa;
@@ -9280,15 +9304,77 @@ body.patch-review-open {
   align-content: start;
   display: grid;
   gap: 8px;
+  min-height: 0;
+  min-width: 0;
   overflow: auto;
   padding: 8px;
 }
-.sprint-card {
-  cursor: pointer;
+.sprint-story-row {
+  align-items: center;
+  border: 1px solid #d8dee4;
+  border-radius: 4px;
+  display: grid;
+  gap: 7px;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  min-width: 0;
+  padding: 6px 8px;
 }
-.sprint-card-membership {
-  justify-self: start;
-  margin-top: 8px;
+.sprint-story-id {
+  color: #0969da;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.sprint-story-id:hover,
+.sprint-story-id:focus {
+  text-decoration: underline;
+}
+.sprint-story-summary {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 0;
+  text-align: left;
+}
+.sprint-story-summary:hover,
+.sprint-story-summary:focus-visible {
+  color: #0969da;
+  text-decoration: underline;
+}
+.sprint-story-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 4px;
+  justify-content: end;
+}
+.sprint-story-pending {
+  animation: sprint-story-spin 0.8s linear infinite;
+  border: 2px solid #c6e2ff;
+  border-right-color: #0969da;
+  border-radius: 50%;
+  height: 9px;
+  width: 9px;
+}
+@keyframes sprint-story-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+.sprint-story-assignee {
+  background: var(--sprint-story-assignee-background);
+  border: 1px solid var(--sprint-story-assignee-accent);
+  border-radius: 999px;
+  color: var(--sprint-story-assignee-foreground);
+  font-weight: 600;
+  padding: 1px 5px;
 }
 .sprint-empty {
   color: #57606a;
@@ -9420,7 +9506,6 @@ body.patch-review-open {
   .sprint-back-to-board,
   .sprint-save-details,
   .sprint-view-tab,
-  .sprint-card-membership,
   .sprint-dialog-actions button {
     background: #191d23;
     border-color: #4b9eff;
@@ -9433,9 +9518,7 @@ body.patch-review-open {
   .sprint-save-details:hover,
   .sprint-save-details:focus,
   .sprint-view-tab:hover,
-  .sprint-view-tab:focus,
-  .sprint-card-membership:hover,
-  .sprint-card-membership:focus {
+  .sprint-view-tab:focus {
     background: #0b2538;
   }
   .sprint-bugzilla-link {
@@ -9452,6 +9535,7 @@ body.patch-review-open {
   .sprint-story-group > header,
   .sprint-column,
   .sprint-column > header,
+  .sprint-story-row,
   .sprint-burndown,
   .sprint-rollover-stories,
   .sprint-rollover-stories label {
@@ -9473,6 +9557,18 @@ body.patch-review-open {
   .sprint-story-group > header,
   .sprint-column > header {
     background: #161b22;
+  }
+  .sprint-story-row {
+    background: #0d1117;
+  }
+  .sprint-story-pending {
+    border-color: #164a72;
+    border-right-color: #79c0ff;
+  }
+  .sprint-story-id,
+  .sprint-story-summary:hover,
+  .sprint-story-summary:focus-visible {
+    color: #79c0ff;
   }
   .sprint-metrics section,
   .sprint-story-group,

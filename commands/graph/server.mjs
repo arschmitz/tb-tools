@@ -122,6 +122,7 @@ import {
 import {
   addGraphPatchReviewInline,
   applyGraphPatchReviewSuggestion,
+  cancelGraphPatchReviewSession,
   createGraphPatchReviewSession,
   getGraphPatchReviewContext,
   prepareGraphPatchReviewSession,
@@ -1071,7 +1072,7 @@ export async function startInteractiveGraphServer({
     return request;
   }
 
-  async function getServerMetaBoardReviewGroupAssignees(board) {
+  async function getServerMetaBoardReviewGroupAssignees(board, { force = false } = {}) {
     if (!board.reviewGroup) {
       return { assignees: [] };
     }
@@ -1079,7 +1080,7 @@ export async function startInteractiveGraphServer({
     try {
       return {
         assignees: mergeMetaBoardAssignees(
-          await getReviewGroupAssignees({ reviewGroup: board.reviewGroup, phab }),
+          await getReviewGroupAssignees({ force, reviewGroup: board.reviewGroup, phab }),
         ),
       };
     } catch (error) {
@@ -1335,6 +1336,14 @@ export async function startInteractiveGraphServer({
           snapshotLimit: getRequestLimit(body.snapshotLimit),
         });
 
+        for (const activeSession of patchReviewSessions.values()) {
+          if (
+            activeSession.id !== session.id &&
+            activeSession.graph.path === session.graph.path
+          ) {
+            cancelGraphPatchReviewSession({ session: activeSession });
+          }
+        }
         patchReviewSessions.set(session.id, session);
         void prepareGraphPatchReviewSession({
           session,
@@ -1394,7 +1403,7 @@ export async function startInteractiveGraphServer({
       }
 
       const patchReviewActionMatch = url.pathname.match(
-        /^\/api\/review\/([^/]+)\/(apply|inline|skip|submit|steer)$/,
+        /^\/api\/review\/([^/]+)\/(apply|inline|skip|submit|steer|cancel)$/,
       );
       if (request.method === "POST" && patchReviewActionMatch) {
         const body = await readRequestJson(request);
@@ -1414,7 +1423,9 @@ export async function startInteractiveGraphServer({
 
         const [, , action] = patchReviewActionMatch;
 
-        if (action === "apply") {
+        if (action === "cancel") {
+          cancelGraphPatchReviewSession({ session });
+        } else if (action === "apply") {
           await applyGraphPatchReviewSuggestion({
             session,
             itemId: body.itemId,
@@ -1458,7 +1469,6 @@ export async function startInteractiveGraphServer({
             outcome: body.outcome,
             message: body.message,
             postComment,
-            publishReview: phabWebSession.publishRevisionReview,
           });
         }
 
@@ -1906,7 +1916,9 @@ export async function startInteractiveGraphServer({
         const board = await getStoredMetaBoard(
           decodeURIComponent(metaBoardAssigneesMatch[1]),
         );
-        const result = await getServerMetaBoardReviewGroupAssignees(board);
+        const result = await getServerMetaBoardReviewGroupAssignees(board, {
+          force: url.searchParams.get("force") === "1",
+        });
 
         sendJson(response, 200, { ok: true, ...result });
         return;

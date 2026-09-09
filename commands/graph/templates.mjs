@@ -623,6 +623,7 @@ export function buildGraphHtml({
           </section>
           <div class="patch-review-actions">
             <button class="patch-review-output-toggle" type="button" hidden>Output</button>
+            <button class="patch-review-cancel" type="button" hidden>Cancel Pull</button>
             <button class="patch-review-apply-suggestion" type="button" hidden>Apply in Review Checkout</button>
             <button class="patch-review-pending-comment" type="button" hidden>Add Comment as Pending</button>
             <button class="patch-review-pending-suggestion" type="button" hidden>Add Comment + Code Suggestion as Pending</button>
@@ -738,8 +739,8 @@ export function buildGraphHtml({
             </label>
           </div>
           <div class="sprint-planning-columns">
-            <section class="sprint-column" data-sprint-column="ready"><header><h3>Ready</h3><span></span></header><div class="sprint-cards"></div></section>
             <section class="sprint-column" data-sprint-column="backlog"><header><h3>Backlog</h3><span></span></header><div class="sprint-cards"></div></section>
+            <section class="sprint-column" data-sprint-column="ready"><header><h3>Ready</h3><span></span></header><div class="sprint-cards"></div></section>
             <section class="sprint-column" data-sprint-column="assigned"><header><h3>Assigned or Greater</h3><span></span></header><div class="sprint-cards"></div></section>
             <section class="sprint-column sprint-members-column" data-sprint-column="sprint"><header><h3>Sprint</h3><span></span></header><div class="sprint-cards"></div></section>
           </div>
@@ -946,6 +947,7 @@ export function buildGraphHtml({
       </details>
       <p class="meta-board-detail-error" role="alert"></p>
       <footer class="meta-board-detail-actions">
+        <button class="meta-board-detail-sprint-membership" type="button" hidden></button>
         <button class="meta-board-detail-cancel" type="button">Cancel</button>
         <button class="meta-board-detail-save" type="submit">Save Changes</button>
       </footer>

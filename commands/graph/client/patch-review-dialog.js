@@ -13,6 +13,7 @@ const activityFilters = dialog?.querySelectorAll("[data-review-activity-filter]"
 const activityList = dialog?.querySelector(".patch-review-activity-list");
 const output = dialog?.querySelector(".patch-review-output");
 const outputToggle = dialog?.querySelector(".patch-review-output-toggle");
+const cancelPull = dialog?.querySelector(".patch-review-cancel");
 const steer = dialog?.querySelector(".patch-review-steer");
 const steerInput = dialog?.querySelector(".patch-review-steer-input");
 const steerSubmit = dialog?.querySelector(".patch-review-steer-submit");
@@ -733,6 +734,7 @@ function renderIssue(issue) {
 function getActionStatus() {
   const labels = {
     apply: "Applying code suggestion in the Review checkout...",
+    cancel: "Cancelling Review checkout pull...",
     inline: "Saving inline comment draft...",
     skip: "Skipping review finding...",
     steer: "Sending guidance to Codex...",
@@ -778,6 +780,11 @@ function renderSession(value) {
   outputToggle.hidden = !hasOutput;
   outputToggle.textContent = outputVisible ? "Back to Review" : "Output";
   dialog.classList.toggle("output-expanded", outputVisible && hasOutput);
+  setButton(cancelPull, {
+    hidden: session.status !== "pulling",
+    disabled: actionPending,
+    text: pendingAction === "cancel" ? "Cancelling..." : "Cancel Pull",
+  });
   renderActivity(session.activity || []);
   setPatchContext(session.patchContext);
   const hasCompletedReview = Boolean(
@@ -970,6 +977,7 @@ function resetPatchReviewDialog(patch) {
   finalSection.hidden = true;
   finalMessage.value = "";
   setButton(applySuggestion, { hidden: true, text: "Apply in Review Checkout" });
+  setButton(cancelPull, { hidden: true, text: "Cancel Pull" });
   setButton(pendingComment, { hidden: true, text: "Add Comment as Pending" });
   setButton(pendingSuggestion, { hidden: true, text: "Add Comment + Code Suggestion as Pending" });
   setButton(skip, { hidden: true, text: "Skip Issue" });
@@ -1019,7 +1027,12 @@ export function initializePatchReviewDialog() {
     return;
   }
 
-  close.addEventListener("click", () => dialog.close());
+  close.addEventListener("click", () => {
+    if (session?.status === "pulling") {
+      void runAction("cancel");
+    }
+    dialog.close();
+  });
   dialog.addEventListener("close", () => {
     window.clearTimeout(pollTimer);
     setPageScrollLocked(false);
@@ -1031,6 +1044,9 @@ export function initializePatchReviewDialog() {
   outputToggle?.addEventListener("click", () => {
     outputVisible = !outputVisible;
     renderSession(session);
+  });
+  cancelPull?.addEventListener("click", () => {
+    void runAction("cancel");
   });
   patchContextToggle?.addEventListener("click", () => {
     setPatchContextExpanded(!patchContextExpanded);

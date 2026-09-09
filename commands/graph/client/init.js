@@ -641,7 +641,9 @@ function selectCurrentCommit(index) {
   ));
 
   if (currentCommit) {
-    void showDiff(state.graph, index, currentCommit);
+    void showDiff(state.graph, index, currentCommit, {
+      loadCurrentIntegration: true,
+    });
   }
 }
 

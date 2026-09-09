@@ -27,6 +27,21 @@ test("run passes the shared mach environment to child commands", async () => {
   assert.equal(output, "1");
 });
 
+test("run cancels an active child process", async () => {
+  const controller = new AbortController();
+  const running = run({
+    args: ["-e", "setInterval(() => {}, 1000)"],
+    capture: true,
+    cmd: process.execPath,
+    killProcessGroup: true,
+    silent: true,
+    signal: controller.signal,
+  });
+
+  setTimeout(() => controller.abort(), 25);
+  await assert.rejects(running, (error) => error?.code === "ABORT_ERR");
+});
+
 test("every streamed Mozilla command launcher preserves the shared environment", () => {
   const files = [
     "commands/graph/actions.mjs",

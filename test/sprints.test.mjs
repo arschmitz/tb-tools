@@ -108,6 +108,7 @@ test("sprint data only includes board stories and calculates planning totals", (
   assert.deepEqual(sprint.cards.map((card) => card.id), ["100001", "100002", "100003"]);
   assert.deepEqual(sprint.columns.ready.cards.map((card) => card.id), []);
   assert.deepEqual(sprint.columns.backlog.cards.map((card) => card.id), ["100004"]);
+  assert.deepEqual(sprint.columns.sprint.cards.map((card) => card.id), ["100001", "100003", "100002"]);
   assert.equal(sprint.stats.totalPoints, 10);
   assert.equal(sprint.stats.remainingPoints, 5);
   assert.equal(sprint.stats.inProgressPoints, 2);
@@ -179,6 +180,7 @@ test("creating a sprint uses the board's Bugzilla component and sprint metadata"
     platform: "All",
     product: "Thunderbird",
     summary: "[SPRINT] - September 2",
+    type: "task",
     version: "unspecified",
     whiteboard: "[tb-desktop-sprint]",
   }]);

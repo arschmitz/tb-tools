@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   addGraphPatchReviewInline,
   applyGraphPatchReviewSuggestion,
+  cancelGraphPatchReviewSession,
   createGraphPatchReviewSession,
   getGraphPatchReviewCodexThreadName,
   getGraphPatchReviewContext,
@@ -55,8 +56,10 @@ test("patch review pulls an exact raw patch into the configured Review clone whe
     },
     makeTempDirectory: async () => "/tmp/tb-tools-review-test",
     writeRawPatch: async (...args) => writes.push(args),
-    runCommand: async ({ args, cmd, cwd }) => {
-      calls.push({ args, cmd, cwd });
+    runCommand: async (command) => {
+      const { args, cmd } = command;
+
+      calls.push(command);
       if (cmd === "git" && args[0] === "status") {
         return "";
       }
@@ -68,6 +71,9 @@ test("patch review pulls an exact raw patch into the configured Review clone whe
       }
       if (cmd === "git" && args[0] === "log") {
         return "Bug 123456 - Example\n\nDifferential Revision: https://phabricator.services.mozilla.com/D123456\n";
+      }
+      if (cmd === "git" && args[0] === "branch") {
+        return "phab-D123456\n";
       }
       return "Pulled D123456\n";
     },
@@ -94,12 +100,53 @@ test("patch review pulls an exact raw patch into the configured Review clone whe
     { cmd: "git", args: ["reset", "--hard"], cwd: "/repo/review/comm" },
     { cmd: "git", args: ["clean", "-ffdx"], cwd: "/repo/review/comm" },
     { cmd: "git", args: ["switch", "main"], cwd: "/repo/review/comm" },
-    { cmd: "moz-phab", args: ["patch", "D123456", "--raw", "--skip-dependencies"], cwd: "/repo/review/comm" },
-    { cmd: "moz-phab", args: ["patch", "D123456", "--apply-to", "here"], cwd: "/repo/review/comm" },
+    { cmd: "moz-phab", args: ["patch", "D123456", "--raw", "--skip-dependencies", "--yes"], cwd: "/repo/review/comm" },
+    { cmd: "moz-phab", args: ["patch", "D123456", "--apply-to", "here", "--yes"], cwd: "/repo/review/comm" },
     { cmd: "git", args: ["rev-parse", "HEAD"], cwd: "/repo/review/comm" },
     { cmd: "git", args: ["log", "-1", "--format=%B"], cwd: "/repo/review/comm" },
+    { cmd: "git", args: ["branch", "--show-current"], cwd: "/repo/review/comm" },
     { cmd: "git", args: ["log", "--reverse", "--format=%H%x09%s", "main..HEAD"], cwd: "/repo/review/comm" },
   ]);
+  assert.deepEqual(
+    calls
+      .filter(({ cmd }) => cmd === "moz-phab")
+      .map(({ args, killProcessGroup, timeoutMs }) => ({
+        args,
+        killProcessGroup,
+        timeoutMs,
+      })),
+    [
+      {
+        args: ["patch", "D123456", "--raw", "--skip-dependencies", "--yes"],
+        killProcessGroup: true,
+        timeoutMs: 90_000,
+      },
+      {
+        args: ["patch", "D123456", "--apply-to", "here", "--yes"],
+        killProcessGroup: true,
+        timeoutMs: 90_000,
+      },
+    ],
+  );
+});
+
+test("patch review cancels an in-progress Review checkout pull", () => {
+  const session = createGraphPatchReviewSession({
+    graphs: getReviewGraphs(),
+    revision: "123456",
+    aiEnabled: false,
+  });
+  let aborted = false;
+
+  session.abortController.signal.addEventListener("abort", () => {
+    aborted = true;
+  });
+  cancelGraphPatchReviewSession({ session });
+
+  assert.equal(aborted, true);
+  assert.equal(session.cancelled, true);
+  assert.equal(session.status, "cancelled");
+  assert.equal(session.message, "Review checkout session cancelled.");
 });
 
 test("patch review falls back to the selected patch after parent patches fail", async () => {
@@ -136,6 +183,9 @@ test("patch review falls back to the selected patch after parent patches fail", 
       if (cmd === "git" && args[0] === "log") {
         return "Bug 123456 - Example\n\nDifferential Revision: https://phabricator.services.mozilla.com/D123456\n";
       }
+      if (cmd === "git" && args[0] === "branch") {
+        return "phab-D123456\n";
+      }
 
       return "";
     },
@@ -150,8 +200,8 @@ test("patch review falls back to the selected patch after parent patches fail", 
     ["reset", "--hard"],
     ["clean", "-ffdx"],
     ["switch", "main"],
-    ["patch", "D123456", "--raw", "--skip-dependencies"],
-    ["patch", "D123456", "--apply-to", "here"],
+    ["patch", "D123456", "--raw", "--skip-dependencies", "--yes"],
+    ["patch", "D123456", "--apply-to", "here", "--yes"],
     ["rebase", "--abort"],
     ["cherry-pick", "--abort"],
     ["merge", "--abort"],
@@ -159,12 +209,109 @@ test("patch review falls back to the selected patch after parent patches fail", 
     ["reset", "--hard"],
     ["clean", "-ffdx"],
     ["switch", "main"],
-    ["patch", "D123456", "--skip-dependencies", "--apply-to", "here"],
+    ["patch", "D123456", "--skip-dependencies", "--apply-to", "here", "--yes"],
     ["rev-parse", "HEAD"],
     ["log", "-1", "--format=%B"],
+    ["branch", "--show-current"],
     ["log", "--reverse", "--format=%H%x09%s", "main..HEAD"],
   ]);
   assert.match(session.output, /Parent patch stack could not be applied/);
+});
+
+test("patch review accepts moz-phab's branch identity when commits omit Differential Revision", async () => {
+  const session = createGraphPatchReviewSession({
+    graphs: getReviewGraphs(),
+    revision: "123456",
+    aiEnabled: false,
+  });
+
+  await prepareGraphPatchReviewSession({
+    session,
+    getSnapshot: async () => ({ branch: "phab-D123456" }),
+    makeTempDirectory: async () => "/tmp/tb-tools-review-branch-identity",
+    writeRawPatch: async () => {},
+    runCommand: async ({ args, cmd }) => {
+      if (cmd === "moz-phab" && args.includes("--raw")) {
+        return "diff --git a/mail/example.mjs b/mail/example.mjs\n@@ -1 +1 @@\n-old\n+new\n";
+      }
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return "abcdef123456\n";
+      }
+      if (cmd === "git" && args[0] === "log" && args.includes("--format=%B")) {
+        return "Bug 123456 - Example\n";
+      }
+      if (cmd === "git" && args[0] === "branch") {
+        return "phab-D123456\n";
+      }
+      return "";
+    },
+  });
+
+  assert.equal(session.status, "complete");
+  assert.equal(session.reviewBranch, "phab-D123456");
+});
+
+test("patch review serializes access to the shared Review checkout", async () => {
+  let releaseFirstApply;
+  const firstApplyStarted = new Promise((resolve) => {
+    releaseFirstApply = resolve;
+  });
+  let allowFirstApply;
+  const firstApplyFinished = new Promise((resolve) => {
+    allowFirstApply = resolve;
+  });
+  const events = [];
+  const first = createGraphPatchReviewSession({
+    graphs: getReviewGraphs(),
+    revision: "111111",
+    aiEnabled: false,
+  });
+  const second = createGraphPatchReviewSession({
+    graphs: getReviewGraphs(),
+    revision: "222222",
+    aiEnabled: false,
+  });
+  const prepare = (session) => prepareGraphPatchReviewSession({
+    session,
+    getSnapshot: async () => ({ branch: `phab-${session.revision}` }),
+    makeTempDirectory: async () => `/tmp/tb-tools-review-${session.revision}`,
+    writeRawPatch: async () => {},
+    runCommand: async ({ args, cmd }) => {
+      events.push(`${session.revision}:${cmd}:${args[0]}`);
+      if (cmd === "moz-phab" && args.includes("--raw")) {
+        return "diff --git a/mail/example.mjs b/mail/example.mjs\n@@ -1 +1 @@\n-old\n+new\n";
+      }
+      if (cmd === "moz-phab" && !args.includes("--raw") && session === first) {
+        releaseFirstApply();
+        await firstApplyFinished;
+      }
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return "abcdef123456\n";
+      }
+      if (cmd === "git" && args[0] === "log" && args.includes("--format=%B")) {
+        return `Bug ${session.revision.slice(1)} - Example\n`;
+      }
+      if (cmd === "git" && args[0] === "branch") {
+        return `phab-${session.revision}\n`;
+      }
+      return "";
+    },
+  });
+  const firstPreparation = prepare(first);
+
+  await firstApplyStarted;
+  const secondPreparation = prepare(second);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.some((event) => event.startsWith("D222222:")), false);
+
+  allowFirstApply();
+  await Promise.all([firstPreparation, secondPreparation]);
+  assert.equal(first.status, "complete");
+  assert.equal(second.status, "complete");
+  assert.ok(
+    events.findIndex((event) => event === "D222222:git:rebase") >
+      events.findIndex((event) => event === "D111111:git:branch"),
+  );
 });
 
 test("patch review adds a selected code suggestion as a pending inline before final review", async () => {
@@ -270,37 +417,51 @@ test("patch review applies a suggestion only in the Review checkout and keeps it
   assert.match(calls[0].content, /```suggestion/);
 });
 
-test("patch review publishes pending inline comments with the selected final action", async () => {
-  const calls = [];
-  const session = {
-    aiEnabled: true,
-    revision: "D123456",
-    currentIssueIndex: 0,
-    issues: [{ id: "pending", state: "pending" }],
-  };
+test("patch review submits saved inline drafts with every final action", async () => {
+  const cases = [
+    ["accept", "", "accept"],
+    ["request-changes", "Please address the focus regression.", "reject"],
+    ["comment", "A final note.", "comment"],
+  ];
 
-  await submitGraphPatchReview({
-    session,
-    outcome: "request-changes",
-    message: "Please address the pending inline feedback.",
-    publishReview: async (details) => calls.push(details),
-  });
+  for (const [outcome, message, action] of cases) {
+    const draftPublications = [];
+    const finalActions = [];
+    const session = {
+      aiEnabled: true,
+      revision: "D123456",
+      currentIssueIndex: 0,
+      issues: [{ id: "pending", state: "pending" }],
+    };
 
-  assert.deepEqual(calls, [{
-    revision: "D123456",
-    message: "Please address the pending inline feedback.",
-    action: "reject",
-  }]);
-  assert.equal(session.status, "complete");
-  assert.equal(session.reviewOutcome, "request-changes");
+    await submitGraphPatchReview({
+      session,
+      outcome,
+      message,
+      postComment: async (details) => draftPublications.push(details),
+      editRevision: async (details) => finalActions.push(details),
+    });
+
+    assert.deepEqual(draftPublications, [{
+      id: "D123456",
+      message: "",
+      action: "comment",
+      resolve: true,
+    }]);
+    assert.deepEqual(finalActions, action !== "comment" || message
+      ? [{ id: "D123456", message, action }]
+      : []);
+    assert.equal(session.status, "complete");
+    assert.equal(session.reviewOutcome, outcome);
+  }
 });
 
-test("patch review verifies Request Changes even without pending inline comments", async () => {
-  const publishedReviews = [];
-  const postedComments = [];
+test("patch review posts Request Changes through Conduit", async () => {
+  const finalActions = [];
   const session = {
     aiEnabled: true,
     revision: "D123456",
+    status: "review",
     currentIssueIndex: 0,
     issues: [],
   };
@@ -309,23 +470,23 @@ test("patch review verifies Request Changes even without pending inline comments
     session,
     outcome: "request-changes",
     message: "Please address the focus regression.",
-    postComment: async (details) => postedComments.push(details),
-    publishReview: async (details) => publishedReviews.push(details),
+    editRevision: async (details) => finalActions.push(details),
   });
 
-  assert.deepEqual(publishedReviews, [{
-    revision: "D123456",
+  assert.deepEqual(finalActions, [{
+    id: "D123456",
     message: "Please address the focus regression.",
     action: "reject",
   }]);
-  assert.deepEqual(postedComments, []);
   assert.equal(session.reviewOutcome, "request-changes");
 });
 
-test("patch review requires browser-backed publication for pending inline comments", async () => {
+test("patch review does not duplicate published drafts when the final action is retried", async () => {
+  const draftPublications = [];
   const session = {
     aiEnabled: true,
     revision: "D123456",
+    status: "review",
     currentIssueIndex: 0,
     issues: [{ id: "pending", state: "pending" }],
   };
@@ -333,10 +494,58 @@ test("patch review requires browser-backed publication for pending inline commen
   await assert.rejects(
     submitGraphPatchReview({
       session,
-      outcome: "comment",
-      message: "A final note.",
+      outcome: "accept",
+      postComment: async (details) => draftPublications.push(details),
+      editRevision: async () => {
+        throw new Error("The final action failed.");
+      },
     }),
-    /Sign in to Phabricator/,
+    /The final action failed/,
+  );
+  assert.deepEqual(draftPublications, [{
+    id: "D123456",
+    message: "",
+    action: "comment",
+    resolve: true,
+  }]);
+  assert.equal(session.issues[0].state, "posted");
+  assert.match(session.message, /Saved inline drafts were published/);
+
+  const finalActions = [];
+  await submitGraphPatchReview({
+    session,
+    outcome: "accept",
+    editRevision: async (details) => finalActions.push(details),
+  });
+  assert.deepEqual(draftPublications, [{
+    id: "D123456",
+    message: "",
+    action: "comment",
+    resolve: true,
+  }]);
+  assert.deepEqual(finalActions, [{
+    id: "D123456",
+    message: "",
+    action: "accept",
+  }]);
+});
+
+test("patch review requires an overall comment for a comment-only review", async () => {
+  const session = {
+    aiEnabled: true,
+    revision: "D123456",
+    status: "review",
+    currentIssueIndex: 0,
+    issues: [],
+  };
+
+  await assert.rejects(
+    submitGraphPatchReview({
+      session,
+      outcome: "comment",
+      message: "",
+    }),
+    /Enter an overall comment/,
   );
   assert.equal(session.status, "review");
 });

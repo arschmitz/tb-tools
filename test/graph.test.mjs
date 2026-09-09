@@ -3029,7 +3029,6 @@ test("Phabricator web session verifies Request Changes is available and applied"
       if (selector === "input[name='editengine.actions']") {
         return { name: "editengine.actions" };
       }
-
       return null;
     },
     querySelectorAll(selector) {
@@ -10755,7 +10754,10 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
     client,
     /loadSelectedCommitMessage\(index, commit, commitMessage\)/,
   );
-  assert.match(client, /export async function showDiff\(graph, index, commit, \{ loadIntegration = false \} = \{\}\)/);
+  assert.match(
+    client,
+    /export async function showDiff\(\s*graph,\s*index,\s*commit,\s*\{ loadCurrentIntegration = false, loadIntegration = false \} = \{\},\s*\)/,
+  );
   assert.match(client, /if \(loadIntegration && !isWorkingTreeCommit\(commit\)\)/);
   assert.doesNotMatch(
     client,
@@ -11752,7 +11754,7 @@ test("console tabs are bottom-left navigation and checkout switches are graph-on
   );
 });
 
-test("Tree defers Phabricator review history and only loads integrations from a user-selected commit", () => {
+test("Tree checks the checked-out patch but defers all other integrations and review history", () => {
   const html = buildGraphHtml({
     interactive: { enabled: true, token: "secret" },
     graphs: [{
@@ -11785,10 +11787,17 @@ test("Tree defers Phabricator review history and only loads integrations from a 
   );
   assert.match(
     commitActions,
-    /export async function showDiff\(graph, index, commit, \{ loadIntegration = false \} = \{\}\)/,
+    /export async function showDiff\(\s*graph,\s*index,\s*commit,\s*\{ loadCurrentIntegration = false, loadIntegration = false \} = \{\},\s*\)/,
   );
   assert.match(laneRenderer, /showDiff\(state\.graph, index, commit, \{ loadIntegration: true \}\)/);
-  assert.match(init, /void showDiff\(state\.graph, index, currentCommit\);/);
+  assert.match(
+    init,
+    /void showDiff\(state\.graph, index, currentCommit, \{\s*loadCurrentIntegration: true,\s*\}\);/,
+  );
+  assert.match(
+    commitActions,
+    /loadCurrentIntegration &&[^]*getCommitPhabricatorRevision\(commit, message\)/,
+  );
   assert.doesNotMatch(commitActions, /const reviewPromise = fetchSelectedCommitReview/);
 });
 
