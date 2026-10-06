@@ -185,6 +185,10 @@ eligible lessons and syncs; `repair` only appends portable corrections and
 classifies the learning queue. Follow `repair` with `publish` to share its records.
 `index` downloads the local embedding model if needed and builds missing vectors.
 Normal console maintenance also builds them automatically in smaller batches.
+Starting a new model worker clears the current `semanticError` so an old failure
+does not block a retry. Status keeps the previous diagnostic in
+`semanticLastError`. A worker failure retains its first cause. Exact search still
+works while the model starts or fails.
 
 Records are the durable format. The SQLite index can be recreated from them; its
 job state and usage counters should normally be retained to avoid repeated work.

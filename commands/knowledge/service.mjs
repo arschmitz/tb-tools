@@ -64,8 +64,17 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
   options.maxContextChars = Math.max(1000, Math.min(24_000, Number(options.maxContextChars) || 10_000));
   const store = await openKnowledgeStore(options.directory);
   await store.rebuild();
+  if (options.semantic || embeddings) {
+    const previousError = store.setting("semanticError");
+    if (previousError) store.setting("semanticLastError", { message: previousError, observedAt: new Date().toISOString() });
+    store.setting("semanticError", null);
+  }
   const semantic = embeddings ?? (options.semantic ? createLocalEmbeddings(options.directory, {
-    onError: error => { store.setting("semanticError", error.message); },
+    onError: error => {
+      store.setting("semanticError", error.message);
+      store.setting("semanticLastError", { message: error.message, at: new Date().toISOString() });
+    },
+    onReady: () => { store.setting("semanticError", null); },
   }) : null);
   let timer, running = false, stopped = false, activeAbort, activeJob;
   const error = (stage, failure) => {
@@ -82,6 +91,7 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
   }
   async function indexEmbeddings() {
     if (!semantic?.ready) return;
+    store.setting("semanticError", null);
     const missing = store.db.prepare("SELECT r.id,r.body FROM records r LEFT JOIN vectors v ON r.id=v.id AND v.model=? WHERE v.id IS NULL LIMIT 32").all(semantic.model);
     if (!missing.length) return;
     const vectors = await semantic.embed(missing.map(row => {

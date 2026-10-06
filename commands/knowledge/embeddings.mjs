@@ -3,20 +3,31 @@ import path from "node:path";
 
 export const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 
-export function createLocalEmbeddings(directory, { model = EMBEDDING_MODEL, onError = () => {} } = {}) {
-  const worker = new Worker(new URL("./embedding-worker.mjs", import.meta.url), {
+export function createLocalEmbeddings(directory, { model = EMBEDDING_MODEL, onError = () => {}, onReady = () => {},
+  createWorker = (url, options) => new Worker(url, options) } = {}) {
+  // The worker loads a file, so it cannot use the parent's inline-script option.
+  const execArgv = [];
+  for (let i = 0; i < process.execArgv.length; i++) {
+    if (process.execArgv[i] === "--input-type") { i++; continue; }
+    if (!process.execArgv[i].startsWith("--input-type=")) execArgv.push(process.execArgv[i]);
+  }
+  const worker = createWorker(new URL("./embedding-worker.mjs", import.meta.url), {
+    execArgv,
     workerData: { cache: path.join(directory, "models"), model },
   });
   const pending = new Map();
-  let nextId = 0, ready = false, stopped = false;
+  let nextId = 0, ready = false, stopped = false, failed = false;
   function fail(error) {
+    if (failed || stopped) return;
+    failed = true;
     ready = false;
     for (const item of pending.values()) { clearTimeout(item.timer); item.reject(error); }
     pending.clear();
     onError(error);
   }
   worker.on("message", message => {
-    if (message.ready) { ready = true; return; }
+    if (failed || stopped) return;
+    if (message.ready) { ready = true; onReady(); return; }
     const item = pending.get(message.id);
     if (!item) return;
     pending.delete(message.id); clearTimeout(item.timer);

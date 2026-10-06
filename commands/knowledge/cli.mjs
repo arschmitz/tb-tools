@@ -46,6 +46,7 @@ export async function runKnowledgeCommand(argv = [], { config = {}, generate } =
       lastRetrieval: store.setting("lastRetrieval"), lastLearning: store.setting("lastLearning"),
       lastSync: store.setting("lastSync"), lastHistory: store.setting("lastHistory"), lastPublication: store.setting("lastPublication"),
       lastError: store.setting("lastError"), semanticError: store.setting("semanticError"),
+      semanticLastError: store.setting("semanticLastError"),
     };
     if (action === "search") {
       const repository = values.repository || (await repositoryContext(process.cwd(), options.repositories)).repository;
