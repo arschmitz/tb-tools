@@ -54,6 +54,9 @@ try {
     { closable: true, minimizable: true, maximizable: true },
   ]);
   assert.deepEqual(windowControls.menuRoles, ["minimize", "zoom", "togglefullscreen", "close"]);
+  for (const name of ["Close window", "Minimize window", "Maximize window"]) {
+    assert.equal(await shell.getByRole("button", { name }).isVisible(), true);
+  }
 
   const openFromConsole = url => electron.evaluate(({ webContents }, target) => {
     const contents = webContents.getAllWebContents().find(item =>
@@ -153,7 +156,25 @@ try {
   await shell.waitForFunction(url => document.getElementById("address").textContent === url, address);
   assert.equal(await shell.getByRole("tab").count(), 2);
   assert.equal(await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
-  await shell.close();
+  await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].showInactive());
+  await shell.getByRole("button", { name: "Maximize window" }).click();
+  await shell.getByRole("button", { name: "Restore window" }).waitFor();
+  assert.equal(await electron.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].isMaximized()), true);
+  await shell.getByRole("button", { name: "Restore window" }).click();
+  await shell.getByRole("button", { name: "Maximize window" }).waitFor();
+  assert.equal(await electron.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].isMaximized()), false);
+  await shell.getByRole("button", { name: "Minimize window" }).click();
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (await electron.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].isMinimized())) break;
+    await shell.waitForTimeout(100);
+  }
+  assert.equal(await electron.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].isMinimized()), true);
+  await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].restore());
+  await shell.getByRole("button", { name: "Close window" }).click();
   assert.equal(await electron.evaluate(({ app }) => app.isReady()), true);
   assert.equal((await fetch(consoleAddress)).ok, true);
   const reopenedWindow = electron.waitForEvent("window");

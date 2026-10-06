@@ -4,6 +4,12 @@ const tabs = document.getElementById("tabs");
 const address = document.getElementById("address");
 
 function render(state) {
+  document.body.dataset.platform = state.platform;
+  const maximize = document.getElementById("window-maximize");
+  const maximizeLabel = state.maximized ? "Restore window" : "Maximize window";
+  maximize.setAttribute("aria-label", maximizeLabel);
+  maximize.title = maximizeLabel;
+  maximize.textContent = state.maximized ? "❐" : "□";
   document.getElementById("back").disabled = !state.canGoBack;
   document.getElementById("forward").disabled = !state.canGoForward;
   document.getElementById("reload").disabled = state.activeId === "console";

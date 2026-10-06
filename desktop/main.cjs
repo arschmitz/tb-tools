@@ -96,6 +96,9 @@ function browserState() {
   const history = active?.view.webContents.navigationHistory;
   const index = history?.getActiveIndex() ?? -1;
   return {
+    platform: process.platform,
+    maximized: Boolean(consoleWindow && !consoleWindow.isDestroyed() &&
+      (consoleWindow.isMaximized() || consoleWindow.isFullScreen())),
     activeId: activeTabId,
     address: active?.view.webContents.getURL() || active?.url || "Console",
     canGoBack: index > 0,
@@ -147,6 +150,15 @@ function closeTab(id = activeTabId) {
 
 function handleBrowserAction(event, { action, tabId } = {}) {
   if (event.sender !== consoleWindow?.webContents) return;
+  if (action === "window-close") { consoleWindow.close(); return; }
+  if (action === "window-minimize") { consoleWindow.minimize(); return; }
+  if (action === "window-maximize") {
+    if (consoleWindow.isFullScreen()) consoleWindow.setFullScreen(false);
+    else if (consoleWindow.isMaximized()) consoleWindow.unmaximize();
+    else consoleWindow.maximize();
+    sendBrowserState();
+    return;
+  }
   if (action === "select") { activateTab(tabId); return; }
   if (action === "close") { closeTab(tabId || activeTabId); return; }
   const tab = browserTabs.get(activeTabId);
@@ -178,6 +190,9 @@ function showConsole() {
       if (!url.startsWith("file:")) event.preventDefault();
     });
     consoleWindow.on("resize", layoutBrowser);
+    for (const event of ["maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
+      consoleWindow.on(event, sendBrowserState);
+    }
     consoleWindow.on("closed", () => {
       consoleView?.webContents.close();
       for (const tab of browserTabs.values()) tab.view.webContents.close();
