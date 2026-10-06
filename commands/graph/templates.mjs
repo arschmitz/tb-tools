@@ -798,6 +798,7 @@ export function buildGraphHtml({
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Thunderbird Desktop Console</title>
   <link rel="stylesheet" href="${escapeHtml(stylesheetHref)}">
 </head>
@@ -829,6 +830,18 @@ export function buildGraphHtml({
     ${interactive.enabled ? `<dialog class="console-settings-dialog" aria-labelledby="console-settings-title">
       <form class="console-settings-form">
         <header><h2 id="console-settings-title">Settings</h2><button type="button" class="console-settings-close">Close</button></header>
+        <section class="daily-build-settings" aria-labelledby="daily-build-title">
+          <h3 id="daily-build-title">Daily source pull and build</h3>
+          <p>Build current upstream source in a separate worktree. Your Working and Review checkouts do not switch.</p>
+          <label><input class="daily-build-enabled" type="checkbox"> Enable scheduled builds</label>
+          <label>Local times, one per line (HH:MM)<textarea class="daily-build-times" rows="3" placeholder="02:00"></textarea></label>
+          <div><button class="daily-build-save" type="button">Save schedule</button>
+            <button class="daily-build-run" type="button">Build now</button>
+            <button class="daily-build-cancel" type="button">Cancel build</button>
+            <button class="daily-build-log-open" type="button">View log</button></div>
+          <p class="daily-build-status" role="status"></p>
+          <pre class="daily-build-log" hidden tabindex="0" aria-label="Daily build log"></pre>
+        </section>
         <h3>AI models and reasoning</h3>
         <p>Choose a model and reasoning level for each task. Saved choices apply to the next AI turn, including resumed work.</p>
         <p class="console-settings-status" role="status"></p>

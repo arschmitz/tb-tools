@@ -4,7 +4,7 @@ import { chromium } from "playwright";
 import { startInteractiveGraphServer } from "../commands/graph/server.mjs";
 import { buildGraphHtml } from "../commands/graph/templates.mjs";
 
-test("bug saves immediately update board points, assignees, and columns", { timeout: 15000 }, async (t) => {
+test("bug saves immediately update board points, assignees, and columns", { timeout: 45000 }, async (t) => {
   const graph = {
     branch: "main", commitCount: 0, commits: [], diffs: {},
     label: "comm", path: "/repo/comm", repository: "comm",

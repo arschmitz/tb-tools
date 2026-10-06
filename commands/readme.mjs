@@ -34,7 +34,7 @@ function pushConsoleSection(lines) {
   lines.push(
     "## Thunderbird Desktop Console",
     "",
-    "`tb console` starts a local browser-based control surface for day-to-day Thunderbird patch work. It keeps the comm checkout and the Firefox parent checkout visible together, updates while the server is running, and gives complex workflows a UI instead of forcing everything through prompts in the terminal. Configure an independent Review Checkout pair to work on another clone without changing the primary Working checkout.",
+    "`tb console` starts a local browser-based control surface for Thunderbird patch work. The standalone desktop app runs the same console in a persistent window and creates its own Review worktrees. See the desktop app section below.",
     "",
     "Use the console to:",
     "",
@@ -43,11 +43,14 @@ function pushConsoleSection(lines) {
     "- authenticate with Phabricator from the menu to display native inline code suggestions alongside reviewed diffs, including suggestions that also have prose comments",
     "- create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, blocking-review toggles, and a durable `TB-Tools-Id` trailer for console metadata",
     "- checkout, rebase, interactively reorder/squash/fixup/drop local commit ranges, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit",
-    "- copy a selected commit or local stack between the Working and Review clone pairs on a new destination branch, with an atomic rollback if cherry-picking fails",
+    "- keep console AI chats in the **TB Console** sidebar section. Each successful AI turn is archived after its result is saved by Codex; failed and interrupted turns stay visible. The console keeps its results and automatically restores the same chat when you resume or send a follow-up. Archiving does not delete conversation history",
+    "- use **Update** for a freeform conversation about your patch. It loads the newest local patch and review history in the Working checkout, shows the current patch or pending changes beside the conversation, and lets you request more edits, amend, submit, or roll back the local patch to the start of the session. It has its own saved chat and does not post review comments",
+    "- use **Verify** beside **Review Update** on patch cards and selected commits. Verify reviews your newest local copy (by Git commit time) in the Working comm checkout, with the same defect and accessibility checks as Review plus CodeRabbit. Address findings one at a time, preview each change, amend or revert it, then submit. Verify does not post review comments. Review Update handles reviewer feedback. Each flow has its own saved session",
+    "- copy a selected commit or local stack between the Working and Review checkout pairs on a new destination branch, with an atomic rollback if cherry-picking fails",
     "- use artifact builds and `build faster` for frontend-only comm changes; use a normal build for native or Firefox changes",
-    "- reuse matching console binary snapshots from either checkout and the shared mach download cache; keep each checkout’s object directory separate",
-    "- destructively replace the complete Review pair with the Working Git history and copy Firefox build artifacts for a fast review build",
-    "- choose whether Pull or Rebase acts on the selected clone pair or both pairs; build/run, lint, test, pull patch, and try follow the selected comm tab",
+    "- reuse completed binary snapshots from `~/.tb-tools/build-cache` and the shared mach download cache; keep each checkout's writable object directory separate",
+    "- sync Review source to the Working commits while keeping private worktree builds intact",
+    "- choose whether Pull or Rebase acts on the selected checkout pair or both pairs; build/run, lint, test, pull patch, and try follow the selected comm tab",
     "- pull both repositories, rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches",
     "- run modified tests or explicit path/glob patterns, including headless runs, with parsed final summaries and rerun actions for failures",
     "- create persistent Meta Bug boards: group dependent stories by child meta bug, filter by assignee or child meta, update story fields in place, and open linked bugs internally or in Bugzilla",
@@ -68,6 +71,21 @@ function pushConsoleSection(lines) {
       "",
     );
   }
+}
+
+function pushDesktopSection(lines) {
+  lines.push(
+    "## Standalone desktop app",
+    "",
+    "Run `npm ci`, then `npm run desktop -- --comm=/path/to/firefox/comm`. Run `npm run desktop:package` to make a native app for the current system. The app keeps running in the tray after its console window closes. Links open in app-owned windows. Pages from the same site reuse a window. The Pages menu can go back, go forward, reload, or close those windows.",
+    "",
+    "The desktop app creates paired Review worktrees in `~/.tb-tools/worktrees`. Each revision under review gets its own pair, so different reviews can run together. Each active worktree has its own writable object directory. Completed artifact snapshots live in `~/.tb-tools/build-cache`. When sccache is installed, its compiler-result storage is shared; cache hits across worktrees depend on the active sccache server's base paths. The app turns off sccache direct mode to avoid stale headers across worktrees. A new worktree can build without copying another live object directory. Try repair worktrees also get a Thunderbird build config with a private object directory. Windows builds need Visual Studio C++ tools, MozillaBuild's `bin` directory on PATH, and native Python.",
+    "",
+    "In Settings, set one or more local times in `HH:MM` format and enable Daily source pull and build. The app fetches both `origin/main` branches, updates its own detached worktree in `~/.tb-tools/daily-build`, and runs `./mach build` there. It never switches the Working checkout. Build now, Cancel build, and View log are available in the same section. If the app starts after a scheduled time, it runs one catch-up build that day. Enabling the schedule also asks the packaged app to start at login on macOS or Windows; operating system approval may still be needed.",
+    "",
+    "For phone access over cellular, install Tailscale on the computer and phone and sign in to the same private network. Choose Pair Phone in the desktop app. It configures Tailscale Serve on private HTTPS port 8443 and shows the phone URL and a one-time code. Open the URL on the phone, enter the code, then add the page to the home screen. The phone uses the same console and actions through a separate paired gateway. Disable Phone Access and Revoke Paired Phones are in the app menu. The original local console stays bound to loopback.",
+    "",
+  );
 }
 
 export function formatDefaultValue(value) {
@@ -132,9 +150,9 @@ export default async function (optionList, subOptions) {
 }
 \`\`\``,
     "",
-    "Set `reviewCheckout` to a separate Firefox clone and its independent comm clone to enable the Working/Review switch in `tb console`. These must be sibling clones, not Git worktrees. The switch changes the single comm and Firefox graph tabs between the two pairs; Update can target one pair or both, and a selected commit or stack can be copied to a new branch in the other clone.",
+    "For the browser-based `tb console`, set `reviewCheckout` to an independent Firefox/comm clone pair to enable the Working/Review switch. The desktop app creates paired Git worktrees automatically and uses those paths instead. Both modes keep the Working checkout in place.",
     "",
-    "When all four checkout paths are configured, the console's More actions menu also provides **Sync Review from Working**. This intentionally destructive one-way action requires typing `SYNC REVIEW`: it aborts review Git operations, force-prunes every Review ref, removes Review changes and untracked/ignored files, and checks out the Working branch or detached commit in both Firefox and comm. It then copy-on-write clones the Working Firefox `obj-*` directories and `mozconfig*` files when the filesystem supports it. Working repositories must have no tracked changes, so their copied build artifacts match the checked-out source; working tree changes are not copied.",
+    "When all four checkout paths are configured, the console's More actions menu provides **Sync Review from Working**. It requires typing `SYNC REVIEW` and removes Review source changes. With desktop worktrees, it detaches Review at the Working commits and keeps its private object directory and shared Git refs. With older independent clones, it retains the existing full clone-sync behavior, including copied build artifacts. Working source changes are not copied.",
     "",
     "For Notion, share the story data source with your Notion connection. The console looks up stories by the configured bug-id property and shows matching page links on selected patches.",
     "",
@@ -145,6 +163,7 @@ export default async function (optionList, subOptions) {
   ];
 
   pushConsoleSection(lines);
+  pushDesktopSection(lines);
 
   lines.push("## Command List", "##### <ins>Quick Links</ins>");
 

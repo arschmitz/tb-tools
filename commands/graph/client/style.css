@@ -11440,3 +11440,10 @@ button.dashboard-bug-title {
   border: 1px solid GrayText;
 }
 .console-settings-status { min-height: 1.2em; }
+/* Keep scheduled build controls usable in the desktop app and on a phone. */
+.daily-build-settings { border: 1px solid #aeb7c2; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+.daily-build-settings label { display: block; margin: .7rem 0; }
+.daily-build-settings textarea { display: block; width: 100%; box-sizing: border-box; font: inherit; }
+.daily-build-settings button { min-height: 2.6rem; margin: .25rem .3rem .25rem 0; }
+.daily-build-status { min-height: 1.5rem; overflow-wrap: anywhere; }
+.daily-build-log { max-height: 20rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

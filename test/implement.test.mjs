@@ -140,7 +140,8 @@ test("automatically folds only this implementation's passing Try fixup into its 
   const done = f.store.read(state.id); assert.equal(done.error, undefined); assert.equal(done.phase, "complete");
   assert.equal(await f.git("show", "HEAD:feature.txt"), "CI repair");
   assert.equal(await f.git("rev-parse", "HEAD^"), f.head);
-  assert.match(await f.git("show", "-s", "--format=%B"), /Fix the failing platform test/);
+  assert.match(await f.git("show", "-s", "--format=%B"), /Bug 123 - Add feature/);
+  assert.doesNotMatch(await f.git("show", "-s", "--format=%B"), /Fix the failing platform test/);
   assert.equal(f.monitorStore.read("unrelated").fixupHash, "unrelated");
 });
 

@@ -13,7 +13,8 @@ async function fixture(t) {
   }));
   for (const graph of graphs) {
     await mkdir(graph.path, { recursive: true });
-    await writeFile(path.join(graph.path, "..", "mozconfig"), "ac_add_options --enable-project=comm/mail\n");
+    await writeFile(path.join(graph.path, "..", "mozconfig"),
+      `ac_add_options --enable-project=comm/mail\nmk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-${graph.checkout}\n`);
   }
   const changes = new Map();
   const calls = [];
@@ -21,13 +22,15 @@ async function fixture(t) {
     calls.push(command);
     if (command.args[0] === "environment") return JSON.stringify({
       topobjdir: path.join(command.cwd, "obj-original"),
-      mozconfig: { path: path.join(command.cwd, "mozconfig"), configure_args: ["--enable-project=comm/mail"] },
+      mozconfig: { path: path.join(command.cwd, "mozconfig"), configure_args: ["--enable-project=comm/mail"],
+        vars: { added: { _mozconfig_opt: `MOZ_OBJDIR=@TOPSRCDIR@/obj-${path.basename(command.cwd)}` } } },
     });
     if (command.args[0] === "merge-base") return "a".repeat(40);
     if (command.args[0] === "diff") return changes.get(command.cwd) || "";
     return "";
   };
-  const prepare = (graph) => prepareConsoleBuild({ graph, graphs, runCommand });
+  const cacheDirectory = path.join(root, "shared-build-cache");
+  const prepare = (graph) => prepareConsoleBuild({ graph, graphs, runCommand, cacheDirectory });
   return { graphs, prepare, changes, calls, runCommand };
 }
 
@@ -64,13 +67,13 @@ test("artifact builds reuse the other checkout in both directions and use faster
     const firstCalls = [];
     await executeConsoleArtifactBuild({ plan: first, execute: executor(first, firstCalls) });
     assert.deepEqual(firstCalls.map((call) => call.args.slice(0, 2)), [
-      ["configure"], ["artifact", "install"], ["build", "faster"],
+      ["configure"], ["artifact", "install"], ["build"],
     ]);
     const second = await fixtureData.prepare(graphs[1]);
     assert.equal(second.donor, first.snapshot);
     const secondCalls = [];
     await executeConsoleArtifactBuild({ plan: second, execute: executor(second, secondCalls) });
-    assert.deepEqual(secondCalls.map((call) => call.args), [["configure"], ["build", "faster"]]);
+    assert.deepEqual(secondCalls.map((call) => call.args), [["configure"], ["build"]]);
     assert.equal(await readFile(path.join(second.paths.object, "dist", "bin", "binary"), "utf8"), "prebuilt");
     // Refreshing frontend files must not change the immutable donor snapshot.
     await writeFile(path.join(second.paths.object, "dist", "bin", "binary"), "local edit");
@@ -80,6 +83,16 @@ test("artifact builds reuse the other checkout in both directions and use faster
     assert.deepEqual(secondCalls.map((call) => call.args), [["build", "faster"]]);
     assert.deepEqual(await getConsoleBuildEnvironment(graphs[1]), { MOZCONFIG: second.paths.config });
   }
+});
+
+test("a new worktree finds a completed snapshot without a checkout list", async (t) => {
+  const { graphs, prepare, runCommand } = await fixture(t);
+  const first = await prepare(graphs[0]);
+  await executeConsoleArtifactBuild({ plan: first, execute: executor(first, []) });
+  const next = await prepareConsoleBuild({ graph: graphs[1], graphs: [], runCommand,
+    cacheDirectory: path.dirname(first.snapshot) });
+  assert.equal(next.donor, first.snapshot);
+  assert.equal(path.dirname(next.snapshot), path.dirname(first.snapshot));
 });
 
 test("different configurations do not share binaries; native changes clear artifact selection", async (t) => {
@@ -96,6 +109,7 @@ test("different configurations do not share binaries; native changes clear artif
 test("faster failure retries a complete artifact build", async (t) => {
   const { graphs, prepare } = await fixture(t);
   const plan = await prepare(graphs[0]);
+  await executeConsoleArtifactBuild({ plan, execute: executor(plan, []) });
   const calls = [];
   const execute = executor(plan, calls);
   await executeConsoleArtifactBuild({ plan, execute: async (command) => {
@@ -132,7 +146,7 @@ test("copied object directories are configured again for the destination root", 
   assert.deepEqual(await getConsoleBuildEnvironment(graphs[1]), {});
   const calls = [];
   await executeConsoleArtifactBuild({ plan: second, execute: executor(second, calls) });
-  assert.deepEqual(calls.map((call) => call.args), [["configure"], ["build", "faster"]]);
+  assert.deepEqual(calls.map((call) => call.args), [["configure"], ["build"]]);
 });
 
 test("Gecko changes and untracked native files require a normal build", async (t) => {
@@ -147,6 +161,20 @@ test("Gecko changes and untracked native files require a normal build", async (t
   assert.equal(result, null);
 });
 
+test("a generated worktree mozconfig does not block an artifact build", async (t) => {
+  const { graphs, runCommand } = await fixture(t);
+  await writeFile(path.join(path.dirname(graphs[0].path), ".mozconfig"),
+    "export SCCACHE_DIRECT=false\nac_add_options --enable-project=comm/mail\nmk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-review\n");
+  const plan = await prepareConsoleBuild({ graph: graphs[0], runCommand: command => {
+    if (command.args[0] === "ls-files" && command.cwd === path.dirname(graphs[0].path)) {
+      return Promise.resolve(".mozconfig\0");
+    }
+    return runCommand(command).then(result => command.args[0] === "environment"
+      ? `Creating local state directory\n${result}` : result);
+  } });
+  assert.ok(plan);
+});
+
 test("explicitly disabled artifacts use the original build", async (t) => {
   const { graphs, runCommand } = await fixture(t);
   const plan = await prepareConsoleBuild({ graph: graphs[0], graphs, runCommand: async (command) => {
@@ -157,6 +185,26 @@ test("explicitly disabled artifacts use the original build", async (t) => {
     return JSON.stringify(environment);
   } });
   assert.equal(plan, null);
+});
+
+test("artifact mode removes a direct ccache option and rejects a sourced one", async (t) => {
+  const { graphs, runCommand } = await fixture(t);
+  const original = path.join(path.dirname(graphs[0].path), "mozconfig");
+  await writeFile(original, "ac_add_options --enable-project=comm/mail\nac_add_options --with-ccache=/tmp/sccache\n");
+  const withCcache = async command => {
+    const result = await runCommand(command);
+    if (command.args[0] !== "environment") return result;
+    const environment = JSON.parse(result);
+    environment.mozconfig.configure_args.push("--with-ccache=/tmp/sccache");
+    return JSON.stringify(environment);
+  };
+  const plan = await prepareConsoleBuild({ graph: graphs[0], runCommand: withCcache });
+  assert.ok(plan);
+  const config = await readFile(plan.paths.config, "utf8");
+  assert.doesNotMatch(config, /--with-ccache/);
+  assert.match(config, /ac_add_options --enable-artifact-builds/);
+  await writeFile(original, ". /tmp/ccache-options\n");
+  assert.equal(await prepareConsoleBuild({ graph: graphs[0], runCommand: withCcache }), null);
 });
 
 test("an artifact setup failure falls back to the original build and run configuration", async (t) => {

@@ -15,6 +15,7 @@ import { run } from "../../lib/utils.mjs";
 import { startGraphCodexAppServer } from "./codex-app-server.mjs";
 import { resolveGraphCodexCommand } from "./patch-update.mjs";
 import { getMachTryArgs } from "../try.mjs";
+import { writeWorktreeBuildConfig } from "./worktrees.mjs";
 import { addTryAttempt, saveTrySubmissionOutput, finishTrySubmission } from "./try-submission.mjs";
 
 export function validateTryAssessment(value, evidence) {
@@ -192,7 +193,7 @@ export function createTryRepairer({ store, runCommand = run, codexCommand, gener
     }
     // Use a separate object directory and explicitly select Thunderbird. A fresh
     // Gecko checkout otherwise selects Firefox before it has a build config.
-    await writeFile(path.join(gecko, ".mozconfig"), "ac_add_options --enable-project=comm/mail\nmk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-try-monitor\n");
+    await writeWorktreeBuildConfig({ gecko, name: "try-monitor" });
     return state.workspace;
   }
   async function ask(state, prompt, writable = false) {

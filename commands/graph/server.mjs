@@ -12,6 +12,7 @@ import { proposeRebaseResolution, applyRebaseResolution } from "./rebase-resolut
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import path from "node:path";
 import defaultConfig from "../../lib/config.mjs";
 import { pushCommits as defaultPushCommits } from "../../lib/lando.mjs";
 import { run } from "../../lib/utils.mjs";
@@ -128,6 +129,7 @@ import {
 } from "./actions.mjs";
 import { copyGraphCommitsBetweenCheckouts } from "./checkout-transfer.mjs";
 import { syncReviewCheckoutFromWorking } from "./review-sync.mjs";
+import { ensurePairedWorktrees, getWorktreeDirectory, writeWorktreeBuildConfig } from "./worktrees.mjs";
 import { getGraphCommitReview } from "./reviews.mjs";
 import {
   applyGraphPatchUpdateComment,
@@ -320,6 +322,7 @@ export async function startInteractiveGraphServer({
   setMetaBoardReviewGroup = defaultSetMetaBoardReviewGroup,
   getReviewGroupAssignees = defaultGetReviewGroupAssignees,
   aiSettingsPath = AI_SETTINGS_PATH,
+  dailyBuild = null,
   getAiModels,
   appConfig = defaultConfig,
   phabWebSession = createPhabricatorWebSession(),
@@ -346,6 +349,26 @@ export async function startInteractiveGraphServer({
     workingTreeCount: graph.workingTreeCount || 0,
     patchIdCache: new Map(),
   }));
+  const managedReviewId = /^[a-f0-9]{8}$/.test(appConfig?.managedReviewWorktrees || "")
+    ? appConfig.managedReviewWorktrees : "";
+  const workingComm = serverGraphs.find(graph => graph.checkout === "working" && graph.repository === "comm");
+  const workingFirefox = serverGraphs.find(graph => graph.checkout === "working" && graph.repository === "firefox");
+  function configureManagedReviewSession(session) {
+    if (!managedReviewId) return;
+    if (!workingComm || !workingFirefox) throw new Error("Managed Review needs Working Firefox and comm checkouts.");
+    const name = `review-${managedReviewId}-${session.revision.toLowerCase()}`;
+    const directory = getWorktreeDirectory(name);
+    session.graph = { ...session.graph, path: path.join(directory, "comm") };
+    session.reviewFirefoxPath = directory;
+    session.managedWorktree = true;
+  }
+  async function prepareManagedReviewCheckout(session) {
+    if (!session.managedWorktree) return;
+    const gecko = session.reviewFirefoxPath;
+    await ensurePairedWorktrees({ geckoSource: workingFirefox.path,
+      commSource: workingComm.path, directory: gecko });
+    await writeWorktreeBuildConfig({ gecko, name: `review-${session.revision.toLowerCase()}` });
+  }
   const implementation = implementationManager === undefined && !process.env.NODE_TEST_CONTEXT && !globalThis.__tbToolsBlockExternalApis
     ? createImplementationManager({ graphs: serverGraphs, aiEnabled: isGraphAiEnabled(appConfig),
       username: appConfig?.bugzilla?.user, codexCommand: appConfig?.ai?.command, runCommand })
@@ -479,6 +502,7 @@ export async function startInteractiveGraphServer({
       sessions.set(resumed.id, resumed);
       void preparePatchReviewSession({
         session: resumed,
+        prepareCheckout: prepareManagedReviewCheckout,
         getSnapshot: getServerGraphSnapshot,
         getReview: ({ graph, hash }) => getServerCommitReview(graph, hash, { force: true }),
         getRevisionReview: phabWebSession.getReview?.bind(phabWebSession),
@@ -1620,6 +1644,25 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      if (["GET", "POST"].includes(request.method) && url.pathname === "/api/daily-build") {
+        const body = request.method === "POST" ? await readRequestJson(request) : null;
+        validateToken(body ? body.token : url.searchParams.get("token"), token);
+        if (!dailyBuild) throw Object.assign(new Error("Daily build needs the desktop app."), { statusCode: 404 });
+        if (body?.action === "save") await dailyBuild.saveSettings(body.settings);
+        else if (body?.action === "run") await dailyBuild.runNow();
+        else if (body?.action === "cancel") dailyBuild.cancel();
+        else if (body && body.action) throw Object.assign(new Error("Unknown daily build action."), { statusCode: 400 });
+        sendJson(response, 200, { ok: true, ...dailyBuild.status() });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/daily-build/log") {
+        validateToken(url.searchParams.get("token"), token);
+        if (!dailyBuild) throw Object.assign(new Error("Daily build needs the desktop app."), { statusCode: 404 });
+        sendJson(response, 200, { ok: true, output: await dailyBuild.readLog() });
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/phabricator-cache") {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
@@ -1782,6 +1825,7 @@ export async function startInteractiveGraphServer({
           codexCommand: appConfig?.ai?.command,
           snapshotLimit: getRequestLimit(body.snapshotLimit),
         });
+        configureManagedReviewSession(session);
 
         const activeReview = [...patchReviewSessions.values()].find(entry =>
           entry.graph.path === session.graph.path && ["pulling", "reviewing", "posting"].includes(entry.status));
@@ -1798,6 +1842,7 @@ export async function startInteractiveGraphServer({
         patchReviewSessions.set(session.id, session);
         void preparePatchReviewSession({
           session,
+          prepareCheckout: prepareManagedReviewCheckout,
           getSnapshot: getServerGraphSnapshot,
           getReview: ({ graph, hash }) => getServerCommitReview(graph, hash),
           getRevisionReview: phabWebSession.getReview?.bind(phabWebSession),

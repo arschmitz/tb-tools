@@ -7,6 +7,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { run } from "../../lib/utils.mjs";
+import { shareGitRepository } from "./worktrees.mjs";
 
 export const REVIEW_SYNC_CONFIRMATION = "SYNC REVIEW";
 const REPOSITORIES = ["firefox", "comm"];
@@ -50,7 +51,7 @@ function getPair(graphs, repository) {
 
   if (path.resolve(source.path) === path.resolve(destination.path)) {
     throw createReviewSyncError(
-      `${getGraphLabel(source)} and ${getGraphLabel(destination)} must be separate clones.`,
+      `${getGraphLabel(source)} and ${getGraphLabel(destination)} must be separate checkouts.`,
       { reason: "same-checkout-path", repository },
       400,
     );
@@ -141,11 +142,26 @@ async function syncReviewRepository({
   source,
   destination,
   sourceState,
+  shared,
   preservePaths = [],
   runCommand,
 }) {
   await abortReviewOperations(destination, runCommand);
   await runGit(destination, ["reset", "--hard"], runCommand);
+  if (shared) {
+    const cleanArgs = ["clean", "-ffd", "-e", "obj-*/", "-e", ".mozconfig"];
+    for (const preservePath of preservePaths) cleanArgs.push("-e", `${preservePath}/`);
+    await runGit(destination, cleanArgs, runCommand);
+    await runGit(destination, ["switch", "--detach", sourceState.hash], runCommand);
+    destination.branch = "(detached)";
+    return {
+      repository: getRepositoryKind(destination),
+      source: { label: getGraphLabel(source), path: source.path,
+        branch: sourceState.branch || "(detached)", hash: sourceState.hash },
+      destination: { label: getGraphLabel(destination), path: destination.path,
+        branch: "(detached)", hash: sourceState.hash },
+    };
+  }
   const cleanArgs = ["clean", "-ffdx"];
 
   for (const preservePath of preservePaths) {
@@ -314,18 +330,24 @@ export async function syncReviewCheckoutFromWorking({
   ]));
 
   const repositories = [];
+  const shared = new Map();
+  for (const pair of pairs) {
+    shared.set(pair.repository, await shareGitRepository(pair.source.path,
+      pair.destination.path, runCommand).catch(() => false));
+  }
 
   for (const pair of pairs) {
     repositories.push(await syncReviewRepository({
       ...pair,
       sourceState: sourceStates.get(pair.repository),
+      shared: shared.get(pair.repository),
       preservePaths: getNestedDestinationPaths(pair, pairs),
       runCommand,
     }));
   }
 
   const firefoxPair = pairs.find(({ repository }) => repository === "firefox");
-  const artifacts = await syncBuildArtifacts({
+  const artifacts = shared.get("firefox") ? { copied: [], removed: [] } : await syncBuildArtifacts({
     source: firefoxPair.source,
     destination: firefoxPair.destination,
     readDirectory,
@@ -338,6 +360,8 @@ export async function syncReviewCheckoutFromWorking({
     action: "sync-review-from-working",
     repositories,
     artifacts,
-    message: `Review now matches Working Git history for Firefox and comm. Copied ${artifacts.copied.length} build artifact${artifacts.copied.length === 1 ? "" : "s"}${artifacts.removed.length ? ` and removed ${artifacts.removed.length} stale artifact${artifacts.removed.length === 1 ? "" : "s"}` : ""}.`,
+    message: shared.get("firefox")
+      ? "Review now uses the Working commits. Its private build directory was kept."
+      : `Review now matches Working Git history for Firefox and comm. Copied ${artifacts.copied.length} build artifact${artifacts.copied.length === 1 ? "" : "s"}${artifacts.removed.length ? ` and removed ${artifacts.removed.length} stale artifact${artifacts.removed.length === 1 ? "" : "s"}` : ""}.`,
   };
 }

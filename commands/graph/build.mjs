@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { isGeneratedWorktreeBuildConfig } from "./worktrees.mjs";
 
 // Unknown files require a normal build. In particular, do not skip native code,
 // interface definitions, generated files, or build configuration changes.
@@ -23,6 +24,15 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
+function cacheKeyBuildConfig(originalText, mozconfig) {
+  const source = originalText.replace(/(^|\n)mk_add_options MOZ_OBJDIR=[^\n]+/g,
+    "$1mk_add_options MOZ_OBJDIR=<private>");
+  const vars = JSON.parse(JSON.stringify(mozconfig.vars || {}), (key, value) =>
+    key === "_mozconfig_opt" && typeof value === "string" && value.startsWith("MOZ_OBJDIR=")
+      ? "MOZ_OBJDIR=<private>" : value);
+  return { source, env: mozconfig.env, vars, make_extra: mozconfig.make_extra };
+}
+
 export function getArtifactBuildPaths(graph) {
   const root = path.resolve(graph.path, "..");
   const directory = path.join(root, "obj-tb-tools");
@@ -33,6 +43,11 @@ export function getArtifactBuildPaths(graph) {
     object: path.join(directory, "artifact"),
     active: path.join(directory, "active-build.json"),
   };
+}
+
+export function getSharedBuildCacheDirectory() {
+  return path.resolve(process.env.TB_BUILD_CACHE_PATH ||
+    path.join(os.homedir(), ".tb-tools", "build-cache"));
 }
 
 export async function getConsoleBuildEnvironment(graph) {
@@ -48,7 +63,8 @@ export async function getConsoleBuildEnvironment(graph) {
   return {};
 }
 
-export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log = () => {} }) {
+export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log = () => {},
+  cacheDirectory = getSharedBuildCacheDirectory() }) {
   const paths = getArtifactBuildPaths(graph);
   const git = async (cwd, args) => String(await runCommand({
     cmd: "git", args, cwd, capture: true, silent: true,
@@ -56,10 +72,12 @@ export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log 
   let environment;
   let revisions;
   try {
-    environment = JSON.parse(await runCommand({
+    const output = String(await runCommand({
       cmd: "./mach", args: ["environment", "--format", "json"],
       cwd: paths.root, capture: true, silent: true,
     }));
+    const jsonStart = output.indexOf("{");
+    environment = JSON.parse(output.slice(jsonStart));
     if (!environment.topobjdir || !environment.mozconfig) throw new Error("Missing build environment");
     revisions = [];
     for (const cwd of [paths.root, graph.path]) {
@@ -68,6 +86,12 @@ export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log 
       const changed = await git(cwd, ["diff", "--name-only", "-z", base, "--"]);
       const untracked = await git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
       const files = `${changed}\0${untracked}`.split("\0").filter(Boolean);
+      if (cwd === paths.root && files.includes(".mozconfig")) {
+        const config = path.join(cwd, ".mozconfig");
+        if (isGeneratedWorktreeBuildConfig(await readFile(config, "utf8"))) {
+          files.splice(files.indexOf(".mozconfig"), 1);
+        }
+      }
       if ((cwd === paths.root && files.length) || !supportsArtifactBuild(files)) {
         log("Native code or build settings changed; using a normal build.\n");
         await mkdir(paths.directory, { recursive: true });
@@ -93,16 +117,30 @@ export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log 
   // Keep user settings and put console artifact output in its own directory.
   const original = environment.mozconfig.path;
   const originalText = original ? await readFile(original, "utf8") : "";
+  let sourceConfig = original ? `. ${shellQuote(original)}` : "ac_add_options --enable-project=comm/mail";
+  // Artifact builds do not accept --with-ccache. Remove a direct mozconfig
+  // option while keeping all other settings. A sourced option is too hard to
+  // change safely, so use the normal build in that case.
+  if (args.some(arg => arg.startsWith("--with-ccache"))) {
+    const lines = originalText.split("\n");
+    const filtered = lines.map(line => /^\s*ac_add_options\s+--with-ccache(?:=|\s|$)/.test(line) ? ":" : line);
+    if (filtered.every((line, index) => line === lines[index])) {
+      log("The mozconfig sources a ccache option; using a normal build.\n");
+      if (await exists(paths.active)) await writeFile(paths.active, JSON.stringify({ artifact: false }));
+      return null;
+    }
+    sourceConfig = filtered.join("\n");
+  }
   const key = createHash("sha256").update(JSON.stringify({
-    revisions, args, originalText,
-    resolvedConfig: { env: environment.mozconfig.env, vars: environment.mozconfig.vars, make_extra: environment.mozconfig.make_extra },
+    revisions, args, resolvedConfig: cacheKeyBuildConfig(originalText, environment.mozconfig),
     artifactOverrides: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith("MOZ_ARTIFACT_"))),
     platform: process.platform, arch: process.arch,
     state: process.env.MOZBUILD_STATE_PATH || path.join(os.homedir(), ".mozbuild"),
   })).digest("hex");
   await mkdir(paths.directory, { recursive: true });
   const config = [
-    original ? `. ${shellQuote(original)}` : "ac_add_options --enable-project=comm/mail",
+    sourceConfig,
+    "export SCCACHE_DIRECT=false",
     "ac_add_options --enable-artifact-builds",
     `mk_add_options MOZ_OBJDIR=${shellQuote(paths.object)}`,
     "",
@@ -110,16 +148,20 @@ export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log 
   if (!await exists(paths.config) || await readFile(paths.config, "utf8") !== config) {
     await writeFile(paths.config, config);
   }
-  log("Using an artifact build with the faster target.\n");
+  log("Using an artifact build. Later builds use the faster target.\n");
   const command = (commandArgs) => ({
     cmd: "./mach", args: commandArgs, cwd: paths.root, capture: true,
     env: { MOZCONFIG: paths.config },
   });
-  const snapshot = path.join(paths.directory, `binaries-${key}`);
+  const snapshot = path.join(cacheDirectory, `binaries-${key}`);
   let donor = "";
-  // Check both directions, using only completed, immutable binary snapshots.
-  // Never copy an object directory with paths or symlinks into another checkout.
-  for (const candidate of [graph, ...graphs.filter((item) => item.repository === "comm")]) {
+  // Only completed snapshots can be shared. Writable object directories stay private.
+  if (await exists(path.join(snapshot, "complete"))) {
+    donor = snapshot;
+    log(`Reusing build artifacts from ${cacheDirectory}.\n`);
+  }
+  // Older checkout-local snapshots remain usable during migration.
+  for (const candidate of donor ? [] : [graph, ...graphs.filter((item) => item.repository === "comm")]) {
     const candidatePaths = getArtifactBuildPaths(candidate);
     const candidateSnapshot = path.join(candidatePaths.directory, `binaries-${key}`);
     if (await exists(path.join(candidateSnapshot, "complete"))) {
@@ -128,7 +170,7 @@ export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log 
       break;
     }
   }
-  if (!donor) log("No matching checkout artifacts. Mach will use the shared download cache before downloading.\n");
+  if (!donor) log("No matching build artifacts. Mach will use the shared download cache before downloading.\n");
   return { paths, key, command, snapshot, donor };
 }
 
@@ -138,9 +180,10 @@ export async function executeConsoleArtifactBuild({ plan, execute, canceled = ()
   try { active = JSON.parse(await readFile(paths.active, "utf8")); } catch { /* First build. */ }
   // Do not advertise a partially updated build to later test commands.
   await writeFile(paths.active, JSON.stringify({ artifact: false }));
-  if (active.key !== key || active.root !== paths.root ||
+  const needsSetup = active.key !== key || active.root !== paths.root ||
       !await exists(path.join(paths.object, "faster", "Makefile")) ||
-      !await exists(path.join(paths.object, "dist", "bin"))) {
+      !await exists(path.join(paths.object, "dist", "bin"));
+  if (needsSetup) {
     await execute(command(["configure"]));
     if (canceled()) return;
     let donor = plan.donor;
@@ -166,6 +209,13 @@ export async function executeConsoleArtifactBuild({ plan, execute, canceled = ()
     });
   }
   if (canceled()) return;
+  // A new Thunderbird object directory needs its first full artifact build.
+  // Its faster target can fail before the package files have been generated.
+  if (needsSetup) {
+    await execute(command(["build"]));
+    if (!canceled()) await writeFile(paths.active, JSON.stringify({ artifact: true, key, root: paths.root }));
+    return;
+  }
   try {
     await execute(command(["build", "faster"]));
   } catch {
