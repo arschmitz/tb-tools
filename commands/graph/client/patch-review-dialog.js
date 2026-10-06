@@ -1,14 +1,59 @@
+import { setLiveText, replaceChangedChildren, hasSelectedText } from "./live-text.js";
+import { createReviewHandledButton } from "./review-handled.js";
+import { registerAiTaskDialog, enableTaskNotifications } from "./ai-task-tray.js";
+import { createReviewAttentionScroller } from "./review-attention.js";
 import { INTERACTIVE, graphStates } from "./config.js";
+import { startOrResumePatchSession } from "./patch-session-resume.js";
+import { createCodexRunStatus } from "./codex-run-status.js";
 import { applyGraphSnapshot, getLoadedGitCommitLimit } from "./command-sessions.js";
 import { appendInlineReviewComment, findReviewLine } from "./review-viewer.js";
 
 const dialog = document.getElementById("patch-review-dialog");
+const runStatus = createCodexRunStatus(dialog);
+const taskView = registerAiTaskDialog({ kind: "review", dialog, title: value => `${value.revision} Review`,
+  restore: restorePatchReviewTask, onUpdate: renderSession,
+  recover: task => openPatchReviewDialog({ patch: { id: task.revision }, graphIndex: task.graphIndex, mode: task.mode }),
+});
+let viewGeneration = 0;
 const title = dialog?.querySelector(".patch-review-title");
+let reviewLinkContext = {};
+function renderReviewLinks(value, reset = false) {
+  if (reset) {
+    reviewLinkContext = {};
+    dialog.querySelector(".review-handled-toggle")?.remove();
+  }
+  const revision = value.revision || value.id || "";
+  const bugId = value.bugId || value.title?.match(/\bBug\s+(\d+)/i)?.[1];
+  if (revision) reviewLinkContext.revision = revision;
+  if (/^D[1-9]\d*$/.test(revision) && dialog.querySelector(".review-handled-toggle")?.dataset.revision !== revision) {
+    dialog.querySelector(".review-handled-toggle")?.remove();
+    title.after(createReviewHandledButton({ id: revision, title: value.title }, {
+      load: true, onError: error => { status.textContent = error.message; },
+    }));
+  }
+  if (bugId) reviewLinkContext.bugId = String(bugId);
+  let links = dialog.querySelector(".patch-review-links");
+  if (!links) {
+    links = document.createElement("nav");
+    links.className = "patch-review-links";
+    links.setAttribute("aria-label", "Patch and bug links");
+    links.style.cssText = "display:flex;gap:12px;margin-top:8px";
+    title.after(links);
+  }
+  links.replaceChildren();
+  const append = (text, href) => {
+    const link = document.createElement("a");
+    link.textContent = text; link.href = href;
+    link.target = "_blank"; link.rel = "noopener noreferrer";
+    links.append(link);
+  };
+  if (/^D\d+$/.test(reviewLinkContext.revision)) append(`Patch ${reviewLinkContext.revision}`, `https://phabricator.services.mozilla.com/${reviewLinkContext.revision}`);
+  if (/^\d+$/.test(reviewLinkContext.bugId || "")) append(`Bug ${reviewLinkContext.bugId}`, `https://bugzilla.mozilla.org/show_bug.cgi?id=${reviewLinkContext.bugId}`);
+}
 const status = dialog?.querySelector(".patch-review-status");
 const close = dialog?.querySelector(".patch-review-close");
 const activityProgress = dialog?.querySelector(".patch-review-progress");
 const activity = dialog?.querySelector(".patch-review-activity");
-const activityLatest = dialog?.querySelector(".patch-review-activity-latest");
 const activityFilters = dialog?.querySelectorAll("[data-review-activity-filter]");
 const activityList = dialog?.querySelector(".patch-review-activity-list");
 const output = dialog?.querySelector(".patch-review-output");
@@ -29,7 +74,6 @@ const discussion = dialog?.querySelector(".patch-review-discussion");
 const discussionCount = dialog?.querySelector(".patch-review-discussion-count");
 const discussionList = dialog?.querySelector(".patch-review-discussion-list");
 const patchDiff = dialog?.querySelector(".patch-review-context-diff");
-const patchDiffLocation = dialog?.querySelector(".patch-review-context-diff-location");
 const patchDiffContent = dialog?.querySelector(".patch-review-context-diff-content");
 const coverage = dialog?.querySelector(".patch-review-coverage");
 const coverageSummary = dialog?.querySelector(".patch-review-summary");
@@ -38,21 +82,6 @@ const coverageCodeRabbit = dialog?.querySelector(".patch-review-coderabbit");
 const coverageStatic = dialog?.querySelector(".patch-review-static");
 const coverageRuntime = dialog?.querySelector(".patch-review-runtime");
 const coverageContext = dialog?.querySelector(".patch-review-context");
-const issueSection = dialog?.querySelector(".patch-review-issue");
-const severity = dialog?.querySelector(".patch-review-severity");
-const issueTitle = dialog?.querySelector(".patch-review-issue-title");
-const position = dialog?.querySelector(".patch-review-position");
-const rationale = dialog?.querySelector(".patch-review-rationale");
-const validation = dialog?.querySelector(".patch-review-validation");
-const comment = dialog?.querySelector(".patch-review-comment");
-const suggestionField = dialog?.querySelector(".patch-review-suggestion-field");
-const suggestion = dialog?.querySelector(".patch-review-suggestion");
-const experimentDiff = dialog?.querySelector(".patch-review-experiment-diff");
-const experimentDiffContent = dialog?.querySelector(".patch-review-experiment-diff-content");
-const applySuggestion = dialog?.querySelector(".patch-review-apply-suggestion");
-const pendingComment = dialog?.querySelector(".patch-review-pending-comment");
-const pendingSuggestion = dialog?.querySelector(".patch-review-pending-suggestion");
-const skip = dialog?.querySelector(".patch-review-skip");
 const finalSection = dialog?.querySelector(".patch-review-final");
 const finalMessage = dialog?.querySelector(".patch-review-final-message");
 const finalButtons = dialog?.querySelectorAll("[data-review-outcome]");
@@ -68,7 +97,7 @@ let actionError = "";
 let patchContextExpanded = false;
 let patchContextKey = "";
 let renderedPatchDiffKey = "";
-let activeIssueKey = "";
+const scrollToAttention = createReviewAttentionScroller();
 let reviewContext = {
   error: "",
   key: "",
@@ -127,13 +156,6 @@ function getActivityCommandPreview(detail) {
     .find(Boolean) || "Command details";
 
   return firstLine.length > 180 ? `${firstLine.slice(0, 177)}...` : firstLine;
-}
-
-function getActivitySummary(entry = {}) {
-  const heading = String(entry.title || "Codex activity");
-  const detail = String(entry.detail || "").trim();
-
-  return detail ? `${heading}: ${getActivityCommandPreview(detail)}` : heading;
 }
 
 function renderActivityFilter() {
@@ -225,12 +247,7 @@ function renderActivity(entries = []) {
   const followOutput = activityFollowsLatest || !hadEntries;
 
   activity.hidden = false;
-  if (activityLatest) {
-    activityLatest.textContent = items.length
-      ? getActivitySummary(items.at(-1))
-      : "Waiting for Codex activity...";
-  }
-  activityList.replaceChildren(...(
+  const activityChanged = replaceChangedChildren(activityList, ...(
     visibleEntries.length
       ? visibleEntries.map(createActivityEntry)
       : [createActivityPlaceholder(
@@ -240,9 +257,9 @@ function renderActivity(entries = []) {
       )]
   ));
 
-  if (followOutput) {
+  if (activityChanged && followOutput && !hasSelectedText(activityList)) {
     window.requestAnimationFrame(() => {
-      activityList.scrollTop = activityList.scrollHeight;
+      if (!hasSelectedText(activityList)) activityList.scrollTop = activityList.scrollHeight;
     });
   }
 }
@@ -345,10 +362,10 @@ function createDiscussionEntry(item) {
   header.append(author, location);
   text.textContent = item.content || "Code suggestion";
   article.append(header, text);
-  if (item.codeSuggestion?.content) {
+  if (item.codeSuggestion?.content || item.codeSuggestion?.isDeletion) {
     const code = document.createElement("pre");
 
-    code.textContent = item.codeSuggestion.content;
+    code.textContent = item.codeSuggestion.isDeletion ? "Delete the marked lines." : item.codeSuggestion.content;
     article.append(code);
   }
   if (item.url) {
@@ -363,12 +380,17 @@ function createDiscussionEntry(item) {
   return article;
 }
 
+let renderedDiscussion = "";
+
 function renderDiscussion(currentDiscussion) {
   if (!discussion || !discussionList || !discussionCount) {
     return;
   }
 
   const value = currentDiscussion || {};
+  const key = JSON.stringify(value);
+  if (key === renderedDiscussion) return;
+  renderedDiscussion = key;
   const comments = Array.isArray(value.comments) ? value.comments : [];
   const inlineComments = Array.isArray(value.inlineComments) ? value.inlineComments : [];
   const count = comments.length + inlineComments.length;
@@ -465,6 +487,7 @@ function getIssueDiffKey(issue) {
     getReviewContextKey(),
     issue?.id || "no-issue",
     issue?.state || "",
+    getExperimentDiffKey(),
   ].join(":");
 }
 
@@ -484,32 +507,310 @@ function appendExistingInlineComments() {
   }
 }
 
+function createSuggestedDiffLine({ content, lineNumber, type }) {
+  const line = document.createElement("tr");
+  const oldLine = document.createElement("td");
+  const newLine = document.createElement("td");
+  const source = document.createElement("td");
+  const marker = document.createElement("span");
+  const text = document.createElement("span");
+
+  line.className = `diff-line ${type} patch-review-suggested-diff-line`;
+  oldLine.className = "line-number old-line";
+  newLine.className = "line-number new-line";
+  source.className = "line-source";
+  marker.className = "line-marker";
+  text.className = "line-content";
+  marker.textContent = type === "delete" ? "-" : "+";
+  text.textContent = content;
+  if (type === "delete") {
+    oldLine.textContent = String(lineNumber);
+  } else {
+    newLine.textContent = String(lineNumber);
+  }
+  source.append(marker, text);
+  line.append(oldLine, newLine, source);
+  return line;
+}
+
+function renderSuggestedSourceDiff(container, {
+  currentSource = "",
+  lineNumber,
+  replacement = "",
+} = {}) {
+  container.replaceChildren();
+  const table = document.createElement("table");
+  const body = document.createElement("tbody");
+  const replacementLines = replacement ? String(replacement).split(/\r?\n/) : [];
+
+  table.className = "diff-table patch-review-suggested-diff-table";
+  if (currentSource) {
+    body.append(createSuggestedDiffLine({
+      content: currentSource,
+      lineNumber,
+      type: "delete",
+    }));
+  }
+  replacementLines.forEach((line, index) => {
+    body.append(createSuggestedDiffLine({
+      content: line,
+      lineNumber: Number(lineNumber) + index,
+      type: "insert",
+    }));
+  });
+  table.append(body);
+  container.append(table);
+}
+
+function createInlineFindingButton(action, text) {
+  const button = document.createElement("button");
+
+  button.dataset.reviewInlineAction = action;
+  button.type = "button";
+  button.textContent = text;
+  return button;
+}
+
+function getInlineFinding(issue) {
+  return Array.from(patchDiffContent?.querySelectorAll(".patch-review-inline-finding") || [])
+    .find((finding) => finding.dataset.issueId === issue?.id) || null;
+}
+
+function setInlineFindingButton(finding, action, {
+  disabled = false,
+  hidden = false,
+  text,
+} = {}) {
+  const button = finding?.querySelector(`[data-review-inline-action="${action}"]`);
+
+  setButton(button, { disabled, hidden, text });
+}
+
+function updateInlineFindingActions(issue) {
+  const finding = getInlineFinding(issue);
+
+  if (!finding || !issue) {
+    return;
+  }
+
+  const commentInput = finding.querySelector(".patch-review-inline-comment-input");
+  const suggestionInput = finding.querySelector(".patch-review-inline-suggestion-input");
+  const hasSuggestion = Boolean(issue.codeSuggestion || issue.isDeletion);
+  const canPostInline = finding.dataset.inlineAvailable === "true";
+  const actionPending = Boolean(pendingAction);
+
+  setInlineFindingButton(finding, "apply", {
+    disabled: actionPending,
+    hidden: !hasSuggestion || issue.state !== "ready" || !canPostInline,
+    text: pendingAction === "apply" ? "Applying..." : "Apply in Review Checkout",
+  });
+  setInlineFindingButton(finding, "inline-comment", {
+    disabled: actionPending || !canPostInline || !commentInput?.value.trim(),
+    text: !canPostInline
+      ? "New-side Anchor Required"
+      : pendingAction === "inline" ? "Saving Draft..." : "Save Inline Comment Draft",
+  });
+  setInlineFindingButton(finding, "inline-suggestion", {
+    disabled: actionPending || !canPostInline || !commentInput?.value.trim() || (!suggestionInput?.value.trim() && !issue.isDeletion),
+    hidden: !hasSuggestion || !canPostInline,
+    text: pendingAction === "inline" ? "Saving Draft..." : "Save Reply + Code Suggestion Draft",
+  });
+  setInlineFindingButton(finding, "skip", {
+    disabled: actionPending,
+    text: pendingAction === "skip" ? "Skipping..." : "Skip Finding",
+  });
+}
+
+function createInlineFinding(issue, {
+  currentSource = "",
+  inlineAvailable = true,
+  lineNumber = issue.lineNumber,
+} = {}) {
+  const finding = document.createElement("article");
+  const header = document.createElement("header");
+  const severity = document.createElement("span");
+  const title = document.createElement("h3");
+  const rationale = document.createElement("p");
+  const validation = document.createElement("p");
+  const commentLabel = document.createElement("label");
+  const commentInput = document.createElement("textarea");
+  const actions = document.createElement("div");
+
+  finding.className = "patch-review-inline-finding";
+  finding.dataset.issueId = issue.id;
+  finding.dataset.currentSource = currentSource;
+  finding.dataset.inlineAvailable = String(inlineAvailable);
+  finding.dataset.lineNumber = String(lineNumber || "");
+  severity.className = "patch-review-severity";
+  severity.textContent = issue.severity || "nit";
+  title.textContent = issue.title || "Review finding";
+  const source = document.createElement("strong");
+  source.textContent = "Codex analysis";
+  header.append(source, severity, title);
+  rationale.className = "patch-review-inline-rationale";
+  rationale.textContent = issue.rationale || "";
+  validation.className = "patch-review-inline-validation";
+  validation.textContent = issue.validation || "";
+  commentLabel.className = "patch-review-inline-field";
+  commentLabel.append("Suggested inline reply");
+  commentInput.className = "patch-review-inline-comment-input";
+  commentInput.rows = 4;
+  commentInput.value = issue.suggestedComment || "";
+  commentLabel.append(commentInput);
+  finding.append(header);
+  if (rationale.textContent) {
+    finding.append(rationale);
+  }
+  if (validation.textContent) {
+    finding.append(validation);
+  }
+  finding.append(commentLabel);
+
+  if (issue.codeSuggestion || issue.isDeletion) {
+    const suggestionLabel = document.createElement("label");
+    const suggestionInput = document.createElement("textarea");
+    const suggestionDiff = document.createElement("section");
+    const suggestionHeading = document.createElement("h4");
+
+    suggestionLabel.className = "patch-review-inline-field";
+    suggestionLabel.append("Suggested code replacement");
+    suggestionInput.className = "patch-review-inline-suggestion-input";
+    suggestionInput.rows = 4;
+    suggestionInput.spellcheck = false;
+    suggestionInput.value = issue.codeSuggestion;
+    suggestionLabel.append(suggestionInput);
+    suggestionDiff.className = "patch-review-inline-suggested-diff";
+    suggestionHeading.textContent = "Suggested source update";
+    suggestionDiff.append(suggestionHeading);
+    const suggestionDiffContent = document.createElement("div");
+
+    suggestionDiffContent.className = "patch-review-inline-suggested-diff-content";
+    suggestionDiff.append(suggestionDiffContent);
+    renderSuggestedSourceDiff(suggestionDiffContent, {
+      currentSource,
+      lineNumber,
+      replacement: issue.codeSuggestion,
+    });
+    finding.append(suggestionLabel, suggestionDiff);
+  }
+
+  actions.className = "patch-review-inline-actions";
+  actions.append(
+    createInlineFindingButton("apply", "Apply in Review Checkout"),
+    createInlineFindingButton("inline-comment", "Save Inline Comment Draft"),
+    createInlineFindingButton("inline-suggestion", "Save Reply + Code Suggestion Draft"),
+    createInlineFindingButton("skip", "Skip Finding"),
+  );
+  finding.append(actions);
+  return finding;
+}
+
+function appendInlineFinding(row, issue) {
+  row.closest(".diff-table")?.classList.add("has-review-comments");
+  let thread = row.nextElementSibling;
+
+  if (!thread?.classList.contains("review-inline-thread")) {
+    thread = document.createElement("tr");
+    const cell = document.createElement("td");
+
+    thread.className = "review-inline-thread";
+    cell.colSpan = 3;
+    thread.append(cell);
+    row.after(thread);
+  }
+
+  const finding = createInlineFinding(issue, {
+    currentSource: row.querySelector(".line-content")?.textContent || "",
+  });
+
+  thread.firstElementChild.append(finding);
+  updateInlineFindingActions(issue);
+  return finding;
+}
+
+function appendUnanchoredFinding(issue) {
+  const section = document.createElement("section");
+  const heading = document.createElement("h3");
+  const notice = document.createElement("p");
+  const finding = createInlineFinding(issue, { inlineAvailable: false });
+
+  section.className = "patch-review-unanchored-finding-container";
+  heading.textContent = "Review finding needs a new-side patch anchor";
+  notice.textContent = `Codex gave ${issue.filePath}:${issue.lineNumber}, but that changed new-side line is not in the exact Phabricator patch. The finding and its suggested update are shown here, but TB Tools will not post it to the wrong side of the diff.`;
+  section.append(heading, notice, finding);
+  patchDiffContent.append(section);
+  updateInlineFindingActions(issue);
+  return section;
+}
+
 function appendCurrentIssue(issue) {
   if (!issue) {
     return null;
   }
 
-  const row = findReviewLine(patchDiffContent, issue);
+  const row = findReviewLine(patchDiffContent, issue, { newSideOnly: true });
 
   if (!row) {
-    return null;
+    return appendUnanchoredFinding(issue);
   }
 
   row.classList.add("patch-review-context-line");
-  const inline = appendInlineReviewComment(row, {
-    action: "proposed review comment",
-    author: "Codex",
-    codeSuggestion: issue.codeSuggestion ? { content: issue.codeSuggestion } : null,
-    content: issue.suggestedComment,
-    dateCreated: 0,
-  });
-
-  inline.classList.add("patch-review-proposed-inline");
+  appendInlineFinding(row, issue);
   return row;
 }
 
+function appendReviewCheckoutDiff() {
+  if (!session?.id) {
+    return;
+  }
+
+  const key = getExperimentDiffKey();
+  const current = experimentDiffState.key === key ? experimentDiffState : null;
+  const section = document.createElement("section");
+  const header = document.createElement("header");
+  const heading = document.createElement("h3");
+  const description = document.createElement("p");
+  const content = document.createElement("div");
+
+  section.className = "patch-review-working-diff";
+  heading.textContent = "Review checkout validation changes";
+  description.className = "patch-review-working-diff-description";
+  description.textContent = "These are local experiments that Codex made only to inspect or validate the patch. They are not an author-facing code suggestion and cannot be posted. Any change to request from the author appears inline in the patch with its own actions.";
+  header.append(heading, description);
+  content.className = "patch-review-working-diff-content";
+  if (current?.html) {
+    content.innerHTML = current.html;
+  } else if (current?.text) {
+    const raw = document.createElement("pre");
+
+    raw.className = "patch-review-experiment-diff-raw";
+    raw.textContent = current.text;
+    content.append(raw);
+  } else {
+    const notice = document.createElement("p");
+
+    notice.className = current?.error
+      ? "patch-review-diff-notice error"
+      : "patch-review-diff-notice";
+    notice.textContent = current?.error
+      ? `Could not load Review checkout validation changes: ${current.error}`
+      : current?.loading
+        ? "Loading Review checkout validation changes..."
+        : current
+          ? "No uncommitted changes in the Review checkout."
+          : "Loading Review checkout validation changes...";
+    content.append(notice);
+  }
+  section.append(header, content);
+  patchDiffContent.append(section);
+
+  if (!current?.html && !current?.text && !current?.loading && !current?.error) {
+    loadExperimentDiff();
+  }
+}
+
 function setPatchDiff(issue) {
-  if (!patchDiffContent || !patchDiff || !patchDiffLocation) {
+  if (!patchDiffContent || !patchDiff) {
     return;
   }
 
@@ -517,7 +818,6 @@ function setPatchDiff(issue) {
   const contextKey = getReviewContextKey();
 
   if (!contextKey) {
-    patchDiffLocation.textContent = "";
     patchDiffContent.replaceChildren();
     const loading = document.createElement("p");
 
@@ -528,7 +828,6 @@ function setPatchDiff(issue) {
   }
 
   if (reviewContext.loading || reviewContext.key !== contextKey) {
-    patchDiffLocation.textContent = "";
     patchDiffContent.replaceChildren();
     const loading = document.createElement("p");
 
@@ -540,7 +839,6 @@ function setPatchDiff(issue) {
   }
 
   if (reviewContext.error) {
-    patchDiffLocation.textContent = "";
     patchDiffContent.replaceChildren();
     const failed = document.createElement("p");
 
@@ -551,7 +849,6 @@ function setPatchDiff(issue) {
   }
 
   if (!reviewContext.rawPatchHtml) {
-    patchDiffLocation.textContent = "";
     patchDiffContent.replaceChildren();
     const missing = document.createElement("p");
 
@@ -568,19 +865,11 @@ function setPatchDiff(issue) {
   renderedPatchDiffKey = key;
   patchDiffContent.innerHTML = reviewContext.rawPatchHtml;
   appendExistingInlineComments();
-  const anchor = appendCurrentIssue(issue);
-
-  patchDiffLocation.textContent = issue?.filePath
-    ? `${issue.filePath}:${issue.lineNumber}`
-    : "Exact Phabricator patch";
+  appendCurrentIssue(issue);
+  appendReviewCheckoutDiff();
   renderDiscussion(reviewContext.reviewDiscussion);
 
-  if (anchor && activeIssueKey !== key) {
-    activeIssueKey = key;
-    window.requestAnimationFrame(() => {
-      anchor.scrollIntoView({ block: "center" });
-    });
-  }
+
 }
 
 function getExperimentDiffKey(value = session) {
@@ -649,50 +938,10 @@ function loadExperimentDiff() {
   }).finally(() => {
     if (experimentDiffRequest === key) {
       experimentDiffRequest = "";
+      renderedPatchDiffKey = "";
       renderSession(session);
     }
   });
-}
-
-function renderExperimentDiff() {
-  if (!experimentDiff || !experimentDiffContent) {
-    return;
-  }
-
-  const key = getExperimentDiffKey();
-  const current = experimentDiffState.key === key ? experimentDiffState : null;
-
-  experimentDiff.hidden = !session?.id;
-  experimentDiffContent.replaceChildren();
-  if (!session?.id) {
-    return;
-  }
-
-  if (current?.html) {
-    experimentDiffContent.innerHTML = current.html;
-  } else if (current?.text) {
-    const raw = document.createElement("pre");
-
-    raw.className = "patch-review-experiment-diff-raw";
-    raw.textContent = current.text;
-    experimentDiffContent.append(raw);
-  } else {
-    const message = document.createElement("p");
-
-    message.className = current?.error
-      ? "patch-review-diff-notice error"
-      : "patch-review-diff-notice";
-    message.textContent = current?.error
-      ? `Could not load the Review checkout diff: ${current.error}`
-      : current?.loading
-        ? "Loading Review checkout changes..."
-        : "No uncommitted experiment changes in the Review checkout.";
-    experimentDiffContent.append(message);
-  }
-
-  if (!current?.html && !current?.text && !current?.loading && !current?.error) {
-    loadExperimentDiff();
-  }
 }
 
 function renderCoverage(value) {
@@ -700,35 +949,12 @@ function renderCoverage(value) {
   const hasCoverage = Object.values(current).some(Boolean);
 
   coverage.hidden = !hasCoverage;
-  coverageSummary.textContent = current.summary || "";
-  coverageAccessibility.textContent = current.accessibility || "";
-  coverageCodeRabbit.textContent = current.codeRabbit || "";
-  coverageStatic.textContent = current.static || "";
-  coverageRuntime.textContent = current.runtime || "";
-  coverageContext.textContent = current.context || "";
-}
-
-function renderIssue(issue) {
-  issueSection.hidden = !issue;
-
-  if (!issue) {
-    return;
-  }
-
-  severity.textContent = issue.severity || "nit";
-  issueTitle.textContent = issue.title || "Review finding";
-  position.textContent = `${issue.filePath}:${issue.lineNumber}`;
-  rationale.textContent = issue.rationale || "";
-  validation.textContent = issue.validation || "";
-  if (document.activeElement !== comment) {
-    comment.value = issue.suggestedComment || "";
-  }
-  const hasSuggestion = Boolean(issue.codeSuggestion);
-
-  suggestionField.hidden = !hasSuggestion;
-  if (document.activeElement !== suggestion) {
-    suggestion.value = issue.codeSuggestion || "";
-  }
+  setLiveText(coverageSummary, current.summary || "");
+  setLiveText(coverageAccessibility, current.accessibility || "");
+  setLiveText(coverageCodeRabbit, current.codeRabbit || "");
+  setLiveText(coverageStatic, current.static || "");
+  setLiveText(coverageRuntime, current.runtime || "");
+  setLiveText(coverageContext, current.context || "");
 }
 
 function getActionStatus() {
@@ -756,7 +982,8 @@ function getFinalButtonText(button) {
 
 function renderSession(value) {
   session = value;
-  const busy = isBusy();
+  taskView.update(session, isBusy(session) || Boolean(pendingAction));
+  runStatus.update(session, isBusy() || Boolean(pendingAction));
   const issue = getCurrentIssue();
   const completeReview = session.aiEnabled && session.status === "review" && !issue;
   const actionPending = Boolean(pendingAction);
@@ -773,9 +1000,10 @@ function renderSession(value) {
   }
 
   title.textContent = `${session.revision} review`;
-  status.textContent = getActionStatus() || actionError || session.message || session.error || "";
+  renderReviewLinks(session);
+  setLiveText(status, getActionStatus() || actionError || session.error || session.message || "");
   status.classList.toggle("error", Boolean(actionError) || session.status === "error");
-  output.textContent = visibleOutput;
+  setLiveText(output, visibleOutput);
   output.hidden = !outputVisible || !hasOutput;
   outputToggle.hidden = !hasOutput;
   outputToggle.textContent = outputVisible ? "Back to Review" : "Output";
@@ -787,14 +1015,10 @@ function renderSession(value) {
   });
   renderActivity(session.activity || []);
   setPatchContext(session.patchContext);
-  const hasCompletedReview = Boolean(
-    session.patchContext || session.coverage || session.issues?.length,
-  );
-
-  setPatchDiff(hasCompletedReview ? issue : null);
+  setPatchDiff(issue);
   renderCoverage(session.coverage);
-  renderIssue(hasCompletedReview ? issue : null);
-  renderExperimentDiff();
+  if (completeReview && finalSection.hidden) coverage.open = true;
+  updateInlineFindingActions(issue);
 
   const canSteer = session.aiEnabled && (
     session.status === "review" ||
@@ -809,29 +1033,10 @@ function renderSession(value) {
     steerSubmit.textContent = pendingAction === "steer" ? "Sending..." : "Send";
   }
 
-  const canUseAi = session.aiEnabled && !busy && session.status !== "error";
-  setButton(applySuggestion, {
-    hidden: !issue?.codeSuggestion || !canUseAi || issue.state !== "ready",
-    disabled: actionPending,
-    text: pendingAction === "apply" ? "Applying..." : "Apply in Review Checkout",
-  });
-  setButton(pendingComment, {
-    hidden: !issue || !canUseAi,
-    disabled: actionPending || !comment?.value.trim(),
-    text: pendingAction === "inline" ? "Saving Draft..." : "Add Comment as Pending",
-  });
-  setButton(pendingSuggestion, {
-    hidden: !issue?.codeSuggestion || !canUseAi,
-    disabled: actionPending || !comment?.value.trim() || !suggestion?.value.trim(),
-    text: pendingAction === "inline" ? "Saving Draft..." : "Add Comment + Code Suggestion as Pending",
-  });
-  setButton(skip, {
-    hidden: !issue || !canUseAi,
-    disabled: actionPending,
-    text: pendingAction === "skip" ? "Skipping..." : "Skip Issue",
-  });
-
   finalSection.hidden = !completeReview;
+  if (!completeReview) {
+    finalSection.open = false;
+  }
   finalButtons?.forEach((button) => {
     setButton(button, {
       hidden: !completeReview,
@@ -839,11 +1044,18 @@ function renderSession(value) {
       text: pendingAction === "submit" ? "Posting..." : getFinalButtonText(button),
     });
   });
+  const finding = getInlineFinding(issue);
+  const attention = issue ? finding?.querySelector(".patch-review-inline-actions") : finalSection;
+  scrollToAttention(
+    `${session.id}:${issue?.id || "submit"}:${issue?.state}:${issue?.body}:${actionError || session.error || ""}`,
+    attention,
+    session.status === "review" && !actionPending && !outputVisible && dialog.open,
+  );
 }
 
 function schedulePoll() {
   window.clearTimeout(pollTimer);
-  pollTimer = window.setTimeout(loadSession, 500);
+  if (dialog.open) pollTimer = window.setTimeout(loadSession, 500);
 }
 
 async function loadSession() {
@@ -851,6 +1063,7 @@ async function loadSession() {
     return null;
   }
 
+  const requestedId = session.id;
   try {
     const response = await fetch(
       `/api/review/${encodeURIComponent(session.id)}?token=${encodeURIComponent(INTERACTIVE.token)}`,
@@ -862,12 +1075,15 @@ async function loadSession() {
       throw new Error(result.error || "Could not load patch review status.");
     }
 
+    if (session?.id !== requestedId) { taskView.background(result); return result; }
     renderSession(result);
     if (isBusy(result)) {
       schedulePoll();
     }
     return result;
   } catch (error) {
+    if (session?.id !== requestedId) return null;
+    runStatus.disconnected();
     status.classList.add("error");
     status.textContent = error?.message || String(error);
     return null;
@@ -879,6 +1095,7 @@ async function runAction(action, body = {}) {
     return null;
   }
 
+  const requestedId = session.id;
   pendingAction = action;
   actionError = "";
   renderSession(session);
@@ -897,16 +1114,22 @@ async function runAction(action, body = {}) {
       throw new Error(result.error || "Could not update the patch review.");
     }
 
+    if (result.reviewStatusChange) {
+      window.dispatchEvent(new CustomEvent("review-status-changed", { detail: result.reviewStatusChange }));
+    }
+    if (session?.id !== requestedId) { taskView.background(result); return null; }
     pendingAction = "";
     if (action === "steer" && steerInput) {
       steerInput.value = "";
     }
     renderSession(result);
+    if (action === "submit" && result.status === "complete") await closePatchReview();
     if (isBusy(result)) {
       schedulePoll();
     }
     return result;
   } catch (error) {
+    if (session?.id !== requestedId) return null;
     pendingAction = "";
     actionError = error?.message || String(error);
     renderSession(session);
@@ -915,6 +1138,7 @@ async function runAction(action, body = {}) {
 }
 
 function resetPatchReviewDialog(patch) {
+  viewGeneration++;
   session = undefined;
   pendingAction = "";
   actionError = "";
@@ -925,7 +1149,7 @@ function resetPatchReviewDialog(patch) {
   patchContextExpanded = false;
   patchContextKey = "";
   renderedPatchDiffKey = "";
-  activeIssueKey = "";
+  scrollToAttention("", null);
   reviewContext = {
     error: "",
     key: "",
@@ -945,6 +1169,7 @@ function resetPatchReviewDialog(patch) {
   expandedActivityCommandIds.clear();
   window.clearTimeout(pollTimer);
   title.textContent = `${patch.id} review`;
+  renderReviewLinks(patch, true);
   status.classList.remove("error");
   status.textContent = "Preparing review...";
   if (activityProgress) {
@@ -968,28 +1193,34 @@ function resetPatchReviewDialog(patch) {
   }
   setPatchContext(null);
   renderDiscussion(null);
-  patchDiffLocation.textContent = "";
   patchDiffContent.replaceChildren();
   renderCoverage(null);
-  renderIssue(null);
-  experimentDiff.hidden = true;
-  experimentDiffContent.replaceChildren();
   finalSection.hidden = true;
+  finalSection.open = false;
   finalMessage.value = "";
-  setButton(applySuggestion, { hidden: true, text: "Apply in Review Checkout" });
   setButton(cancelPull, { hidden: true, text: "Cancel Pull" });
-  setButton(pendingComment, { hidden: true, text: "Add Comment as Pending" });
-  setButton(pendingSuggestion, { hidden: true, text: "Add Comment + Code Suggestion as Pending" });
-  setButton(skip, { hidden: true, text: "Skip Issue" });
   finalButtons?.forEach((button) => setButton(button, { hidden: true }));
 }
 
+
+function restorePatchReviewTask(value) {
+  if (session?.id !== value.id) resetPatchReviewDialog({ id: value.revision });
+  renderSession(value);
+  title.textContent = `${value.revision} Review`;
+  renderReviewLinks(value);
+  setPageScrollLocked(true);
+  if (!dialog.open) dialog.showModal();
+  schedulePoll();
+}
 export async function openPatchReviewDialog({ patch }) {
   if (!dialog || !patch?.id) {
     return;
   }
 
+  void enableTaskNotifications();
+  if (dialog.open || session) taskView.minimize();
   resetPatchReviewDialog(patch);
+  const generation = viewGeneration;
   setPageScrollLocked(true);
   dialog.showModal();
 
@@ -997,29 +1228,38 @@ export async function openPatchReviewDialog({ patch }) {
     const reviewGraphIndex = graphStates.findIndex((state) => (
       state.graph.checkout === "review" && state.graph.repository === "comm"
     ));
-    const response = await fetch("/api/review", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const result = await startOrResumePatchSession("/api/review", {
         token: INTERACTIVE.token,
         revision: patch.id,
         snapshotLimit: reviewGraphIndex === -1
           ? undefined
           : getLoadedGitCommitLimit(graphStates[reviewGraphIndex]),
-      }),
     });
-    const result = await response.json();
-
-    if (!response.ok || !result.ok) {
-      throw new Error(result.error || "Could not start patch review.");
+    if (generation !== viewGeneration) { if (result) taskView.background(result); return; }
+    if (!result) {
+      dialog.close();
+      return;
     }
 
     renderSession(result);
     schedulePoll();
   } catch (error) {
+    if (generation !== viewGeneration) return;
     status.classList.add("error");
     status.textContent = error?.message || String(error);
   }
+}
+
+async function closePatchReview() {
+  if (pendingAction) return;
+  const requestedId = session?.id;
+  if (session && !["complete", "cancelled", "error"].includes(session.status)) {
+    const result = await runAction("cancel");
+    if (!result || session?.id !== requestedId) return;
+  }
+  taskView.dismiss();
+  session = null;
+  viewGeneration++;
 }
 
 export function initializePatchReviewDialog() {
@@ -1028,14 +1268,15 @@ export function initializePatchReviewDialog() {
   }
 
   close.addEventListener("click", () => {
-    if (session?.status === "pulling") {
-      void runAction("cancel");
-    }
-    dialog.close();
+    void closePatchReview();
+  });
+  dialog.addEventListener("cancel", event => {
+    event.preventDefault();
+    void closePatchReview();
   });
   dialog.addEventListener("close", () => {
     window.clearTimeout(pollTimer);
-    setPageScrollLocked(false);
+    if (!dialog.open) setPageScrollLocked(false);
   });
   activityList?.addEventListener("scroll", updateActivityFollowState);
   activityFilters?.forEach((button) => {
@@ -1051,48 +1292,67 @@ export function initializePatchReviewDialog() {
   patchContextToggle?.addEventListener("click", () => {
     setPatchContextExpanded(!patchContextExpanded);
   });
-  comment.addEventListener("input", () => renderSession(session));
-  suggestion.addEventListener("input", () => renderSession(session));
-  steerInput?.addEventListener("input", () => renderSession(session));
-  steerSubmit?.addEventListener("click", () => {
-    void runAction("steer", { instruction: steerInput.value });
-  });
-  pendingComment.addEventListener("click", () => {
+  patchDiffContent?.addEventListener("input", (event) => {
+    const target = event.target;
+
+    if (!(target instanceof HTMLTextAreaElement)) {
+      return;
+    }
+
+    const finding = target.closest(".patch-review-inline-finding");
     const issue = getCurrentIssue();
 
-    if (issue) {
+    if (!finding || !issue || finding.dataset.issueId !== issue.id) {
+      return;
+    }
+
+    if (target.classList.contains("patch-review-inline-suggestion-input")) {
+      const diff = finding.querySelector(".patch-review-inline-suggested-diff-content");
+
+      if (diff) {
+        renderSuggestedSourceDiff(diff, {
+          currentSource: finding.dataset.currentSource,
+          lineNumber: finding.dataset.lineNumber,
+          replacement: target.value,
+        });
+      }
+    }
+    updateInlineFindingActions(issue);
+  });
+  patchDiffContent?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-review-inline-action]");
+    const issue = getCurrentIssue();
+
+    if (!button || !issue || button.closest(".patch-review-inline-finding")?.dataset.issueId !== issue.id) {
+      return;
+    }
+
+    const finding = button.closest(".patch-review-inline-finding");
+    const commentInput = finding?.querySelector(".patch-review-inline-comment-input");
+    const suggestionInput = finding?.querySelector(".patch-review-inline-suggestion-input");
+
+    if (button.dataset.reviewInlineAction === "apply") {
+      void runAction("apply", { itemId: issue.id });
+    } else if (button.dataset.reviewInlineAction === "inline-comment") {
       void runAction("inline", {
         itemId: issue.id,
         kind: "comment",
-        message: comment.value,
+        message: commentInput?.value,
       });
-    }
-  });
-  applySuggestion?.addEventListener("click", () => {
-    const issue = getCurrentIssue();
-
-    if (issue) {
-      void runAction("apply", { itemId: issue.id });
-    }
-  });
-  pendingSuggestion.addEventListener("click", () => {
-    const issue = getCurrentIssue();
-
-    if (issue) {
+    } else if (button.dataset.reviewInlineAction === "inline-suggestion") {
       void runAction("inline", {
         itemId: issue.id,
         kind: "suggestion",
-        message: comment.value,
-        codeSuggestion: suggestion.value,
+        message: commentInput?.value,
+        codeSuggestion: suggestionInput?.value,
       });
-    }
-  });
-  skip.addEventListener("click", () => {
-    const issue = getCurrentIssue();
-
-    if (issue) {
+    } else if (button.dataset.reviewInlineAction === "skip") {
       void runAction("skip", { itemId: issue.id });
     }
+  });
+  steerInput?.addEventListener("input", () => renderSession(session));
+  steerSubmit?.addEventListener("click", () => {
+    void runAction("steer", { instruction: steerInput.value });
   });
   finalButtons?.forEach((button) => {
     button.addEventListener("click", () => {

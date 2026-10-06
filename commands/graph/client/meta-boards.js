@@ -205,7 +205,7 @@ function createInternalBugButton(bug) {
   button.textContent = `Bug ${bug.id}`;
   button.addEventListener("click", (event) => {
     event.stopPropagation();
-    openBugDetail(bug.id).catch(showDetailError);
+    openBugDetail(bug.id, { standalone: state.detailStandalone }).catch(showDetailError);
   });
   return button;
 }
@@ -224,7 +224,7 @@ function createCardMetaButton(meta) {
   return button;
 }
 
-function createBugzillaIconLink(bug) {
+export function createBugzillaIconLink(bug) {
   const link = document.createElement("a");
   const icon = document.createElement("img");
 
@@ -292,7 +292,7 @@ function createBugLinks(bug) {
 
   links.className = "meta-board-bug-links";
   links.append(createInternalBugButton(bug));
-  links.append(createExternalLink({ href: bug.url }));
+  links.append(createBugzillaIconLink(bug));
   return links;
 }
 
@@ -598,6 +598,17 @@ function renderBoard() {
     return;
   }
 
+  // JSON responses contain separate copies in cards and columns. Use the same
+  // card objects so edits also update the cards displayed in each column.
+  const cardsById = new Map(board.cards.map((card) => [card.id, card]));
+
+  for (const [column, cards] of Object.entries(board.columns || {})) {
+    board.columns[column] = cards.map((card) => cardsById.get(card.id) || card);
+  }
+  board.assignees = mergeMetaBoardAssignees(
+    board.assignees || [],
+    board.cards.map((card) => card.assignee),
+  );
   state.metaColors = new Map(Object.entries(board.metaColors || {}));
   state.assigneeColors = createColorAssignments(
     board.cards.map((card) => card.assignee?.email),
@@ -954,11 +965,13 @@ function renderDetailSprintMembership() {
   }
 }
 
-async function openBugDetail(bugId, { sprintId = "" } = {}) {
-  if (!state.currentBoardId) {
+async function openBugDetail(bugId, { sprintId = "", standalone = false } = {}) {
+  if (!standalone && !state.currentBoardId) {
     return;
   }
 
+  state.detailStandalone = standalone;
+  state.currentDetail = null;
   state.activeSprintId = String(sprintId || "");
   if (!dialog.open) {
     dialog.showModal();
@@ -970,16 +983,21 @@ async function openBugDetail(bugId, { sprintId = "" } = {}) {
 
   try {
     const detail = await request(
-      `/api/meta-boards/${encodeURIComponent(state.currentBoardId)}/bugs/${encodeURIComponent(bugId)}`,
+      standalone ? `/api/bugs/${encodeURIComponent(bugId)}` : `/api/meta-boards/${encodeURIComponent(state.currentBoardId)}/bugs/${encodeURIComponent(bugId)}`,
     );
 
     renderDetail(detail);
-    void loadReviewGroupAssignees(state.currentBoardId, state.currentBoard);
+    if (!standalone) void loadReviewGroupAssignees(state.currentBoardId, state.currentBoard);
   } catch (requestError) {
     showDetailError(requestError);
   } finally {
     detailSave.disabled = false;
   }
+}
+
+export async function openDashboardBugDetail(bugId) {
+  initializeMetaBoards();
+  return openBugDetail(bugId, { standalone: true });
 }
 
 export async function openMetaBoardBugDetail(bugId, {
@@ -1138,6 +1156,10 @@ function getOptimisticColumn(card) {
 }
 
 function getAssignee(email) {
+  if (email && typeof email === "object") {
+    return { ...email };
+  }
+
   const normalizedEmail = String(email || "").trim();
 
   if (!normalizedEmail) {
@@ -1228,7 +1250,7 @@ function beginOptimisticCardUpdate(detail, changes) {
 async function saveDetail(event) {
   event.preventDefault();
 
-  if (!state.currentDetail || !state.currentBoardId) {
+  if (!state.currentDetail || (!state.detailStandalone && !state.currentBoardId)) {
     return;
   }
 
@@ -1246,7 +1268,7 @@ async function saveDetail(event) {
 
   try {
     const detail = await request(
-      `/api/meta-boards/${encodeURIComponent(state.currentBoardId)}/bugs/${encodeURIComponent(state.currentDetail.id)}`,
+      state.detailStandalone ? `/api/bugs/${encodeURIComponent(state.currentDetail.id)}` : `/api/meta-boards/${encodeURIComponent(state.currentBoardId)}/bugs/${encodeURIComponent(state.currentDetail.id)}`,
       { method: "PUT", body: { changes } },
     );
 
@@ -1491,6 +1513,8 @@ export async function showMetaBoards({ boardId = "", updateLocation = true } = {
     node.classList.remove("active");
   });
   document.querySelector(".dashboard-panel")?.setAttribute("hidden", "");
+  document.querySelector(".phabricator-cache-panel")?.setAttribute("hidden", "");
+  document.querySelector(".sprint-panel")?.setAttribute("hidden", "");
   document.querySelector(".test-output-panel")?.setAttribute("hidden", "");
   tab.classList.add("active");
   panel.hidden = false;
@@ -1539,11 +1563,13 @@ export async function showMetaBoards({ boardId = "", updateLocation = true } = {
   }
 }
 
+let initialized = false;
 export function initializeMetaBoards() {
-  if (!panel || !tab || !INTERACTIVE.enabled) {
+  if (initialized || !panel || !tab || !INTERACTIVE.enabled) {
     return;
   }
 
+  initialized = true;
   tab.addEventListener("click", () => showMetaBoards());
   select.addEventListener("change", () => loadBoard(select.value));
   assigneeFilter.addEventListener("change", renderColumns);

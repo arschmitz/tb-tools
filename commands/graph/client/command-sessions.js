@@ -1,3 +1,4 @@
+import { setLiveText, hasSelectedText } from "./live-text.js";
 import {
   INTERACTIVE,
   graphStates,
@@ -28,6 +29,7 @@ import {
   showSystemConfirmation,
   showSystemNotice,
 } from "./system-dialog.js";
+import { openRebaseFailureDialog } from "./rebase-dialog.js";
 
 export function getLoadedGitCommitLimit(state) {
   const loadedGitCommits = state.commits.filter((commit) => !isWorkingTreeCommit(commit)).length;
@@ -185,10 +187,10 @@ export function setMachOutputPanel(session = uiState.lastMachSession) {
   }
 
   if (output) {
-    output.textContent = text;
+    setLiveText(output, text);
 
     if (hasOutput && uiState.machOutputVisible) {
-      output.scrollTop = output.scrollHeight;
+      if (!hasSelectedText(output)) output.scrollTop = output.scrollHeight;
     }
   }
 }
@@ -1057,6 +1059,11 @@ export async function promptForDirtyUpdateAction(dirty) {
         label: "Amend current commit",
         description: "Include changes in the checked-out commit before updating.",
       },
+      {
+        value: "discard",
+        label: "Discard working changes",
+        description: "Hard reset to HEAD and remove untracked files. This cannot be undone.",
+      },
     ],
     cancelLabel: "Cancel update",
   });
@@ -1106,6 +1113,48 @@ export async function unshelfGraphUpdateChanges(shelves) {
   }
 }
 
+export async function readGraphUpdateResponse(response) {
+  if (!response.headers.get("content-type")?.includes("application/x-ndjson")) {
+    return response.json();
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  let result;
+  const readEvent = (line) => {
+    if (!line.trim()) {
+      return;
+    }
+    const event = JSON.parse(line);
+    if (event.type === "output") {
+      setCommandStatusOutputFromResult(event);
+    } else if (event.type === "status") {
+      setUpdateStatus(event.message, { busy: true });
+    } else if (event.type === "result") {
+      result = event;
+    }
+  };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      pending += decoder.decode(value, { stream: !done });
+      const lines = pending.split("\n");
+      pending = lines.pop();
+      lines.forEach(readEvent);
+      if (done) {
+        readEvent(pending);
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (!result) {
+    throw new Error("The connection closed before the update finished.");
+  }
+  return result;
+}
+
 export async function runGraphUpdate(
   mode,
   dirtyAction = "",
@@ -1121,6 +1170,7 @@ export async function runGraphUpdate(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         token: INTERACTIVE.token,
+        stream: true,
         mode,
         dirtyAction,
         scope,
@@ -1128,11 +1178,19 @@ export async function runGraphUpdate(
         snapshotLimits: getSnapshotLimits(),
       }),
     });
-    const result = await response.json();
+    const result = await readGraphUpdateResponse(response);
 
     setCommandStatusOutputFromResult(result);
 
-    if (!response.ok) {
+    if (!response.ok || result.ok === false) {
+      if (result.rebaseConflict) {
+        openRebaseFailureDialog(result.rebaseConflict, {
+          fallbackMessage: result.error || response.statusText,
+        });
+        setUpdateStatus("Rebase paused for conflicts.", { error: true });
+        return;
+      }
+
       if (!dirtyAction && Array.isArray(result.dirty) && result.dirty.length) {
         const nextDirtyAction = await promptForDirtyUpdateAction(result.dirty);
 
@@ -1148,8 +1206,8 @@ export async function runGraphUpdate(
     }
 
     applyGraphSnapshots(result.snapshots);
-    await refreshOriginMainStatus({ force: true });
     setUpdateStatus(result.message || getUpdateActionLabel(mode) + " complete.");
+    void refreshOriginMainStatus({ force: true });
 
     if (Array.isArray(result.shelves) && result.shelves.length) {
       const shouldUnshelf = await showSystemConfirmation({
@@ -1215,6 +1273,9 @@ export function applyGraphSnapshot(index, snapshot, { force = false } = {}) {
 
   if (!selectedCommit) {
     clearDiffSelection(index, "Graph updated. The selected commit is no longer loaded.");
+  } else if (selectedCommit.tryRuns?.some(run => run.monitorId)) {
+    const container = document.getElementById("diff-" + index)?.querySelector(".integration-status");
+    if (container) void loadSelectedCommitIntegrationStatus(index, selectedCommit, container);
   }
 
   return true;

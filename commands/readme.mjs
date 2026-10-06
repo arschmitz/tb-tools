@@ -44,6 +44,8 @@ function pushConsoleSection(lines) {
     "- create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, blocking-review toggles, and a durable `TB-Tools-Id` trailer for console metadata",
     "- checkout, rebase, interactively reorder/squash/fixup/drop local commit ranges, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit",
     "- copy a selected commit or local stack between the Working and Review clone pairs on a new destination branch, with an atomic rollback if cherry-picking fails",
+    "- use artifact builds and `build faster` for frontend-only comm changes; use a normal build for native or Firefox changes",
+    "- reuse matching console binary snapshots from either checkout and the shared mach download cache; keep each checkout’s object directory separate",
     "- destructively replace the complete Review pair with the Working Git history and copy Firefox build artifacts for a fast review build",
     "- choose whether Pull or Rebase acts on the selected clone pair or both pairs; build/run, lint, test, pull patch, and try follow the selected comm tab",
     "- pull both repositories, rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches",
@@ -53,6 +55,8 @@ function pushConsoleSection(lines) {
     "- watch command progress in a slim status bar with elapsed time, cancellable running work, and toggleable output",
     "- monitor comm and Firefox `origin/main` freshness plus Rust dependency sync warnings before remote-build workflows like try and submit",
     "- close console browser tabs automatically when the local console process exits, with an opt-out for keeping tabs open",
+    "",
+    "AI tasks use automatic local knowledge capture and bounded retrieval. See [Console knowledge](docs/knowledge.md) for learning budgets, private records, Git sync, and inspection commands.",
     "",
   );
 

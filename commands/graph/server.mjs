@@ -1,3 +1,14 @@
+import { ensureGraphCommit } from "./commit-access.mjs";
+import { AI_SETTINGS_PATH, AI_TASK_TYPES, readAiProfiles, saveAiProfiles } from "./ai-models.mjs";
+import { createGraphCodexAppServer } from "./codex-app-server.mjs";
+import { createReviewHandledStore, applyHandledReviews } from "./review-handled.mjs";
+import { summarizeBackgroundJob } from "./background-jobs.mjs";
+import { createTryMonitorStore } from "./try-monitor-store.mjs";
+import { createImplementationManager } from "./implement.mjs";
+import { prepareDashboardPatchAction } from "./dashboard-actions.mjs";
+import { squashTryFixup } from "./try-fixup.mjs";
+import { createTryMonitor } from "./try-monitor.mjs";
+import { proposeRebaseResolution, applyRebaseResolution } from "./rebase-resolution.mjs";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
@@ -22,31 +33,46 @@ import {
   isNotionAuthenticationError,
 } from "../../lib/notion.mjs";
 import defaultPhab, {
+  clearPhabricatorCache as defaultClearPhabricatorCache,
   comment as defaultComment,
+  getPhabricatorCacheStatus as defaultGetPhabricatorCacheStatus,
   isPhabricatorRateLimitError,
 } from "../../lib/phab.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
 import {
-  DEFAULT_CLIENT_DISCONNECT_GRACE_MS,
   DEFAULT_BROWSER_SHUTDOWN_GRACE_MS,
   DEFAULT_DASHBOARD_CACHE_MS,
   DEFAULT_GRAPH_INTEGRATION_CACHE_MS,
   DEFAULT_GRAPH_REVIEW_CACHE_MS,
-  DEFAULT_HEARTBEAT_TIMEOUT_MS,
   DEFAULT_META_BOARD_CACHE_MS,
   DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS,
   GRAPH_CLIENT_SCRIPTS,
   GRAPH_CLIENT_STYLESHEETS,
 } from "./constants.mjs";
 import { getDashboardData as defaultGetDashboardData } from "./dashboard.mjs";
+import { clearReviewerGroupCache } from "./reviewer-groups-cache.mjs";
+import { getBugzillaRevisions as defaultGetBugzillaRevisions } from "../../lib/bugzilla-revisions.mjs";
+import {
+  clearDashboardTimelineCache as defaultClearDashboardTimelineCache,
+  getDashboardTimelineCacheStatus as defaultGetDashboardTimelineCacheStatus,
+} from "./dashboard-timeline-cache.mjs";
+import {
+  clearDashboardCache as defaultClearDashboardCache,
+  getDashboardCacheStatus as defaultGetDashboardCacheStatus,
+  loadDashboardCache as defaultLoadDashboardCache,
+  saveDashboardCache as defaultSaveDashboardCache,
+} from "./dashboard-cache.mjs";
 import {
   getMetaBoardBugDetail as defaultGetMetaBoardBugDetail,
   getMetaBoardData as defaultGetMetaBoardData,
   updateMetaBoardBug as defaultUpdateMetaBoardBug,
 } from "./meta-boards.mjs";
 import {
+  normalizeSprintMeta,
+  formatSprintSummary,
   createSprint as defaultCreateSprint,
   getSprintData as defaultGetSprintData,
+  getSprintPatchCompletionDates,
   rolloverSprint as defaultRolloverSprint,
   setSprintStoryMembership as defaultSetSprintStoryMembership,
   updateSprint as defaultUpdateSprint,
@@ -105,19 +131,25 @@ import { syncReviewCheckoutFromWorking } from "./review-sync.mjs";
 import { getGraphCommitReview } from "./reviews.mjs";
 import {
   applyGraphPatchUpdateComment,
-  applyGraphPatchUpdateRecommendedChange,
   acceptGraphPatchUpdateChange,
   amendGraphPatchUpdateChanges,
   createGraphPatchUpdateSession,
+  findGraphPatchCommit,
   followUpGraphPatchUpdateComment,
   isGraphAiEnabled,
+  resolveGraphCodexCommand,
   markGraphPatchUpdateCommentHandled,
   prepareGraphPatchUpdateSession,
+  resumeGraphPatchUpdateAssessment,
+  recoverGraphPatchUpdateChange,
+  reviseGraphPatchUpdateChange,
   revertGraphPatchUpdateChange,
   resolveGraphPatchUpdateWorkingCheckout,
   saveGraphPatchUpdateReply,
   serializeGraphPatchUpdateSession,
   steerGraphPatchUpdateSession,
+  runGraphPatchFreeformUpdate,
+  rollbackGraphPatchFreeformUpdate,
 } from "./patch-update.mjs";
 import {
   addGraphPatchReviewInline,
@@ -125,13 +157,22 @@ import {
   cancelGraphPatchReviewSession,
   createGraphPatchReviewSession,
   getGraphPatchReviewContext,
+  refreshGraphPatchReviewContext,
   prepareGraphPatchReviewSession,
+  retryGraphPatchReviewSession,
   serializeGraphPatchReviewSession,
   skipGraphPatchReviewIssue,
   steerGraphPatchReviewSession,
   submitGraphPatchReview,
 } from "./patch-review.mjs";
+import {
+  createPatchSessionStore,
+  assertPatchSessionCheckout,
+  canResumePatchSession,
+  getPatchSessionCheckoutHash,
+} from "./patch-session-store.mjs";
 import { saveGraphPatchUpdateMemory as defaultSavePatchUpdateMemory } from "./patch-update-memory.mjs";
+import { getDefaultKnowledgeService, stopDefaultKnowledgeService } from "../knowledge-service.mjs";
 import {
   getGraphPatchUpdateHandledCommentIds as defaultGetPatchUpdateHandledCommentIds,
   markGraphPatchUpdateCommentHandled as defaultPersistPatchUpdateHandledComment,
@@ -235,16 +276,16 @@ export async function startInteractiveGraphServer({
   fallbackPort,
   host = "127.0.0.1",
   heartbeatIntervalMs = 2000,
-  heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
-  clientDisconnectGraceMs = DEFAULT_CLIENT_DISCONNECT_GRACE_MS,
   browserShutdownGraceMs = DEFAULT_BROWSER_SHUTDOWN_GRACE_MS,
   closeBrowserTabsOnShutdown = true,
   runCommand = run,
+  generateRebaseResolution,
   createBug = defaultCreateBug,
   getBugs = defaultGetBugs,
   getAssignedOpenBugs = defaultGetAssignedOpenBugs,
   getAttachments = defaultGetAttachments,
   getBug = defaultGetBug,
+  getBugzillaRevisions = defaultGetBugzillaRevisions,
   getBugComments = defaultGetBugComments,
   getBugHistoryByIds = defaultGetBugHistoryByIds,
   getBugsByIds = defaultGetBugsByIds,
@@ -252,6 +293,11 @@ export async function startInteractiveGraphServer({
   getNeedinfoOpenBugs = defaultGetNeedinfoOpenBugs,
   updateBug = defaultUpdateBug,
   getDashboardData = defaultGetDashboardData,
+  clearDashboardTimelineCache = defaultClearDashboardTimelineCache,
+  clearDashboardCache = defaultClearDashboardCache,
+  getDashboardCacheStatus = defaultGetDashboardCacheStatus,
+  getDashboardTimelineCacheStatus = defaultGetDashboardTimelineCacheStatus,
+  loadDashboardCache = defaultLoadDashboardCache,
   getMetaBoardBugDetail = defaultGetMetaBoardBugDetail,
   getMetaBoardData = defaultGetMetaBoardData,
   updateMetaBoardBug = defaultUpdateMetaBoardBug,
@@ -262,6 +308,8 @@ export async function startInteractiveGraphServer({
   updateSprint = defaultUpdateSprint,
   getNotionStoriesByBugId = defaultGetNotionStoriesByBugId,
   phab = defaultPhab,
+  clearPhabricatorCache = defaultClearPhabricatorCache,
+  getPhabricatorCacheStatus = defaultGetPhabricatorCacheStatus,
   postComment = defaultComment,
   pushCommits = defaultPushCommits,
   readMetaBoardStore = defaultReadMetaBoardStore,
@@ -271,15 +319,25 @@ export async function startInteractiveGraphServer({
   addMetaBoard = defaultAddMetaBoard,
   setMetaBoardReviewGroup = defaultSetMetaBoardReviewGroup,
   getReviewGroupAssignees = defaultGetReviewGroupAssignees,
+  aiSettingsPath = AI_SETTINGS_PATH,
+  getAiModels,
   appConfig = defaultConfig,
   phabWebSession = createPhabricatorWebSession(),
   getPatchUpdateHandledCommentIds = defaultGetPatchUpdateHandledCommentIds,
   persistPatchUpdateHandledComment = defaultPersistPatchUpdateHandledComment,
   savePatchUpdateMemory = defaultSavePatchUpdateMemory,
+  saveDashboardCache = defaultSaveDashboardCache,
   acceptPatchUpdateChange = acceptGraphPatchUpdateChange,
   preparePatchUpdateSession = prepareGraphPatchUpdateSession,
+  preparePatchReviewSession = prepareGraphPatchReviewSession,
+  retryPatchReviewSession = retryGraphPatchReviewSession,
   syncReviewCheckout = syncReviewCheckoutFromWorking,
   serverFactory = createServer,
+  patchSessionDirectory,
+  reviewHandledPath,
+  implementationManager,
+  backgroundTryStore = createTryMonitorStore(),
+  tryMonitor = runCommand === run ? createTryMonitor({ graphs, aiEnabled: isGraphAiEnabled(appConfig), codexCommand: appConfig?.ai?.command }) : null,
 }) {
   const serverGraphs = graphs.map((graph) => ({
     ...graph,
@@ -288,14 +346,241 @@ export async function startInteractiveGraphServer({
     workingTreeCount: graph.workingTreeCount || 0,
     patchIdCache: new Map(),
   }));
+  const implementation = implementationManager === undefined && !process.env.NODE_TEST_CONTEXT && !globalThis.__tbToolsBlockExternalApis
+    ? createImplementationManager({ graphs: serverGraphs, aiEnabled: isGraphAiEnabled(appConfig),
+      username: appConfig?.bugzilla?.user, codexCommand: appConfig?.ai?.command, runCommand })
+    : implementationManager;
+  async function getSettingsModels() {
+    if (getAiModels) return getAiModels();
+    const command = await resolveGraphCodexCommand({ configuredCommand: appConfig?.ai?.command });
+    const client = createGraphCodexAppServer({ command, cwd: serverGraphs[0]?.path || process.cwd(), knowledge: false });
+    try { return await client.listModels(); }
+    finally { client.close(); }
+  }
   const submitSessions = new Map();
   const patchUpdateSessions = new Map();
   const patchReviewSessions = new Map();
+  const patchSessionStore = createPatchSessionStore({ directory: patchSessionDirectory });
+  function savePatchSessions() {
+    for (const [kind, sessions] of [["update", patchUpdateSessions], ["review", patchReviewSessions]]) {
+      for (const session of sessions.values()) {
+        try {
+          patchSessionStore.save(kind, session);
+        } catch (error) {
+          session.error = `Could not save this session for resume: ${error.message}`;
+        }
+      }
+    }
+  }
+  const patchSessionTimer = setInterval(savePatchSessions, 2000);
+  patchSessionTimer.unref();
+
+  function startPatchUpdatePreparation(
+    session,
+    snapshotLimit,
+    { afterCheckoutUpdate = false } = {},
+  ) {
+    if (afterCheckoutUpdate) {
+      session.previousHash = session.currentHash;
+      session.refreshAfterCheckoutUpdate = true;
+      session.restored = false;
+      session.interrupted = false;
+      session.status = "preparing";
+      session.error = "";
+      session.message = "Refreshing the local patch and latest Phabricator comments...";
+      session.items = [];
+      session.currentItemIndex = 0;
+      session.handledItemCount = 0;
+      session.patchContext = null;
+      session.memoryContext = "";
+      session.pendingChange = null;
+      session.changeSnapshots = new Map();
+      session.workingTreeDiffVersion = (session.workingTreeDiffVersion || 0) + 1;
+      session.workingDiff = "";
+      session.workingDiffHtml = "";
+    } else {
+      session.refreshAfterCheckoutUpdate = false;
+    }
+    const workingCheckout = resolveGraphPatchUpdateWorkingCheckout({
+      graphs: serverGraphs,
+    });
+
+    void preparePatchUpdateSession({
+      session,
+      graphs: workingCheckout.graphs,
+      getRustUpstreamStatus: () => getServerRustUpstreamStatus({
+        checkout: "working",
+        wait: true,
+      }),
+      getSnapshot: getServerGraphSnapshot,
+      getHandledCommentIds: getPatchUpdateHandledCommentIds,
+      getReview: ({ graph, hash, force }) => getServerCommitReview(graph, hash, { force }),
+      phab,
+      runCommand,
+      saveMemory: savePatchUpdateMemory,
+      snapshotLimit,
+    }).catch(() => {}).finally(savePatchSessions);
+  }
+
+  async function getPatchSessionBaseHash(session) {
+    return String(await runCommand({
+      cmd: "git",
+      args: ["rev-parse", `origin/${DEFAULT_BRANCH}`],
+      cwd: session.graph.path,
+      capture: true,
+      silent: true,
+    })).trim();
+  }
+
+  async function restorePatchSession(kind, fresh, body, response) {
+    const sessions = kind === "update" ? patchUpdateSessions : patchReviewSessions;
+    const runningReview = kind === "review" && [...sessions.values()].find((entry) =>
+      entry.revision === fresh.revision && entry.graph.path === fresh.graph.path &&
+      !entry.cancelled && ["pulling", "reviewing"].includes(entry.status));
+    if (runningReview && body.resume !== false) {
+      sendJson(response, 200, { ok: true, ...serializeGraphPatchReviewSession(runningReview) });
+      return true;
+    }
+    const saved = [...sessions.values()].find((entry) =>
+      entry.revision === fresh.revision && entry.graph.path === fresh.graph.path &&
+      (entry.mode || "update") === (fresh.mode || "update") && canResumePatchSession(entry))
+      || patchSessionStore.load(kind, fresh);
+    if (!fresh.aiEnabled || !canResumePatchSession(saved)) return false;
+    if (body.resume === false) {
+      saved.codexAgent?.client.close();
+      sessions.delete(saved.id);
+      return false;
+    }
+    if (body.resume !== true) {
+      sendJson(response, 200, { ok: true, resumeAvailable: true, revision: saved.revision });
+      return true;
+    }
+    const restartReview = () => {
+      // Reconnect the saved conversation so callbacks use the refreshed session.
+      saved.codexAgent?.client.close();
+      const resumed = {
+        ...fresh,
+        id: saved.id,
+        codexSessionId: saved.codexSessionId,
+        codexThreadName: saved.codexThreadName,
+        codexAgent: null,
+        output: saved.output,
+        activity: saved.activity || [],
+        resumeReviewContext: {
+          currentHash: saved.currentHash,
+          rawPatchHash: saved.rawPatchHash,
+          issues: saved.issues || [],
+          patchContext: saved.patchContext,
+          coverage: saved.coverage,
+        },
+        reviewContextVersion: (saved.reviewContextVersion || 0) + 1,
+        workingTreeDiffVersion: (saved.workingTreeDiffVersion || 0) + 1,
+      };
+      sessions.set(resumed.id, resumed);
+      void preparePatchReviewSession({
+        session: resumed,
+        getSnapshot: getServerGraphSnapshot,
+        getReview: ({ graph, hash }) => getServerCommitReview(graph, hash, { force: true }),
+        getRevisionReview: phabWebSession.getReview?.bind(phabWebSession),
+        runCommand,
+      }).catch(() => {}).finally(savePatchSessions);
+      sendJson(response, 200, { ok: true, ...serializeGraphPatchReviewSession(resumed) });
+      return true;
+    };
+    const head = await getPatchSessionCheckoutHash(saved, runCommand);
+    if (kind === "review" && head !== saved.currentHash) return restartReview();
+    const baseChanged = kind === "update" && saved.baseHash &&
+      await getPatchSessionBaseHash(saved) !== saved.baseHash;
+    const newerVerifyCopy = kind === "update" && saved.mode === "verify" &&
+      (await findGraphPatchCommit({ graph: saved.graph, revision: saved.revision,
+        newest: true, runCommand })).hash !== saved.currentHash;
+    if (kind === "update" && saved.mode === "freeform" && head !== saved.currentHash) {
+      await assertPatchSessionCheckout(saved, runCommand);
+    }
+    if (kind === "update" && saved.mode !== "freeform" && (head !== saved.currentHash || baseChanged || newerVerifyCopy)) {
+      if (saved.mode === "verify") {
+        const dirty = await runCommand({ cmd: "git", args: ["status", "--porcelain"],
+          cwd: saved.graph.path, capture: true, silent: true });
+        if (String(dirty).trim()) {
+          const error = new Error("Keep or revert the working checkout changes before refreshing Verify. Saved findings are unchanged.");
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+      startPatchUpdatePreparation(saved, getRequestLimit(body.snapshotLimit), {
+        afterCheckoutUpdate: true,
+      });
+      sessions.set(saved.id, saved);
+      savePatchSessions();
+      sendJson(response, 200, {
+        ok: true,
+        ...serializeGraphPatchUpdateSession(saved),
+      });
+      return true;
+    }
+    await assertPatchSessionCheckout(saved, runCommand);
+    let discussionChanged = false;
+    if (kind === "review" && saved.rawPatchHash) {
+      try {
+        discussionChanged = await refreshGraphPatchReviewContext({
+          session: saved, getRevisionReview: phabWebSession.getReview.bind(phabWebSession),
+        });
+      } catch (error) {
+        if (error.code === "REVIEW_PATCH_CHANGED") return restartReview();
+        throw error;
+      }
+    }
+    if (kind === "review" && saved.status === "error" &&
+        /Selected model is at capacity/i.test(saved.error || "")) {
+      saved.restored = false;
+      saved.interrupted = false;
+      retryPatchReviewSession({ session: saved, runCommand });
+      sessions.set(saved.id, saved);
+      savePatchSessions();
+      sendJson(response, 200, { ok: true, ...serializeGraphPatchReviewSession(saved) });
+      return true;
+    }
+    if (saved.restored) {
+      saved.restored = false;
+      saved.graph.knownHashes.add(saved.currentHash);
+      // Cached diff HTML is restored, but local edits must be read again.
+      saved.workingTreeDiffVersion = (saved.workingTreeDiffVersion || 0) + 1;
+      saved.workingDiff = "";
+      saved.workingDiffHtml = "";
+      saved.error = "";
+      const recoveredChange = kind === "update" && await recoverGraphPatchUpdateChange({ session: saved, runCommand });
+      if (kind === "update" && saved.mode === "freeform" && !recoveredChange) {
+        saved.status = "review";
+        saved.message = "Resumed Update. Continue in the saved conversation.";
+      } else if (!recoveredChange && saved.interrupted && saved.codexSessionId) {
+        if (kind === "update") {
+          void resumeGraphPatchUpdateAssessment({ session: saved }).finally(savePatchSessions);
+        } else {
+          saved.status = "review";
+          await steerGraphPatchReviewSession({ session: saved, runCommand, instruction: "Continue the interrupted review from this saved conversation. Use the existing research and test results. Check local edits left by the interrupted turn. Do not repeat completed research unless the current source makes it necessary. Return the complete review findings." });
+        }
+      } else if (!recoveredChange) {
+        saved.message = kind === "review" && saved.remoteCheckedAt
+          ? "Resumed saved review. Checked Phabricator for patch and discussion updates."
+          : "Resumed saved results. Continue where you left off. New remote comments have not been fetched.";
+      }
+    }
+    if (discussionChanged && saved.status === "review") {
+      await steerGraphPatchReviewSession({ session: saved, runCommand, instruction: `The patch is unchanged, but Phabricator discussion changed. Continue the existing review. Reuse prior research and validation. Re-evaluate only conclusions affected by this discussion; do not repeat full context establishment. Current discussion: ${JSON.stringify(saved.reviewDiscussion)}` });
+    }
+    sessions.set(saved.id, saved);
+    savePatchSessions();
+    sendJson(response, 200, { ok: true, ...(kind === "update"
+      ? serializeGraphPatchUpdateSession(saved) : serializeGraphPatchReviewSession(saved)) });
+    return true;
+  }
   const machSessions = new Map();
   const lintSessions = new Map();
   const newPatchSessions = new Map();
   const patchSessions = new Map();
   const trySessions = new Map();
+  let dashboardPatchActionRunning = false;
+  let dashboardTrySessionId = "";
   const landSessions = new Map();
   const testSessions = new Map();
   const rebaseSessions = new Map();
@@ -306,7 +591,10 @@ export async function startInteractiveGraphServer({
   const notionStoryCache = new Map();
   const notionStoryInflight = new Map();
   let notionDisabled = false;
+  const reviewHandled = createReviewHandledStore({ filePath: reviewHandledPath, username: appConfig?.phabricator?.user });
   let dashboardCache;
+  let dashboardCacheLoaded = false;
+  let dashboardCacheLoadPromise;
   let dashboardInflight;
   let dashboardCooldownUntil = 0;
   const metaBoardCache = new Map();
@@ -315,20 +603,17 @@ export async function startInteractiveGraphServer({
   const sprintHistoryInflight = new Map();
   let metaBoardColorAssignment = Promise.resolve();
   const sockets = new Set();
-  const browserClients = new Map();
   const browserShutdownWaiters = new Set();
   let closeTimer;
-  let noClientCloseTimer;
-  let browserMonitorStarted = false;
-  let lastBrowserActivity = 0;
   let shuttingDown = false;
   const rustUpstreamStatuses = new Map();
   const rustUpstreamStatusCheckedAt = new Map();
   const rustUpstreamStatusPromises = new Map();
 
   async function completePatchUpdateComment({
-    event = "Review comment marked handled",
+    event = "Review comment marked done",
     itemId,
+    state = "handled",
     session,
   }) {
     const item = session.items.find((candidate) => candidate.id === String(itemId));
@@ -340,7 +625,7 @@ export async function startInteractiveGraphServer({
       throw error;
     }
 
-    if (item.changeApplied && !item.changeAccepted) {
+    if (item.changeApplied && !item.changeAccepted && !item.changesAmended) {
       const error = new Error(
         "Keep or revert the prepared working-tree change before marking this comment handled.",
       );
@@ -349,27 +634,19 @@ export async function startInteractiveGraphServer({
       throw error;
     }
 
-    await persistPatchUpdateHandledComment({
-      revision: session.revision,
-      itemId: item.id,
-    });
-    markGraphPatchUpdateCommentHandled({ session, itemId: item.id });
-    await savePatchUpdateMemory({ event, session });
-    void applyGraphPatchUpdateRecommendedChange({
-      session,
-      runCommand,
-      saveMemory: savePatchUpdateMemory,
-    }).catch(() => {});
-    return item;
-  }
-
-  function clearNoClientCloseTimer() {
-    if (!noClientCloseTimer) {
-      return;
+    if (session.mode !== "verify" && session.mode !== "freeform" && item.type === "inline" && item.parentCommentPHID) {
+      await phabWebSession.markInlineCommentDone({
+        commentPHID: item.parentCommentPHID,
+        revision: session.revision,
+      });
     }
 
-    clearTimeout(noClientCloseTimer);
-    noClientCloseTimer = undefined;
+    if (!["verify", "freeform"].includes(session.mode)) {
+      await persistPatchUpdateHandledComment({ revision: session.revision, itemId: item.id });
+    }
+    markGraphPatchUpdateCommentHandled({ session, itemId: item.id, state });
+    await savePatchUpdateMemory({ event, session });
+    return item;
   }
 
   function sendBrowserShutdownEvent(
@@ -408,72 +685,9 @@ export async function startInteractiveGraphServer({
     }
   }
 
-  function noteBrowserActivity(now = Date.now()) {
-    browserMonitorStarted = true;
-    lastBrowserActivity = now;
+  function noteBrowserActivity() {
+    // Browser activity deliberately does not control the server lifetime.
   }
-
-  function registerBrowserClient(clientId, now = Date.now()) {
-    noteBrowserActivity(now);
-
-    if (!clientId) {
-      return;
-    }
-
-    clearNoClientCloseTimer();
-    browserClients.set(String(clientId), now);
-  }
-
-  function pruneStaleBrowserClients(now = Date.now()) {
-    for (const [clientId, lastSeen] of browserClients) {
-      if (now - lastSeen > heartbeatTimeoutMs) {
-        browserClients.delete(clientId);
-      }
-    }
-  }
-
-  function scheduleNoBrowserClientsShutdown(
-    delay = clientDisconnectGraceMs,
-    reason = "all browser tabs closed",
-  ) {
-    if (shuttingDown || noClientCloseTimer) {
-      return;
-    }
-
-    noClientCloseTimer = setTimeout(
-      () => {
-        noClientCloseTimer = undefined;
-        pruneStaleBrowserClients();
-
-        if (!browserClients.size) {
-          shutdown(0, reason);
-        }
-      },
-      Math.max(0, Number(delay) || 0),
-    );
-    noClientCloseTimer.unref?.();
-  }
-
-  const heartbeatTimer = setInterval(() => {
-    const now = Date.now();
-
-    pruneStaleBrowserClients(now);
-
-    if (browserClients.size || noClientCloseTimer) {
-      return;
-    }
-
-    if (
-      browserMonitorStarted &&
-      lastBrowserActivity &&
-      now - lastBrowserActivity > heartbeatTimeoutMs
-    ) {
-      shutdown(
-        0,
-        `browser heartbeat timed out after ${formatDurationLabel(heartbeatTimeoutMs)}`,
-      );
-    }
-  }, heartbeatIntervalMs);
 
   function shutdown(delay = 0, reason = "server shutdown requested") {
     if (shuttingDown) {
@@ -481,6 +695,10 @@ export async function startInteractiveGraphServer({
     }
 
     shuttingDown = true;
+    tryMonitor?.stop();
+    implementation?.stop();
+    savePatchSessions();
+    clearInterval(patchSessionTimer);
     const shouldCloseBrowserTabs = Boolean(closeBrowserTabsOnShutdown);
     const shutdownDelay = shouldCloseBrowserTabs
       ? Math.max(Number(delay) || 0, Number(browserShutdownGraceMs) || 0)
@@ -499,9 +717,6 @@ export async function startInteractiveGraphServer({
       reason,
     });
     closeTimer = setTimeout(() => {
-      clearInterval(heartbeatTimer);
-      clearNoClientCloseTimer();
-
       if (server.listening) {
         server.close();
       }
@@ -525,11 +740,11 @@ export async function startInteractiveGraphServer({
     graph.commits = snapshot.commits || [];
     const activePatchUpdateHashes = Array.from(patchUpdateSessions.values())
       .filter((session) => session.graph === graph)
-      .map((session) => session.currentHash)
+      .flatMap((session) => [session.originalHash, session.currentHash])
       .filter(Boolean);
 
-    // An update can rewrite a patch below the visible page. Keep that active
-    // revision addressable while its review/submit flow is still open.
+    // An update can resolve or rewrite a patch below the visible page. Keep
+    // both revisions addressable while its review/submit flow is still open.
     graph.knownHashes = new Set([
       ...graph.commits.map((commit) => commit.hash),
       ...activePatchUpdateHashes,
@@ -543,6 +758,7 @@ export async function startInteractiveGraphServer({
   }
 
   async function getCachedCommitData({
+    bypassCache = false,
     cache,
     cacheMs,
     getValue,
@@ -553,7 +769,7 @@ export async function startInteractiveGraphServer({
     const now = Date.now();
     const cached = cache.get(key);
 
-    if (cached && now - cached.checkedAt < cacheMs) {
+    if (!bypassCache && cached && now - cached.checkedAt < cacheMs) {
       return cached.value;
     }
 
@@ -584,6 +800,7 @@ export async function startInteractiveGraphServer({
         hash,
         runCommand,
         getBug,
+        getBugzillaRevisions,
         phab,
         getNotionStoriesByBugId: getServerNotionStoriesByBugId,
       }),
@@ -593,14 +810,16 @@ export async function startInteractiveGraphServer({
     });
   }
 
-  async function getServerCommitReview(graph, hash) {
+  async function getServerCommitReview(graph, hash, { force = false } = {}) {
     return getCachedCommitData({
+      bypassCache: force,
       cache: commitReviewCache,
       cacheMs: DEFAULT_GRAPH_REVIEW_CACHE_MS,
       getValue: () => getGraphCommitReview({
         graph,
         hash,
         getWebSuggestions: phabWebSession.getSuggestions,
+        getWebReview: phabWebSession.getReview?.bind(phabWebSession),
         runCommand,
         phab,
       }),
@@ -897,7 +1116,28 @@ export async function startInteractiveGraphServer({
     return promise;
   }
 
+  async function loadStoredDashboardCache() {
+    if (dashboardCacheLoaded) {
+      return;
+    }
+
+    if (!dashboardCacheLoadPromise) {
+      dashboardCacheLoadPromise = Promise.resolve(loadDashboardCache({
+        username: appConfig?.phabricator?.user,
+      })).then((cached) => {
+        if (cached) {
+          dashboardCache = cached;
+        }
+      }).finally(() => {
+        dashboardCacheLoaded = true;
+      });
+    }
+
+    await dashboardCacheLoadPromise;
+  }
+
   async function getServerDashboard({ force = false } = {}) {
+    await loadStoredDashboardCache();
     const now = Date.now();
 
     if (dashboardInflight) {
@@ -933,14 +1173,21 @@ export async function startInteractiveGraphServer({
 
     const request = Promise.resolve(getDashboardData({
       appConfig,
+      getDashboardRevisions: phabWebSession.getDashboardRevisions?.bind(phabWebSession),
+      getBugzillaRevisions,
       getAssignedOpenBugs,
       getBugsByIds,
       getBugsWithAttachmentsByIds,
       getNeedinfoOpenBugs,
       phab,
+      bypassCache: force,
     }))
-      .then((result) => {
+      .then(async (result) => {
         dashboardCache = { checkedAt: Date.now(), result };
+        await saveDashboardCache({
+          result,
+          username: appConfig?.phabricator?.user,
+        });
         dashboardCooldownUntil = 0;
 
         return result;
@@ -1188,9 +1435,13 @@ export async function startInteractiveGraphServer({
       // The planning view remains useful while Bugzilla history is unavailable.
     }
 
+    const patchProgressDates = new Map();
+    const patchCompletionDates = await getSprintPatchCompletionDates({ cards: baseSprint.cards, phab, patchProgressDates });
     return getSprintData({
       board: metaBoard,
       historyByBugId,
+      patchCompletionDates,
+      patchProgressDates,
       sprintId,
     });
   }
@@ -1203,9 +1454,87 @@ export async function startInteractiveGraphServer({
   const server = serverFactory(async (request, response) => {
     try {
       const url = new URL(request.url, `http://${request.headers.host}`);
+      if (request.method === "POST" &&
+          (dashboardPatchActionRunning || trySessions.get(dashboardTrySessionId)?.status === "running") &&
+          /^\/api\/(?:patch-update|checkout|commit-action|try|submit|update-graphs|mach|lint|test)(?:\/|$)/.test(url.pathname)) {
+        throw Object.assign(new Error("Wait for the dashboard patch action to finish."), { statusCode: 409 });
+      }
+
+
+      if (request.method === "POST" && isGraphAiEnabled(appConfig) && (implementation?.ownsCheckout ? implementation.ownsCheckout() : implementation?.active()) &&
+          !url.pathname.startsWith("/api/implement/") &&
+          /^\/api\/(?:patch-update|checkout|commit-action|try|submit|update-graphs|mach|lint|test|dashboard\/patch-action|new-patch|checkout-transfer|interactive-rebase|rebase|commit|unshelf-graphs|mach-action|patch|land|amend-current|amend-message|amend-try-fixup)(?:\/|$)/.test(url.pathname)) {
+        throw Object.assign(new Error("Implement owns the working checkout. Finish or cancel it before starting another action."), { statusCode: 409 });
+      }
+      if (request.method === "POST" && [...submitSessions.values()].some(session => ["running", "prompt"].includes(session.status)) &&
+          (/^\/api\/submit$/.test(url.pathname) || /^\/api\/(?:patch-update|checkout|checkout-transfer|commit-action|try|update-graphs|mach-action|lint|test|new-patch|interactive-rebase|rebase|commit|unshelf-graphs|patch|land|amend-current|amend-message|amend-try-fixup|dashboard\/patch-action)(?:\/|$)/.test(url.pathname))) {
+        throw Object.assign(new Error("Submit is still using the working checkout. Wait for it to finish before changing that checkout."), { statusCode: 409 });
+      }
+      const workingAi = [...patchUpdateSessions.values()].find(session => session.freeformOperationRunning ||
+        ["preparing", "reviewing", "applying", "amending"].includes(session.status));
+      if (workingAi && request.method === "POST" &&
+          /^\/api\/(?:checkout|checkout-transfer|commit-action|try|submit|update-graphs|mach-action|lint|test|new-patch|interactive-rebase|rebase|commit|unshelf-graphs|patch|land|amend-current|amend-message|amend-try-fixup)(?:\/|$)/.test(url.pathname)) {
+        throw Object.assign(new Error("An AI task owns the working checkout. Wait for it to finish."), { statusCode: 409 });
+      }
+      const implementDiffMatch = url.pathname.match(/^\/api\/implement\/([^/]+)\/diff$/);
+      if (implementDiffMatch && request.method === "GET") {
+        validateToken(url.searchParams.get("token"), token);
+        if (!implementation) throw Object.assign(new Error("Implement is unavailable."), { statusCode: 404 });
+        sendJson(response, 200, { ok: true, ...await implementation.diff(decodeURIComponent(implementDiffMatch[1])) });
+        return;
+      }
+      if (url.pathname === "/api/background-jobs" && request.method === "GET") {
+        validateToken(url.searchParams.get("token"), token);
+        const jobs = [];
+        for (const [kind, sessions] of [["Update", patchUpdateSessions], ["Review", patchReviewSessions],
+          ["Submit", submitSessions], ["Build", machSessions], ["Lint", lintSessions], ["Test", testSessions],
+          ["Try submission", trySessions], ["Rebase", rebaseSessions], ["Landing", landSessions],
+          ["New patch", newPatchSessions], ["Patch", patchSessions]]) {
+          for (const session of sessions.values()) jobs.push(summarizeBackgroundJob(kind, session));
+        }
+        for (const session of implementation?.list() || []) jobs.push(summarizeBackgroundJob("Implement", session));
+        const paths = new Set(serverGraphs.map(graph => graph.path));
+        for (const session of backgroundTryStore.list()) {
+          if (!session.imported && paths.has(session.path)) jobs.push(summarizeBackgroundJob("Try repair", session));
+        }
+        sendJson(response, 200, { ok: true, aiEnabled: isGraphAiEnabled(appConfig),
+          tryAiPaused: backgroundTryStore.isAutomationPaused(), jobs: jobs.filter(Boolean) });
+        return;
+      }
+      const implementTaskMatch = url.pathname.match(/^\/api\/implement\/([^/]+)$/);
+      if (implementTaskMatch && request.method === "GET") {
+        validateToken(url.searchParams.get("token"), token);
+        const task = implementation?.list().find(item => item.id === decodeURIComponent(implementTaskMatch[1]));
+        if (!task) throw Object.assign(new Error("Unknown Implement task."), { statusCode: 404 });
+        sendJson(response, 200, { ok: true, ...task });
+        return;
+      }
+      if (url.pathname === "/api/implement" && request.method === "GET") {
+        validateToken(url.searchParams.get("token"), token);
+        const working = resolveGraphPatchUpdateWorkingCheckout({ graphs: serverGraphs });
+        const head = await runCommand({ cmd: "git", args: ["rev-parse", "HEAD"], cwd: working.graph.path, capture: true, silent: true });
+        sendJson(response, 200, { ok: true, currentHash: String(head).trim(), runs: implementation?.list() || [] });
+        return;
+      }
+      if (request.method === "POST" && /^\/api\/implement(?:\/[^/]+\/(?:retry|cancel|feedback))?$/.test(url.pathname)) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        if (!isGraphAiEnabled(appConfig) || !implementation) throw Object.assign(new Error("Enable AI to use Implement."), { statusCode: 403 });
+        const action = url.pathname.match(/^\/api\/implement\/([^/]+)\/(retry|cancel|feedback)$/);
+        if (!action && (dashboardPatchActionRunning ||
+            [trySessions, machSessions, submitSessions, lintSessions, testSessions, newPatchSessions, patchSessions, landSessions].some(sessions => [...sessions.values()].some(session => !["complete", "error", "cancelled"].includes(session.status))) ||
+            [...patchUpdateSessions.values()].some(session => session.freeformOperationRunning || ["preparing", "reviewing", "applying", "amending"].includes(session.status)))) {
+          throw Object.assign(new Error("Wait for the active checkout operation to finish."), { statusCode: 409 });
+        }
+        const state = action ? await implementation[action[2]](decodeURIComponent(action[1]), body) : await implementation.create(body);
+        sendJson(response, 200, { ok: true, run: state });
+        return;
+      }
 
       if (request.method === "GET" && url.pathname === "/launch") {
-        validateToken(url.searchParams.get("token"), token);
+        // Like the main page, the launcher only opens the console. A URL from
+        // an earlier process must still work after the server restarts.
+        // API requests continue to require the current process token.
         noteBrowserActivity();
         response.writeHead(200, {
           "content-type": "text/html; charset=utf-8",
@@ -1259,6 +1588,17 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      if (url.pathname === "/api/dashboard/review-handled" && ["GET", "POST"].includes(request.method)) {
+        const body = request.method === "POST" ? await readRequestJson(request) : null;
+        validateToken(body ? body.token : url.searchParams.get("token"), token);
+        noteBrowserActivity();
+        const handledReviews = body
+          ? await reviewHandled.set(body.revision, body.handled, { title: body.title })
+          : await reviewHandled.list();
+        sendJson(response, 200, { ok: true, handledReviews });
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/dashboard") {
         validateToken(url.searchParams.get("token"), token);
         noteBrowserActivity();
@@ -1266,7 +1606,111 @@ export async function startInteractiveGraphServer({
           force: url.searchParams.get("force") === "1",
         });
 
-        sendJson(response, 200, { ok: true, ...dashboard });
+        sendJson(response, 200, { ok: true, ...applyHandledReviews(dashboard, await reviewHandled.list()) });
+        return;
+      }
+
+      if (["GET", "POST"].includes(request.method) && url.pathname === "/api/ai-settings") {
+        const body = request.method === "POST" ? await readRequestJson(request) : null;
+        validateToken(body ? body.token : url.searchParams.get("token"), token);
+        noteBrowserActivity();
+        const models = (await getSettingsModels()).filter(model => !model.hidden);
+        const profiles = body ? saveAiProfiles(body.profiles, models, aiSettingsPath) : readAiProfiles(aiSettingsPath);
+        sendJson(response, 200, { ok: true, tasks: AI_TASK_TYPES, profiles, models });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/phabricator-cache") {
+        validateToken(url.searchParams.get("token"), token);
+        noteBrowserActivity();
+        const [cache, dashboard, dashboardTimelines] = await Promise.all([
+          getPhabricatorCacheStatus(),
+          getDashboardCacheStatus(),
+          getDashboardTimelineCacheStatus(),
+        ]);
+
+        sendJson(response, 200, { ok: true, cache, dashboard, dashboardTimelines });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/phabricator-cache") {
+        const body = await readRequestJson(request);
+
+        validateToken(body.token, token);
+        noteBrowserActivity();
+        const category = String(body.category || "all");
+        if (category === "all" || category === "identities") {
+          await clearReviewerGroupCache();
+        }
+        const clearsDashboardTimelines = new Set([
+          "all",
+          "dashboard-timelines",
+        ]).has(category);
+        const clearsDashboard = new Set([
+          "all",
+          "identities",
+          "dashboard",
+          "dashboard-timelines",
+          "revision-history",
+          "revision-status",
+        ]).has(category);
+        const clearsPhabricatorCache = !new Set([
+          "dashboard",
+          "dashboard-timelines",
+        ]).has(category);
+        const [cache, dashboard, dashboardTimelines] = await Promise.all([
+          clearsPhabricatorCache
+            ? clearPhabricatorCache({ category })
+            : getPhabricatorCacheStatus(),
+          clearsDashboard
+            ? clearDashboardCache({ username: appConfig?.phabricator?.user })
+            : getDashboardCacheStatus(),
+          clearsDashboardTimelines
+            ? clearDashboardTimelineCache()
+            : getDashboardTimelineCacheStatus(),
+        ]);
+
+        if (clearsDashboard) {
+          commitIntegrationCache.clear();
+          dashboardCache = undefined;
+          dashboardCacheLoaded = true;
+          metaBoardCache.clear();
+        }
+
+        sendJson(response, 200, { ok: true, cache, dashboard, dashboardTimelines });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/dashboard/patch-action") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        noteBrowserActivity();
+        const activeCommand = [trySessions, machSessions, submitSessions, lintSessions].some(sessions =>
+          [...sessions.values()].some(session => session.status === "running"));
+        const activePatch = [...patchUpdateSessions.values()].some(session =>
+          session.freeformOperationRunning || ["preparing", "reviewing", "applying", "amending"].includes(session.status));
+        if (dashboardPatchActionRunning || activeCommand || activePatch) {
+          throw Object.assign(new Error("Wait for the active checkout operation to finish."), { statusCode: 409 });
+        }
+        dashboardPatchActionRunning = true;
+        try {
+          const { graph, graphIndex, result } = await prepareDashboardPatchAction({
+            graphs: serverGraphs, revision: body.revision, action: body.action, runCommand,
+          });
+          if (body.action === "ci-verify") {
+            const session = createGraphTrySession({ graph, graphIndex,
+              snapshotLimit: getRequestLimit(body.snapshotLimit), getSnapshot: getServerGraphSnapshot,
+              options: { selector: "auto", artifact: true, comment: false }, runCommand, postComment });
+            trySessions.set(session.id, session);
+            dashboardTrySessionId = session.id;
+            sendJson(response, 200, { ok: true, ...serializeGraphTrySession(session) });
+          } else {
+            const snapshot = await getServerGraphSnapshot(graph, getRequestLimit(body.snapshotLimit));
+            sendJson(response, 200, { ok: true, ...result, graphIndex, snapshot });
+          }
+        } finally {
+          dashboardPatchActionRunning = false;
+        }
         return;
       }
 
@@ -1291,31 +1735,34 @@ export async function startInteractiveGraphServer({
           graphs: serverGraphs,
         });
 
+        const active = [...patchUpdateSessions.values()].find((entry) =>
+          entry.graph.path === workingCheckout.graph.path &&
+          (entry.freeformOperationRunning || ["preparing", "reviewing", "applying", "amending"].includes(entry.status)));
+        if (active) {
+          if (active.revision === String(body.revision || "").trim().toUpperCase().replace(/^(\d+)$/, "D$1") &&
+              (active.mode || "update") === (["verify", "freeform"].includes(body.mode) ? body.mode : "update") && body.resume !== false) {
+            sendJson(response, 200, { ok: true, ...serializeGraphPatchUpdateSession(active) });
+            return;
+          }
+          const error = new Error("Wait for the active patch operation in the working checkout to finish.");
+          error.statusCode = 409;
+          throw error;
+        }
+
         const session = createGraphPatchUpdateSession({
           graph: workingCheckout.graph,
           graphIndex: workingCheckout.graphIndex,
           revision: body.revision,
+          mode: ["verify", "freeform"].includes(body.mode) ? body.mode : "update",
           aiEnabled: isGraphAiEnabled(appConfig),
           codexCommand: appConfig?.ai?.command,
           snapshotLimit: getRequestLimit(body.snapshotLimit),
         });
 
+        if (await restorePatchSession("update", session, body, response)) return;
+
         patchUpdateSessions.set(session.id, session);
-        void preparePatchUpdateSession({
-          session,
-          graphs: workingCheckout.graphs,
-          getRustUpstreamStatus: () => getServerRustUpstreamStatus({
-            checkout: "working",
-            wait: true,
-          }),
-          getSnapshot: getServerGraphSnapshot,
-          getHandledCommentIds: getPatchUpdateHandledCommentIds,
-          getReview: ({ graph, hash }) => getServerCommitReview(graph, hash),
-          phab,
-          runCommand,
-          saveMemory: savePatchUpdateMemory,
-          snapshotLimit: getRequestLimit(body.snapshotLimit),
-        }).catch(() => {});
+        startPatchUpdatePreparation(session, getRequestLimit(body.snapshotLimit));
         sendJson(response, 200, {
           ok: true,
           ...serializeGraphPatchUpdateSession(session),
@@ -1336,21 +1783,26 @@ export async function startInteractiveGraphServer({
           snapshotLimit: getRequestLimit(body.snapshotLimit),
         });
 
-        for (const activeSession of patchReviewSessions.values()) {
-          if (
-            activeSession.id !== session.id &&
-            activeSession.graph.path === session.graph.path
-          ) {
-            cancelGraphPatchReviewSession({ session: activeSession });
+        const activeReview = [...patchReviewSessions.values()].find(entry =>
+          entry.graph.path === session.graph.path && ["pulling", "reviewing", "posting"].includes(entry.status));
+        if (activeReview) {
+          if (activeReview.revision === session.revision && body.resume !== false) {
+            sendJson(response, 200, { ok: true, ...serializeGraphPatchReviewSession(activeReview) });
+            return;
           }
+          throw Object.assign(new Error("A review is still using this checkout. Minimize it to use the console while it finishes."), { statusCode: 409 });
         }
+
+        if (await restorePatchSession("review", session, body, response)) return;
+
         patchReviewSessions.set(session.id, session);
-        void prepareGraphPatchReviewSession({
+        void preparePatchReviewSession({
           session,
           getSnapshot: getServerGraphSnapshot,
           getReview: ({ graph, hash }) => getServerCommitReview(graph, hash),
+          getRevisionReview: phabWebSession.getReview?.bind(phabWebSession),
           runCommand,
-        }).catch(() => {});
+        }).catch(() => {}).finally(savePatchSessions);
         sendJson(response, 200, {
           ok: true,
           ...serializeGraphPatchReviewSession(session),
@@ -1422,6 +1874,17 @@ export async function startInteractiveGraphServer({
         }
 
         const [, , action] = patchReviewActionMatch;
+        let reviewStatusChange;
+
+        if (action === "apply" && ["pulling", "reviewing", "posting"].includes(session.status)) {
+          throw Object.assign(new Error("Wait for the review agent before applying a source suggestion."), { statusCode: 409 });
+        }
+        if (["apply", "steer"].includes(action)) {
+          const other = [...patchReviewSessions.values()].find(entry => entry.id !== session.id &&
+            entry.graph.path === session.graph.path && ["pulling", "reviewing", "posting"].includes(entry.status));
+          if (other) throw Object.assign(new Error("Wait for the other review in this checkout to finish."), { statusCode: 409 });
+          await assertPatchSessionCheckout(session, runCommand);
+        }
 
         if (action === "cancel") {
           cancelGraphPatchReviewSession({ session });
@@ -1437,23 +1900,10 @@ export async function startInteractiveGraphServer({
             kind: body.kind,
             message: body.message,
             codeSuggestion: body.codeSuggestion,
-            createInlineComment: ({
-              revision,
-              filePath,
-              isNewFile,
-              lineNumber,
-              lineLength,
-              content,
-            }) => phab({
-              route: "differential.createinline",
-              params: {
-                revisionID: Number(String(revision).replace(/^D/i, "")),
-                filePath,
-                isNewFile,
-                lineNumber,
-                lineLength,
-                content,
-              },
+            createInlineComment: (options) => phabWebSession.createInlineComment({
+              ...options,
+              content: options.commentText,
+              isNewFile: true,
             }),
           });
         } else if (action === "skip") {
@@ -1461,6 +1911,7 @@ export async function startInteractiveGraphServer({
         } else if (action === "steer") {
           await steerGraphPatchReviewSession({
             session,
+            runCommand,
             instruction: body.instruction,
           });
         } else {
@@ -1469,12 +1920,29 @@ export async function startInteractiveGraphServer({
             outcome: body.outcome,
             message: body.message,
             postComment,
+            publishReview: phabWebSession.publishRevisionReview?.bind(phabWebSession),
           });
+          if (["accept", "request-changes"].includes(session.reviewOutcome)) {
+            reviewStatusChange = { revision: session.revision,
+              statusName: session.reviewOutcome === "accept" ? "Accepted" : "Needs Revision" };
+            await loadStoredDashboardCache();
+            await dashboardInflight?.catch(() => {});
+            if (dashboardCache) {
+              const result = { ...dashboardCache.result };
+              for (const key of ["directlyAssignedWaitingOnReview", "groupWaitingForFirstReview"]) {
+                result[key] = (result[key] || []).filter(patch => patch.id !== session.revision);
+              }
+              dashboardCache = { ...dashboardCache, result };
+              await saveDashboardCache({ result, now: dashboardCache.checkedAt,
+                username: appConfig?.phabricator?.user });
+            }
+          }
         }
 
         sendJson(response, 200, {
           ok: true,
           ...serializeGraphPatchReviewSession(session),
+          ...(reviewStatusChange ? { reviewStatusChange } : {}),
         });
         return;
       }
@@ -1502,7 +1970,7 @@ export async function startInteractiveGraphServer({
       }
 
       const patchUpdateActionMatch = url.pathname.match(
-        /^\/api\/patch-update\/([^/]+)\/(amend|apply|keep|revert|handled|comment|feedback|steer)$/,
+        /^\/api\/patch-update\/([^/]+)\/(amend|apply|keep|revert|handled|skip|comment|feedback|revise|steer|rollback)$/,
       );
       if (request.method === "POST" && patchUpdateActionMatch) {
         const body = await readRequestJson(request);
@@ -1520,9 +1988,30 @@ export async function startInteractiveGraphServer({
           throw error;
         }
 
+        const otherWriter = [...patchUpdateSessions.values()].find(entry => entry.id !== session.id &&
+          entry.graph.path === session.graph.path && (entry.freeformOperationRunning ||
+            ["preparing", "reviewing", "applying", "amending"].includes(entry.status)));
+        if (otherWriter) throw Object.assign(new Error("Another AI task owns this checkout. Wait for it to finish."), { statusCode: 409 });
         const [, , action] = patchUpdateActionMatch;
 
-        if (action === "amend") {
+        if (["verify", "freeform"].includes(session.mode) && action === "comment") {
+          const error = new Error("This update does not post review comments.");
+          error.statusCode = 409;
+          throw error;
+        }
+        if (session.mode === "freeform" && (session.freeformOperationRunning || !["review", "complete"].includes(session.status))) {
+          const error = new Error("Wait for the current Update operation to finish.");
+          error.statusCode = 409;
+          throw error;
+        }
+        if (action === "rollback") {
+          await rollbackGraphPatchFreeformUpdate({ session, runCommand, saveMemory: savePatchUpdateMemory });
+          session.snapshot = await getServerGraphSnapshot(session.graph, getRequestLimit(body.snapshotLimit));
+        } else if (session.mode === "freeform" && action === "steer") {
+          if (!String(body.instruction || "").trim()) throw new Error("Enter a question or update request.");
+          void runGraphPatchFreeformUpdate({ session, instruction: body.instruction, runCommand,
+            saveMemory: savePatchUpdateMemory }).catch(() => {}).finally(savePatchSessions);
+        } else if (action === "amend") {
           await amendGraphPatchUpdateChanges({
             session,
             runCommand,
@@ -1535,6 +2024,7 @@ export async function startInteractiveGraphServer({
         } else if (action === "steer") {
           await steerGraphPatchUpdateSession({
             session,
+            runCommand,
             instruction: body.instruction,
           });
         } else if (action === "apply") {
@@ -1551,12 +2041,6 @@ export async function startInteractiveGraphServer({
             runCommand,
             saveMemory: savePatchUpdateMemory,
           });
-          await completePatchUpdateComment({
-            event: "Source change amended and review comment marked handled",
-            itemId: body.itemId,
-            session,
-          });
-          session.message = "Source change was amended into the current commit and the review comment was marked handled.";
         } else if (action === "revert") {
           await revertGraphPatchUpdateChange({
             session,
@@ -1587,15 +2071,32 @@ export async function startInteractiveGraphServer({
               runCommand,
               saveMemory: savePatchUpdateMemory,
             });
-            await applyGraphPatchUpdateRecommendedChange({
-              session,
-              runCommand,
-              saveMemory: savePatchUpdateMemory,
-            });
           })().catch(() => {});
+        } else if (action === "revise") {
+          if (!String(body.instruction || "").trim()) {
+            const error = new Error("Enter feedback or an instruction for Codex.");
+
+            error.statusCode = 400;
+            throw error;
+          }
+
+          void reviseGraphPatchUpdateChange({
+            session,
+            itemId: body.itemId,
+            instruction: body.instruction,
+            runCommand,
+            saveMemory: savePatchUpdateMemory,
+          }).catch(() => {});
         } else if (action === "handled") {
           await completePatchUpdateComment({
             itemId: body.itemId,
+            session,
+          });
+        } else if (action === "skip") {
+          await completePatchUpdateComment({
+            event: "Review comment skipped",
+            itemId: body.itemId,
+            state: "skipped",
             session,
           });
         } else {
@@ -1618,7 +2119,7 @@ export async function startInteractiveGraphServer({
             throw error;
           }
 
-          if (item.changeApplied && !item.changeAccepted) {
+          if (item.changeApplied && !item.changeAccepted && !item.changesAmended) {
             const error = new Error(
               "Keep or revert the prepared working-tree change before posting a reply.",
             );
@@ -1653,12 +2154,7 @@ export async function startInteractiveGraphServer({
               itemId: item.id,
               message,
             });
-            await completePatchUpdateComment({
-              event: "Phabricator reply draft saved and review comment marked handled",
-              itemId: item.id,
-              session,
-            });
-            session.message = "Reply draft saved in Phabricator and the review comment was marked handled.";
+            session.message = "Reply draft saved in Phabricator. Mark the reviewer comment done when you are ready.";
           } catch (error) {
             if (!replyPosted) {
               item.draftReply = previousDraftReply;
@@ -1750,9 +2246,20 @@ export async function startInteractiveGraphServer({
           });
 
           clearMetaBoardCache(board.id);
-          const refreshedBoard = await getServerMetaBoard(board, { force: true });
-          const sprint = getSprintData({ board: refreshedBoard, sprintId });
-          const previousSprint = (refreshedBoard.sprints || [])
+          // Creation has succeeded. A follow-up read must not report it as failed.
+          const createdSprint = normalizeSprintMeta({
+            id: sprintId,
+            summary: formatSprintSummary(body.name),
+            deadline: body.deadline,
+            creation_time: new Date().toISOString(),
+            is_open: true,
+            depends_on: [],
+          });
+          const sprint = getSprintData({
+            board: { ...metaBoard, sprints: [...(metaBoard.sprints || []), createdSprint] },
+            sprintId,
+          });
+          const previousSprint = (metaBoard.sprints || [])
             .filter((item) => item.id !== sprintId && item.isOpen)
             .sort((first, second) => (
               String(second.createdAt).localeCompare(String(first.createdAt)) ||
@@ -1867,7 +2374,8 @@ export async function startInteractiveGraphServer({
       const metaBoardBugMatch = url.pathname.match(
         /^\/api\/meta-boards\/([^/]+)\/bugs\/(\d+)$/,
       );
-      if (metaBoardBugMatch) {
+      const standaloneBugMatch = url.pathname.match(/^\/api\/bugs\/(\d+)$/);
+      if (metaBoardBugMatch || standaloneBugMatch) {
         let requestBody;
 
         if (request.method === "GET") {
@@ -1878,10 +2386,8 @@ export async function startInteractiveGraphServer({
           validateToken(requestBody.token, token);
         }
 
-        const board = await getStoredMetaBoard(
-          decodeURIComponent(metaBoardBugMatch[1]),
-        );
-        const bugId = decodeURIComponent(metaBoardBugMatch[2]);
+        const board = metaBoardBugMatch ? await getStoredMetaBoard(decodeURIComponent(metaBoardBugMatch[1])) : null;
+        const bugId = decodeURIComponent(metaBoardBugMatch?.[2] || standaloneBugMatch[1]);
 
         if (request.method === "GET") {
           noteBrowserActivity();
@@ -1899,7 +2405,9 @@ export async function startInteractiveGraphServer({
             changes: requestBody.changes || {},
             updateBug,
           });
-          metaBoardCache.delete(board.id);
+          if (board) metaBoardCache.delete(board.id);
+          else metaBoardCache.clear();
+          dashboardCache = undefined;
           const detail = await getServerMetaBoardBugDetail(bugId);
 
           sendJson(response, 200, { ok: true, ...detail });
@@ -2160,16 +2668,8 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        if (
-          !isWorkingTreeCommitHash(hash) &&
-          hash !== "HEAD" &&
-          !graph.knownHashes.has(hash)
-        ) {
-          sendJson(response, 404, {
-            ok: false,
-            error: "Commit has not been loaded by this graph.",
-          });
-          return;
+        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD") {
+          await ensureGraphCommit(graph, hash, runCommand);
         }
 
         const message = await getGraphCommitMessage({
@@ -2197,16 +2697,8 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        if (
-          !isWorkingTreeCommitHash(hash) &&
-          hash !== "HEAD" &&
-          !graph.knownHashes.has(hash)
-        ) {
-          sendJson(response, 404, {
-            ok: false,
-            error: "Commit has not been loaded by this graph.",
-          });
-          return;
+        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD") {
+          await ensureGraphCommit(graph, hash, runCommand);
         }
 
         const integration = await getServerCommitIntegration(graph, hash);
@@ -2230,16 +2722,8 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        if (
-          !isWorkingTreeCommitHash(hash) &&
-          hash !== "HEAD" &&
-          !graph.knownHashes.has(hash)
-        ) {
-          sendJson(response, 404, {
-            ok: false,
-            error: "Commit has not been loaded by this graph.",
-          });
-          return;
+        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD") {
+          await ensureGraphCommit(graph, hash, runCommand);
         }
 
         const review = await getServerCommitReview(graph, hash);
@@ -2265,16 +2749,8 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        if (
-          !isWorkingTreeCommitHash(hash) &&
-          hash !== "HEAD" &&
-          !graph.knownHashes.has(hash)
-        ) {
-          sendJson(response, 404, {
-            ok: false,
-            error: "Commit has not been loaded by this graph.",
-          });
-          return;
+        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD") {
+          await ensureGraphCommit(graph, hash, runCommand);
         }
 
         const result = await markGraphBugForCheckin({
@@ -2283,6 +2759,7 @@ export async function startInteractiveGraphServer({
           bugId: body.bugId,
           runCommand,
           getBug,
+          getBugzillaRevisions,
           updateBug,
           phab,
           getNotionStoriesByBugId: getServerNotionStoriesByBugId,
@@ -2297,12 +2774,12 @@ export async function startInteractiveGraphServer({
         const graph = serverGraphs[Number(diffMatch[1])];
         const hash = decodeURIComponent(diffMatch[2]);
 
-        if (!graph || (!isWorkingTreeCommitHash(hash) && !graph.knownHashes.has(hash))) {
-          sendJson(response, 404, {
-            ok: false,
-            error: "Commit has not been loaded by this graph.",
-          });
+        if (!graph) {
+          sendJson(response, 404, { ok: false, error: "Unknown graph checkout." });
           return;
+        }
+        if (!isWorkingTreeCommitHash(hash)) {
+          await ensureGraphCommit(graph, hash, runCommand);
         }
 
         const diff = await getCommitDiff({
@@ -2371,13 +2848,7 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        if (!source.knownHashes.has(hash)) {
-          sendJson(response, 404, {
-            ok: false,
-            error: "Commit has not been loaded by this graph.",
-          });
-          return;
-        }
+        await ensureGraphCommit(source, hash, runCommand);
 
         const result = await copyGraphCommitsBetweenCheckouts({
           source,
@@ -2470,6 +2941,51 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      const resolutionMatch = url.pathname.match(/^\/api\/rebase\/([^/]+)\/resolution(?:\/(cancel))?$/);
+      if (request.method === "POST" && resolutionMatch) {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        noteBrowserActivity();
+        const session = rebaseSessions.get(decodeURIComponent(resolutionMatch[1]));
+        if (!session) {
+          sendJson(response, 404, { ok: false, error: "Unknown rebase session." });
+          return;
+        }
+        if (resolutionMatch[2]) {
+          if (session.resolutionBusy || session.continueBusy) {
+            sendJson(response, 409, { ok: false, error: "AI conflict resolution is still running." });
+            return;
+          }
+          await applyRebaseResolution({ session, id: body.resolutionId, runCommand, cancel: true });
+          sendJson(response, 200, { ok: true });
+        } else {
+          if (!isGraphAiEnabled(appConfig)) {
+            throw Object.assign(new Error("Enable AI in the console to resolve conflicts with AI."), { statusCode: 403 });
+          }
+          const streaming = body.stream === true;
+          const sendEvent = event => {
+            if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`);
+          };
+          if (streaming) {
+            response.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" });
+            response.flushHeaders();
+          }
+          try {
+            const resolution = await proposeRebaseResolution({ session, runCommand,
+              codexCommand: appConfig?.ai?.command, generate: generateRebaseResolution,
+              onProgress: streaming ? progress => sendEvent({ type: "progress", ...progress }) : undefined });
+            if (streaming) sendEvent({ type: "result", ok: true, resolution });
+            else sendJson(response, 200, { ok: true, resolution });
+          } catch (error) {
+            if (!streaming) throw error;
+            sendEvent({ type: "result", ok: false, error: String(error?.message || error) });
+          } finally {
+            if (streaming) response.end();
+          }
+        }
+        return;
+      }
+
       const rebaseContinueMatch = url.pathname.match(/^\/api\/rebase\/([^/]+)\/continue$/);
 
       if (request.method === "POST" && rebaseContinueMatch) {
@@ -2488,11 +3004,19 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        const result = await continueRebaseCommit({
-          session,
-          runCommand,
-        });
-        rebaseSessions.delete(sessionId);
+        if (session.continueBusy) {
+          sendJson(response, 409, { ok: false, error: "The rebase is already continuing." });
+          return;
+        }
+        session.continueBusy = true;
+        let result;
+        try {
+          await applyRebaseResolution({ session, id: body.resolutionId, runCommand });
+          result = await continueRebaseCommit({ session, runCommand });
+          rebaseSessions.delete(sessionId);
+        } finally {
+          session.continueBusy = false;
+        }
 
         const snapshot = await getServerGraphSnapshot(
           serverGraphs[Number(session.graphIndex)],
@@ -2555,17 +3079,55 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const result = await runGraphRepositoryUpdate({
-          graphs: serverGraphs,
-          mode: body.mode,
-          dirtyAction: body.dirtyAction,
-          scope: body.scope,
-          graphIndex: body.graphIndex,
-          runCommand,
-        });
-        const snapshots = await getServerGraphSnapshots(body);
-
-        sendJson(response, 200, { ok: true, ...result, snapshots });
+        const streaming = body.stream === true;
+        const sendEvent = (event) => {
+          if (!response.destroyed) {
+            response.write(`${JSON.stringify(event)}\n`);
+          }
+        };
+        if (streaming) {
+          response.writeHead(200, {
+            "content-type": "application/x-ndjson",
+            "cache-control": "no-store",
+          });
+          response.flushHeaders();
+        }
+        try {
+          const result = await runGraphRepositoryUpdate({
+            graphs: serverGraphs,
+            mode: body.mode,
+            dirtyAction: body.dirtyAction,
+            scope: body.scope,
+            graphIndex: body.graphIndex,
+            runCommand,
+            onOutput: streaming ? (output) => sendEvent({ type: "output", output }) : undefined,
+          });
+          if (streaming) {
+            sendEvent({ type: "status", message: "Git update complete. Refreshing tree..." });
+          }
+          const snapshots = await getServerGraphSnapshots(body);
+          const payload = { ok: true, ...result, snapshots };
+          if (streaming) {
+            sendEvent({ type: "result", ...payload });
+            response.end();
+          } else {
+            sendJson(response, 200, payload);
+          }
+        } catch (error) {
+          if (!streaming) {
+            throw error;
+          }
+          const payload = {
+            type: "result",
+            ok: false,
+            error: String(error?.message || error),
+            output: error.output || "",
+            dirty: error.dirty,
+          };
+          attachRebaseConflict(payload, error);
+          sendEvent(payload);
+          response.end();
+        }
         return;
       }
 
@@ -2596,6 +3158,7 @@ export async function startInteractiveGraphServer({
         );
         const session = createGraphMachSession({
           graph,
+          graphs: serverGraphs,
           graphIndex: index,
           action: body.action,
           runCommand,
@@ -3168,6 +3731,17 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/api/amend-try-fixup") {
+        const body = await readRequestJson(request);
+        validateToken(body.token, token);
+        const graph = serverGraphs[Number(body.graphIndex)];
+        await ensureGraphCommit(graph, body.hash, runCommand);
+        const result = await squashTryFixup({ graph, hash: String(body.hash), runCommand });
+        const snapshot = await getServerGraphSnapshot(graph, getRequestLimit(body.snapshotLimit));
+        sendJson(response, 200, { ok: true, ...result, snapshot });
+        return;
+      }
+
       if (
         request.method === "POST" &&
         (url.pathname === "/api/amend-current" ||
@@ -3186,16 +3760,8 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        if (
-          !isWorkingTreeCommitHash(hash) &&
-          hash !== "HEAD" &&
-          !graph.knownHashes.has(hash)
-        ) {
-          sendJson(response, 404, {
-            ok: false,
-            error: "Commit has not been loaded by this graph.",
-          });
-          return;
+        if (!isWorkingTreeCommitHash(hash) && hash !== "HEAD") {
+          await ensureGraphCommit(graph, hash, runCommand);
         }
 
         const result = await amendCommitMessage({
@@ -3245,12 +3811,8 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        if (!graph.knownHashes.has(requestedHash) && requestedHash !== current.hash) {
-          sendJson(response, 404, {
-            ok: false,
-            error: "Commit has not been loaded by this graph.",
-          });
-          return;
+        if (requestedHash !== current.hash) {
+          await ensureGraphCommit(graph, requestedHash, runCommand);
         }
 
         if (await isGraphCommitOnOriginMain({
@@ -3305,15 +3867,28 @@ export async function startInteractiveGraphServer({
             return;
           }
 
-          if (patchUpdateSession.items.some((item) => item.state !== "handled")) {
+          if (patchUpdateSession.mode === "freeform" && (
+            patchUpdateSession.freeformOperationRunning ||
+            !["review", "complete"].includes(patchUpdateSession.status) ||
+            patchUpdateSession.items.some(item => item.changeApplied && !item.changesAmended)
+          )) {
+            sendJson(response, 409, { ok: false, error: "Finish and amend the Update changes before submitting." });
+            return;
+          }
+          if (patchUpdateSession.mode !== "freeform" && patchUpdateSession.items.some((item) => (
+            item.state !== "handled" && item.state !== "skipped"
+          ))) {
             sendJson(response, 409, {
               ok: false,
-              error: "Handle each review comment before submitting the patch.",
+              error: "Mark or skip each review comment before submitting the patch.",
             });
             return;
           }
 
           afterMozPhabSubmit = async () => {
+            patchUpdateSession.status = "complete";
+            patchUpdateSession.message = "Patch submitted to Phabricator.";
+            savePatchSessions();
             await savePatchUpdateMemory({
               event: "Patch submitted to Phabricator",
               session: patchUpdateSession,
@@ -3327,10 +3902,17 @@ export async function startInteractiveGraphServer({
           snapshotLimit: getRequestLimit(body.snapshotLimit),
           getSnapshot: getServerGraphSnapshot,
           runCommand,
-          postComment,
+          postComment: patchUpdateSessionId
+            ? ({ id, message }) => phabWebSession.publishRevisionReview({
+              revision: `D${String(id).replace(/^D/i, "")}`,
+              action: "comment",
+              message,
+            })
+            : postComment,
           afterMozPhabSubmit,
         });
 
+        session.patchUpdateSessionId = patchUpdateSessionId;
         submitSessions.set(session.id, session);
         sendJson(response, 200, {
           ok: true,
@@ -3419,14 +4001,12 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/ping") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        registerBrowserClient(body.clientId);
         sendJson(response, 200, { ok: true, clientId: body.clientId || "" });
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/api/shutdown-events") {
         validateToken(url.searchParams.get("token"), token);
-        registerBrowserClient(url.searchParams.get("clientId") || "");
 
         if (shuttingDown) {
           sendJson(response, 200, {
@@ -3460,20 +4040,10 @@ export async function startInteractiveGraphServer({
         const clientId = body.clientId ? String(body.clientId) : "";
 
         if (clientId) {
-          browserClients.delete(clientId);
-          noteBrowserActivity();
           sendJson(response, 200, {
             ok: true,
-            remainingClients: browserClients.size,
+            remainingClients: 0,
           });
-
-          if (!browserClients.size) {
-            scheduleNoBrowserClientsShutdown(
-              clientDisconnectGraceMs,
-              "all browser tabs closed",
-            );
-          }
-
           return;
         }
 
@@ -3511,7 +4081,6 @@ export async function startInteractiveGraphServer({
     }
   });
   server.shutdown = shutdown;
-  heartbeatTimer.unref?.();
 
   server.on("connection", (socket) => {
     sockets.add(socket);
@@ -3539,22 +4108,77 @@ export async function startInteractiveGraphServer({
     });
   }
 
+  async function closePreviousConsole() {
+    if (host !== "127.0.0.1" && host !== "localhost") {
+      return false;
+    }
+
+    try {
+      const origin = `http://${host}:${Number(port)}`;
+      const page = await fetch(`${origin}/`, { signal: AbortSignal.timeout(3000) });
+      if (!page.ok || !page.headers.get("content-type")?.includes("text/html")) {
+        return false;
+      }
+      const html = await page.text();
+      if (!html.includes("<title>Thunderbird Desktop Console</title>") ||
+          !html.includes("/assets/graph-client/init.js")) {
+        return false;
+      }
+      const configText = html.match(/<script type="application\/json" id="graph-config">([^<]+)<\/script>/)?.[1];
+      const previous = configText && JSON.parse(configText);
+      if (previous?.interactive?.enabled !== true || !previous.interactive.token) {
+        return false;
+      }
+      const response = await fetch(`${origin}/api/close`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: previous.interactive.token }),
+        signal: AbortSignal.timeout(3000),
+      });
+      return response.ok && (await response.json()).ok === true;
+    } catch {
+      return false;
+    }
+  }
+
   try {
     await listen(port);
   } catch (error) {
     if (error?.code !== "EADDRINUSE" || fallbackPort === undefined) {
-      clearInterval(heartbeatTimer);
-      clearNoClientCloseTimer();
       throw error;
     }
-
-    await listen(fallbackPort);
+    let reclaimed = false;
+    if (await closePreviousConsole()) {
+      for (let attempt = 0; attempt < 30; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        try {
+          await listen(port);
+          reclaimed = true;
+          break;
+        } catch (retryError) {
+          if (retryError?.code !== "EADDRINUSE") {
+            throw retryError;
+          }
+        }
+      }
+    }
+    if (!reclaimed) {
+      await listen(fallbackPort);
+    }
   }
 
+  tryMonitor?.start();
+  implementation?.start();
+  void getDefaultKnowledgeService();
   server.once("close", () => {
-    clearInterval(heartbeatTimer);
-    clearNoClientCloseTimer();
-
+    void stopDefaultKnowledgeService().catch(() => {});
+    tryMonitor?.stop();
+    implementation?.stop();
+    savePatchSessions();
+    clearInterval(patchSessionTimer);
+    for (const session of [...patchUpdateSessions.values(), ...patchReviewSessions.values()]) {
+      session.codexAgent?.client.close();
+    }
     if (closeTimer) {
       clearTimeout(closeTimer);
     }

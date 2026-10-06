@@ -1,3 +1,5 @@
+import { openConsoleSettings } from "./settings.js";
+import { initializeBackgroundJobs, showConnectionLost, clearConnectionLost } from "./background-jobs.js";
 import {
   DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS,
   INTERACTIVE,
@@ -140,6 +142,11 @@ import {
 } from "./commit-dialog.js";
 import { initializeDashboard, showDashboard } from "./dashboard.js";
 import {
+  hidePhabricatorCache,
+  initializePhabricatorCache,
+  showPhabricatorCache,
+} from "./phabricator-cache.js";
+import {
   initializePatchUpdateDialog,
   openPatchUpdateDialog,
 } from "./patch-update-dialog.js";
@@ -228,6 +235,8 @@ document.addEventListener("click", (event) => {
     const menuAction = graphMenuCommand.dataset.menuAction;
     closeGraphOptionsMenu();
 
+    if (menuAction === "settings") void openConsoleSettings();
+
     if (menuAction === "build") {
       startGraphMachAction("build");
     }
@@ -238,6 +247,10 @@ document.addEventListener("click", (event) => {
 
     if (menuAction === "phabricator-auth") {
       openPhabricatorAuthDialog();
+    }
+
+    if (menuAction === "phabricator-cache") {
+      showPhabricatorCache();
     }
 
     if (menuAction === "meta-boards-add") {
@@ -304,7 +317,7 @@ document.addEventListener("click", (event) => {
     return;
   }
 
-  const patchUpdateButton = event.target.closest(".patch-update-commit");
+  const patchUpdateButton = event.target.closest(".patch-update-commit, .patch-verify-commit, .patch-freeform-commit");
   if (patchUpdateButton) {
     openPatchUpdateDialog({
       patch: {
@@ -313,6 +326,7 @@ document.addEventListener("click", (event) => {
         url: patchUpdateButton.dataset.url,
       },
       graphIndex: Number(patchUpdateButton.dataset.graphIndex),
+      mode: patchUpdateButton.classList.contains("patch-freeform-commit") ? "freeform" : patchUpdateButton.classList.contains("patch-verify-commit") ? "verify" : "update",
     });
     return;
   }
@@ -723,6 +737,7 @@ export function showTab(index) {
   if (dashboardPanel) {
     dashboardPanel.hidden = true;
   }
+  hidePhabricatorCache();
   hideMetaBoards();
   hideSprints();
   testOutputPanel.hidden = true;
@@ -769,6 +784,7 @@ document.querySelectorAll(".checkout-mode-button").forEach((button) => {
 graphViewTab?.addEventListener("click", () => showTab(lastGraphTabIndex));
 
 initializeDashboard();
+initializePhabricatorCache();
 initializePatchUpdateDialog();
 initializePatchReviewDialog();
 initializeUpdateScopeDialog();
@@ -782,6 +798,11 @@ function applyConsoleRoute() {
 
   if (route?.view === "dashboard") {
     showDashboard({ updateLocation: false });
+    return;
+  }
+
+  if (route?.view === "phabricator-cache") {
+    showPhabricatorCache({ updateLocation: false });
     return;
   }
 
@@ -853,7 +874,6 @@ if (INTERACTIVE.enabled) {
   }
 
   function clearInteractiveTimers() {
-    clearInterval(heartbeat);
     clearInterval(graphPoll);
     clearInterval(originMainStatusPoll);
     if (uiState.machPollTimer) {
@@ -906,15 +926,6 @@ if (INTERACTIVE.enabled) {
     });
   }
 
-  function sendHeartbeat() {
-    return fetch("/api/ping", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: getClientPayload(),
-      keepalive: true,
-    }).catch(() => {});
-  }
-
   function showServerStopped(reason = "") {
     document.title = "Thunderbird Desktop Console stopped";
     document.body.classList.add("server-stopped");
@@ -942,8 +953,10 @@ if (INTERACTIVE.enabled) {
         const result = await response.json();
 
         if (!response.ok) {
+          showConnectionLost();
           return;
         }
+        clearConnectionLost();
 
         if (!result.closing) {
           continue;
@@ -960,19 +973,18 @@ if (INTERACTIVE.enabled) {
         }
         return;
       } catch {
-        return;
+        showConnectionLost();
+        await new Promise(resolve => window.setTimeout(resolve, 2000));
       }
     }
   }
 
-  const heartbeat = setInterval(sendHeartbeat, 2000);
   const graphPoll = setInterval(pollGraphUpdates, INTERACTIVE.pollIntervalMs);
   const originMainStatusPoll = setInterval(
     refreshOriginMainStatus,
     Math.max(INTERACTIVE.pollIntervalMs, DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS),
   );
 
-  sendHeartbeat();
   refreshOriginMainStatus();
   listenForServerShutdown();
 
@@ -988,3 +1000,5 @@ if (INTERACTIVE.enabled) {
 
 restoreGraphPaneWidth(0);
 renderGraph(0);
+
+initializeBackgroundJobs();

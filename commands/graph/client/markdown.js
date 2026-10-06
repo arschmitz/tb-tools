@@ -157,10 +157,15 @@ function appendList(container, lines, index) {
     }
 
     const element = document.createElement("li");
+    const content = [item.content];
 
-    appendInlineMarkdown(element, item.content);
-    list.append(element);
     index += 1;
+    while (index < lines.length && !isBlockStart(lines, index)) {
+      content.push(lines[index].trim());
+      index += 1;
+    }
+    appendInlineMarkdown(element, content.join(" "));
+    list.append(element);
   }
 
   container.append(list);

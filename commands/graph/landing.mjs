@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getAttachments as defaultGetAttachments, getBugs as defaultGetBugs, updateBug as defaultUpdateBug } from "../../lib/bugzilla.mjs";
 import { DEFAULT_BRANCH } from "../../lib/git.mjs";
+import { getRepositoryMilestone } from "../../lib/milestone.mjs";
 import {
   DEFAULT_LANDO_REPO,
   pushCommits as defaultPushCommits,
@@ -1388,9 +1389,7 @@ async function updateLandingMilestones(session) {
     return;
   }
 
-  const version = await readFile(path.join(session.graph.path, "mail", "config", "version.txt"), { encoding: "utf8" });
-  const simpleVersion = version.split(".")[0];
-  const defaultMilestone = `${simpleVersion} Branch`;
+  const defaultMilestone = await getRepositoryMilestone(session.graph.path);
 
   for (const bug of bugsNeedingMilestone) {
     const milestone = await askLandingInput(

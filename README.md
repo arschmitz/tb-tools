@@ -57,7 +57,12 @@ Use the console to:
 - authenticate with Phabricator from the menu to display native inline code suggestions alongside reviewed diffs, including suggestions that also have prose comments
 - create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, blocking-review toggles, and a durable `TB-Tools-Id` trailer for console metadata
 - checkout, rebase, interactively reorder/squash/fixup/drop local commit ranges, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit
+- keep console AI chats in the **TB Console** sidebar section. Each successful AI turn is archived after its result is saved by Codex; failed and interrupted turns stay visible. The console keeps its results and automatically restores the same chat when you resume or send a follow-up. Archiving does not delete conversation history
+- use **Update** for a freeform conversation about your patch. It loads the newest local patch and review history in the Working checkout, shows the current patch or pending changes beside the conversation, and lets you request more edits, amend, submit, or roll back the local patch to the start of the session. It has its own saved chat and does not post review comments
+- use **Verify** beside **Review Update** on patch cards and selected commits. Verify reviews your newest local copy (by Git commit time) in the Working comm checkout, with the same defect and accessibility checks as Review plus CodeRabbit. Address findings one at a time, preview each change, amend or revert it, then submit. Verify does not post review comments. Review Update handles reviewer feedback. Each flow has its own saved session
 - copy a selected commit or local stack between the Working and Review clone pairs on a new destination branch, with an atomic rollback if cherry-picking fails
+- use artifact builds and `build faster` for frontend-only comm changes; use a normal build for native or Firefox changes
+- reuse matching console binary snapshots from either checkout and the shared mach download cache; keep each checkout’s object directory separate
 - destructively replace the complete Review pair with the Working Git history and copy Firefox build artifacts for a fast review build
 - choose whether Pull or Rebase acts on the selected clone pair or both pairs; build/run, lint, test, pull patch, and try follow the selected comm tab
 - pull both repositories, rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches
@@ -67,6 +72,8 @@ Use the console to:
 - watch command progress in a slim status bar with elapsed time, cancellable running work, and toggleable output
 - monitor comm and Firefox `origin/main` freshness plus Rust dependency sync warnings before remote-build workflows like try and submit
 - close console browser tabs automatically when the local console process exits, with an opt-out for keeping tabs open
+
+AI tasks use automatic local knowledge capture and bounded retrieval. See [Console knowledge](docs/knowledge.md) for learning budgets, private records, Git sync, and inspection commands.
 
 ![Thunderbird Desktop Console showing a selected commit, integration badges, and a GitHub-style diff](/images/console-overview.png)
 
@@ -246,7 +253,7 @@ tb console
 |--firefox||Include the Firefox parent checkout tab|true|`tb console --firefox=false`
 |--maxDiffBytes||Maximum server-loaded diff bytes per commit|200000|`tb console --maxDiffBytes=200000`
 |--pageSize||Commit page size for infinite loading|80|`tb console --pageSize=80`
-|--port||Localhost port. Defaults to 4310 and falls back to a random free port when busy. Use 0 for a random free port|4310|`tb console --port=4310`
+|--port||Localhost port. Defaults to 4310 and closes an earlier console on that port. Uses a random free port if another service owns it. Use 0 for a random free port|4310|`tb console --port=4310`
 
 <br/><br/>
 ### build-rebase
@@ -507,7 +514,7 @@ tb submit
 |--query|-q|fuzzy selector query||`tb submit --query=<value>`
 |--tasks-regex|-t|auto selector task regex||`tb submit --tasks-regex=<value>`
 |--preset||mach try preset to load||`tb submit --preset=<value>`
-|--artifact||force artifact builds where possible|true|`tb submit --artifact=false`
+|--artifact||force artifact builds where possible|false|`tb submit --artifact`
 |--comment|-c|Post try link as comment to phab revision|false|`tb submit --comment`
 
 <br/><br/>
@@ -601,3 +608,128 @@ tb update
                                                ..::::::..
 
 ```
+
+### Minimize AI tasks
+
+Use **Minimize** in Update, Review Update, Verify, Review, conflict resolution,
+or Submit to use the console while the task continues. The task tray shows
+**Thinking**, **Working**, **Waiting for input**, or **Complete**. Click a task
+to reopen its existing session. Draft input is kept when switching tasks, and
+the tray restores tracked sessions after a page reload. Collapse the tray when
+it covers other controls. Completed tasks can be dismissed. In Review, **Close**
+or Escape cancels the active review and removes it from the tray. Use **Minimize**
+to keep the review running.
+
+Allow browser notifications to receive a system notification when a task changes
+state. Clicking it focuses the console tab and opens that task. Notifications
+require an open console tab and browser permission. If permission is blocked or
+unsupported, the tray still shows task status. Multiple console tabs share
+notification state to avoid duplicate alerts.
+
+Successful final review actions, such as **Accept**, **Request Changes**, and
+**Post Comment**, close their dialog. Confirming **Submit Patch** closes the AI
+dialog when submission starts; its Submit dialog closes on success. Errors keep
+the relevant dialog open. Minimizing never cancels a task. Tasks that need the
+same checkout still run one at a time to protect their source changes.
+
+### Implement assigned bugs
+
+With `ai.enabled` enabled, assigned bugs without patches have an **Implement**
+button. It opens an AI dialog where you choose the latest `main` or the current
+commit as the base and add instructions. The console
+requires a clean working comm checkout, marks the bug `ASSIGNED`, and creates a
+`Bug-<number>` branch. It reads all bug details and comments and asks the agent to
+inspect related project history, plans, instructions, and source conventions.
+
+Use **Settings** in the More actions menu to choose the AI model and reasoning
+level for each task type. Choices are saved in `~/.tb-tools/ai-settings.json` and
+apply to the next turn, including resumed work. Defaults use `gpt-6-sol`; reviews
+and repairs use high reasoning, and other work uses medium reasoning. Unavailable
+models or reasoning levels require a settings change; there is no silent fallback.
+
+The implementation and verification agents use separate saved chats.
+They must provide evidence for acceptance criteria, applicable tests, and
+accessibility. Verification uses the normal Verify checks, including CodeRabbit.
+Findings go back to the implementation agent, and agreed changes amend the same
+commit. Blocked checks and unresolved findings stop the workflow with saved
+reports and a **Retry** action.
+
+After verification, Implement posts a full-build Try through the normal monitor.
+When no patch-caused failures remain, it automatically folds any Try fixup into
+the implementation commit. Other Try workflows still use the manual **Amend**
+button. Implement saves its stages and both conversations under
+`~/.tb-tools/implementations/`; the server resumes unfinished work after restart.
+The dialog shows progress, reports, and styled working and committed diffs. Send
+live feedback while the agents implement or verify. Feedback reaches the active
+agent and is checked again before committing or posting Try. After Try submission
+starts, the dialog shows monitor progress. Minimize the dialog and reopen it from
+the AI task tray or the bug card button; unsent feedback stays in the dialog.
+The dashboard has no inline implementation reports or run list.
+Use **Cancel implementation** in the dialog to stop an active or blocked run.
+Cancellation waits for the active operation to stop before releasing the checkout.
+Use **Dismiss** to remove a finished or blocked task from the task tray. Dismissing
+a blocked task also cancels it. Saved history and source changes remain.
+Other checkout actions wait until the
+workflow finishes or cancellation completes. Cancellation keeps
+the branch and local changes. If a Try already exists, its normal monitor keeps
+running after cancellation, but Implement no longer amends its fixes.
+
+### Automatic Try checks and fixes
+
+The console checks pending Try status once a minute while its server runs. Status reads do not call AI. Completed failures enter AI assessment; unresolved evidence uses a separate retry delay of up to 30 minutes.
+Older saved runs remain in Try history, but do not start automatic checks or AI
+assessments. Previously imported historical runs are paused on startup.
+Status polling does not call AI for pending, passing, or older attempts. Only the
+latest completed, failed attempt for a patch can start diagnosis or repair.
+Unresolved evidence and assessment errors may retry that same failed attempt.
+Retries resume its saved conversation rather than starting a new investigation.
+Four independent workflows may run at once.
+`tb try`, the console Try action, and Try runs posted during Submit save a
+monitor record before pushing. The record includes the exact comm and Gecko
+commits, task selection, submission marker, next check time, and Try history.
+The records live in `~/.tb-tools/try-monitor/`. Restarting the server resumes due
+checks and interrupted work. Closing a browser tab does not stop the worker.
+Checks wait while the server is stopped.
+
+A run passes when its scheduled jobs finish and no failure is caused by the
+patch or its fixup. The worker collects comparison evidence from recent comm-central and Try pushes,
+including runs from the same author and other authors. AI also checks the source, platform, build settings,
+and artifact revisions. Missing or uncertain evidence keeps a run pending.
+The graph shows the result, check times, evidence, errors, and older Try links.
+A Try for an earlier version of a patch is shown as stale.
+
+Diagnosis and repair use separate comm and Gecko Git worktrees for each workflow
+under the monitor directory. The worker creates one `fixup! <parent subject>`
+commit, then amends that commit for later repairs. Its body explains the full
+set of failure causes, file changes, checks, and validation limits. Each repair
+gets another Try with the saved task selection. The worker repeats until no
+patch-caused failures remain. The configured Codex CLI and normal `mach try`
+authentication must be available. Source and test logs are treated as evidence,
+not as instructions to the AI.
+
+Fixups appear in the graph with the same row style as uncommitted changes. Their
+**Amend** button folds the fixup into its parent and replays descendant branches,
+including forks and aliases. It requires a clean working checkout. Conflicting
+replays leave branches unchanged. Branch updates and interrupted Amend work have
+saved recovery records.
+
+The worker saves push output as it arrives and uses a unique marker to recover
+a submitted run after a crash. If it cannot prove whether a push succeeded, it
+keeps checking instead of posting a duplicate. Network or AI errors are saved
+and retried. A new manual Try supersedes the older automatic repair loop for the
+same patch. Older saved Try links remain history only; post a new Try
+to enable automatic repair when the old record lacks the original task selection.
+Try runs that include uncommitted changes also need a new run after those changes
+are committed before automatic repair can start.
+
+### AI context and checkout ownership
+
+Large evidence and history stay in local files instead of being copied into each
+AI message. Small indexes point to individual jobs, logs, and prior findings.
+Complete evidence remains available. This reduces repeated input; it does not
+replace required review coverage or tests. See [the AI usage audit](AI_USAGE_AUDIT.md).
+
+Review uses its own checkout queue, including follow-up turns. Update and Implement
+reserve the working checkout while active. A busy Codex writer causes an error;
+it does not start a second writer in a new chat. Try diagnosis and repair use
+per-workflow checkouts and saved conversations. Separate checkouts can run at once.

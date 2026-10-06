@@ -110,7 +110,11 @@ function appendReviewCodeSuggestion(container, suggestion) {
   label.textContent = "Code suggestion";
   section.append(label);
 
-  if (suggestion.content) {
+  if (suggestion.isDeletion) {
+    const description = document.createElement("p");
+    description.textContent = "Delete the marked lines.";
+    section.append(description);
+  } else if (suggestion.content) {
     appendReviewCodeBlock(section, {
       content: suggestion.content,
       isSuggestion: true,
@@ -179,8 +183,10 @@ function reviewPathsMatch(firstPath, secondPath) {
   return [...firstVariants].some((path) => secondVariants.has(path));
 }
 
-export function findReviewLine(body, inlineComment) {
-  const lineKeys = inlineComment.contextLineSide === "old"
+export function findReviewLine(body, inlineComment, { newSideOnly = false } = {}) {
+  const lineKeys = newSideOnly
+    ? ["newLine"]
+    : inlineComment.contextLineSide === "old"
     ? ["oldLine"]
     : inlineComment.contextLineSide === "new"
       ? ["newLine"]

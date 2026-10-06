@@ -1,3 +1,4 @@
+import { setLiveText, hasSelectedText } from "./live-text.js";
 import {
   INTERACTIVE,
   landChoiceList,
@@ -425,8 +426,8 @@ export function renderGraphLandSession(session) {
 
   landStatus.textContent = getLandSessionStatusText(session);
   landStatus.classList.toggle("error", session.status === "error");
-  landOutput.textContent = session.output || "";
-  landOutput.scrollTop = landOutput.scrollHeight;
+  setLiveText(landOutput, session.output || "");
+  if (!hasSelectedText(landOutput)) landOutput.scrollTop = landOutput.scrollHeight;
   renderLandPrompt(session.prompt, session.links || []);
   setLandDialogBusy(active);
 

@@ -1,3 +1,5 @@
+import { setLiveText, hasSelectedText } from "./live-text.js";
+import { registerAiTaskDialog } from "./ai-task-tray.js";
 import {
   INTERACTIVE,
   PHABRICATOR_REVISION_URL,
@@ -46,7 +48,7 @@ import {
 } from "./command-sessions.js";
 import { showSystemConfirmation } from "./system-dialog.js";
 import {
-  closeRebaseDialog,
+  finishRebaseDialog,
   openRebaseFailureDialog,
   setRebaseDialogBusy,
   setRebaseDialogError,
@@ -131,6 +133,8 @@ export async function showDiff(
   const amendButton = viewer.querySelector(".amend-commit");
   const submitButton = viewer.querySelector(".submit-commit");
   const patchUpdateButton = viewer.querySelector(".patch-update-commit");
+  const patchVerifyButton = viewer.querySelector(".patch-verify-commit");
+  const patchFreeformButton = viewer.querySelector(".patch-freeform-commit");
   const loadReviewButton = viewer.querySelector(".load-commit-review");
   const checkoutStatus = viewer.querySelector(".checkout-status");
   const diff = graph.diffs && graph.diffs[commit.hash];
@@ -149,7 +153,8 @@ export async function showDiff(
   checkoutButton.dataset.label = graph.label;
   amendButton.hidden = !INTERACTIVE.enabled;
   amendButton.disabled = false;
-  amendButton.textContent = isWorkingTreeCommit(commit) ? "Amend" : "Amend Message";
+  amendButton.textContent = isWorkingTreeCommit(commit) || commit.tryFixup ? "Amend" : "Amend Message";
+  amendButton.dataset.tryFixup = String(Boolean(commit.tryFixup));
   amendButton.dataset.graphIndex = String(index);
   amendButton.dataset.hash = commit.hash;
   amendButton.dataset.label = graph.label;
@@ -162,8 +167,8 @@ export async function showDiff(
   submitButton.dataset.hash = commit.hash;
   submitButton.dataset.label = graph.label;
   submitButton.dataset.isCurrent = String(isCurrentCommit(commit));
-  if (patchUpdateButton) {
-    configurePatchUpdateButton(patchUpdateButton, {
+  for (const button of [patchUpdateButton, patchVerifyButton, patchFreeformButton]) {
+    configurePatchUpdateButton(button, {
       graph,
       index,
       commit,
@@ -188,12 +193,9 @@ export async function showDiff(
         return;
       }
 
-      configurePatchUpdateButton(patchUpdateButton, {
-        graph,
-        index,
-        commit,
-        message,
-      });
+      for (const button of [patchUpdateButton, patchVerifyButton, patchFreeformButton]) {
+        configurePatchUpdateButton(button, { graph, index, commit, message });
+      }
 
       if (
         loadCurrentIntegration &&
@@ -465,6 +467,7 @@ export async function continueRebaseDialog() {
         body: JSON.stringify({
           token: INTERACTIVE.token,
           snapshotLimit: getLoadedGitCommitLimit(graphStates[graphIndex]),
+          resolutionId: dialogState.resolutionId,
         }),
       }
     );
@@ -494,7 +497,7 @@ export async function continueRebaseDialog() {
       await refreshGraphFromServer(graphIndex, { force: true });
     }
 
-    closeRebaseDialog();
+    finishRebaseDialog();
     selectCommitActionResult(graphIndex, result.currentHash, result.message);
   } catch (error) {
     setRebaseDialogError(error && error.message ? error.message : String(error));
@@ -533,6 +536,19 @@ export async function openAmendDialog(button) {
   status.textContent = "Loading commit message...";
 
   try {
+    if (button.dataset.tryFixup === "true") {
+      status.textContent = "Amending the patch with its Try fixup...";
+      const response = await fetch("/api/amend-try-fixup", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: INTERACTIVE.token, graphIndex, hash,
+          snapshotLimit: getLoadedGitCommitLimit(graphStates[graphIndex]) }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || response.statusText);
+      applyGraphSnapshot(graphIndex, result.snapshot);
+      status.textContent = result.message;
+      return;
+    }
     const response = await fetch(
       "/api/graph/" + graphIndex + "/message/" + encodeURIComponent(hash) +
         "?token=" + encodeURIComponent(INTERACTIVE.token)
@@ -661,8 +677,22 @@ export function setSubmitLinkNodes(links) {
   submitLinks.hidden = false;
 }
 
-export function renderSubmitSession(session) {
+const submitTask = registerAiTaskDialog({ kind: "submit", dialog: submitDialog,
+  title: value => `Submit ${value.graphIndex === undefined ? "patch" : "patch in " + (graphStates[value.graphIndex]?.graph.label || "comm")}`,
+  endpoint: value => `/api/submit/${encodeURIComponent(value.id)}`,
+  onUpdate: renderSubmitSession,
+  restore(value) {
+    uiState.submitDialogState = { graphIndex: value.graphIndex, sessionId: value.id, promptId: "", status: value.status,
+      patchUpdateSessionId: value.patchUpdateSessionId || "" };
+    renderSubmitSession(value, { autoClose: false });
+    if (!submitDialog.open) submitDialog.showModal();
+    if (isActiveSubmitSession(value)) scheduleSubmitSessionPoll();
+  },
+});
+
+export function renderSubmitSession(session, { autoClose = true } = {}) {
   const active = isActiveSubmitSession(session);
+  submitTask.update(session);
 
   if (uiState.submitDialogState) {
     uiState.submitDialogState.status = session.status;
@@ -673,8 +703,8 @@ export function renderSubmitSession(session) {
   submitClose.disabled = active;
   submitCancel.hidden = !active;
   submitCancel.disabled = false;
-  submitOutput.textContent = session.output || "";
-  submitOutput.scrollTop = submitOutput.scrollHeight;
+  setLiveText(submitOutput, session.output || "");
+  if (!hasSelectedText(submitOutput)) submitOutput.scrollTop = submitOutput.scrollHeight;
 
   if (session.prompt) {
     submitPrompt.hidden = false;
@@ -692,6 +722,7 @@ export function renderSubmitSession(session) {
     uiState.submitDialogState.appliedSnapshot = true;
     applyGraphSnapshot(uiState.submitDialogState.graphIndex, session.snapshot, { force: true });
   }
+  if (autoClose && session.status === "complete" && uiState.submitDialogState?.patchUpdateSessionId) closeSubmitDialog();
 }
 
 export async function pollSubmitSession() {
@@ -700,6 +731,7 @@ export async function pollSubmitSession() {
   }
 
   uiState.submitPollTimer = null;
+  const requestedId = uiState.submitDialogState.sessionId;
 
   try {
     const response = await fetch(
@@ -712,18 +744,20 @@ export async function pollSubmitSession() {
       throw new Error(result.error || response.statusText);
     }
 
+    if (uiState.submitDialogState?.sessionId !== requestedId) { submitTask.background(result); return; }
     renderSubmitSession(result);
 
     if (isActiveSubmitSession(result)) {
       scheduleSubmitSessionPoll();
     }
   } catch (error) {
+    if (uiState.submitDialogState?.sessionId !== requestedId) return;
     submitStatus.classList.add("error");
     submitStatus.textContent = error && error.message ? error.message : String(error);
   }
 }
 
-export async function openSubmitDialog(button, { patchUpdateSessionId = "" } = {}) {
+export async function openSubmitDialog(button, { patchUpdateSessionId = "", onStarted } = {}) {
   const graphIndex = Number(button.dataset.graphIndex);
   const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
   const isCurrent = button.dataset.isCurrent === "true";
@@ -766,12 +800,14 @@ export async function openSubmitDialog(button, { patchUpdateSessionId = "" } = {
     }
 
     uiState.submitDialogState = {
+      patchUpdateSessionId,
       graphIndex,
       sessionId: result.id,
       promptId: "",
       appliedSnapshot: false,
       status: result.status,
     };
+    onStarted?.();
     submitTitle.textContent = "Submit " + button.dataset.label + " " + commitLabel;
     submitPrompt.hidden = true;
     submitQuestion.textContent = "";
@@ -780,7 +816,7 @@ export async function openSubmitDialog(button, { patchUpdateSessionId = "" } = {
     submitOutput.textContent = "";
     renderSubmitSession(result);
     status.textContent = "";
-    submitDialog.showModal();
+    if (result.status !== "complete" || !patchUpdateSessionId) submitDialog.showModal();
     pollSubmitSession();
   } catch (error) {
     status.classList.add("error");

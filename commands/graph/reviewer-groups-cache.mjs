@@ -1,8 +1,11 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export const REVIEWER_GROUP_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export async function clearReviewerGroupCache({ cachePath } = {}) {
+  const resolvedPath = getCachePath(cachePath);
+  if (resolvedPath) await rm(resolvedPath, { force: true });
+}
 
 function getCachePath(cachePath) {
   if (cachePath) {
@@ -64,7 +67,7 @@ function normalizeAssignees(assignees = []) {
     .filter((assignee) => assignee.email);
 }
 
-function normalizeEntry(entry, now) {
+function normalizeEntry(entry) {
   const currentUser = normalizeCurrentUser(entry?.currentUser);
   const checkedAt = Number(entry?.checkedAt || 0);
 
@@ -76,7 +79,7 @@ function normalizeEntry(entry, now) {
     checkedAt,
     currentUser,
     groups: normalizeGroups(entry.groups),
-    fresh: now - checkedAt < REVIEWER_GROUP_CACHE_TTL_MS,
+    fresh: true,
   };
 }
 
@@ -98,7 +101,6 @@ function normalizeAssigneeEntry(entry) {
 
 export async function loadReviewerGroupCache({
   cachePath,
-  now = Date.now(),
   username,
 } = {}) {
   const resolvedPath = getCachePath(cachePath);
@@ -112,7 +114,7 @@ export async function loadReviewerGroupCache({
     const contents = await readFile(resolvedPath, "utf8");
     const store = JSON.parse(contents);
 
-    return normalizeEntry(store?.entries?.[key], now);
+    return normalizeEntry(store?.entries?.[key]);
   } catch {
     return null;
   }

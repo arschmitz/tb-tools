@@ -33,6 +33,7 @@ import fs from "fs";
 import path from "path";
 import graphCommand from './commands/graph.mjs';
 import consoleCommand from './commands/console.mjs';
+import knowledgeCommand from './commands/knowledge.mjs';
 
 
 const mainDefinitions = [
@@ -42,6 +43,10 @@ const { command, _unknown } = args(mainDefinitions, { stopAtFirstUnknown: true }
 const argv = _unknown || [];
 
 const commands = {
+  knowledge: {
+    description: "Inspect local AI knowledge. Use status, search, show, import, maintain, sync, or index. See docs/knowledge.md.",
+    run: () => knowledgeCommand(argv),
+  },
   "version": {
     description: false,
     run: async () => {
@@ -156,7 +161,7 @@ const commands = {
       { name: "firefox", description: "Include the Firefox parent checkout tab", defaultValue: "true" },
       { name: "maxDiffBytes", description: "Maximum server-loaded diff bytes per commit", defaultValue: "200000" },
       { name: "pageSize", description: "Commit page size for infinite loading", defaultValue: "80" },
-      { name: "port", description: "Localhost port. Defaults to 4310 and falls back to a random free port when busy. Use 0 for a random free port", defaultValue: "4310" },
+      { name: "port", description: "Localhost port. Defaults to 4310 and closes an earlier console on that port. Uses a random free port if another service owns it. Use 0 for a random free port", defaultValue: "4310" },
     ],
     async run () {
       const options = mapBooleanOptions(args(commands.console.options, { argv }));
@@ -435,7 +440,13 @@ Optionally:
 };
 
 commands.rebase.options = commands.update.options;
-commands.submit.options = [...commands.submit.options, ...commands.test.options, ...commands.try.options];
+commands.submit.options = [
+  ...commands.submit.options,
+  ...commands.test.options,
+  ...commands.try.options.map((option) => (
+    option.name === "artifact" ? { ...option, defaultValue: "false" } : option
+  )),
+];
 
 const optionList = [];
 const subOptions = {};
@@ -480,7 +491,7 @@ Object.entries(commands).forEach(([name, { description, header, options }]) => {
   sections.push({ header, content: getUsageOptions(options) });
 });
 
-if (command && !["help", "readme"].includes(command)) {
+if (command && !["help", "readme", "knowledge"].includes(command)) {
   checkDir();
 }
 

@@ -6,6 +6,10 @@ export function formatConsoleRoute(route) {
     return "#dashboard";
   }
 
+  if (route?.view === "phabricator-cache") {
+    return "#phabricator-cache";
+  }
+
   if (route?.view === "meta-boards") {
     return route.boardId
       ? `#meta-boards/${encodeURIComponent(route.boardId)}`
@@ -24,6 +28,10 @@ export function formatConsoleRoute(route) {
 export function parseConsoleRoute(hash = "") {
   if (hash === "#dashboard") {
     return { view: "dashboard" };
+  }
+
+  if (hash === "#phabricator-cache") {
+    return { view: "phabricator-cache" };
   }
 
   const match = hash.match(META_BOARDS_ROUTE);

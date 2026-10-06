@@ -12,8 +12,7 @@ import { getBugs, getAttachments, updateBug } from "../lib/bugzilla.mjs";
 import update from "./update.mjs";
 import bump from "./bump.mjs";
 import lint from "./lint.mjs";
-import fs from "fs";
-import path from "path";
+import { getRepositoryMilestone } from "../lib/milestone.mjs";
 const landed = [];
 const LANDING_PHABRICATOR_QUERY_BATCH_SIZE = 100;
 const LANDING_PATCH_DISCOVERY_EXCLUDED_BUG_IDS = new Set([
@@ -222,9 +221,7 @@ export default async function (options = {}) {
     throw new Error("Landing rolled back.");
   }
 
-  const version = fs.readFileSync(path.join(".", "mail", "config", "version.txt"), { encoding: "utf-8" });
-  const simpleVersion = version.split(".")[0];
-  const mileStone = `${simpleVersion} Branch`;
+  const mileStone = await getRepositoryMilestone(".");
 
   for(const bug of landed) {
     const updates = {};

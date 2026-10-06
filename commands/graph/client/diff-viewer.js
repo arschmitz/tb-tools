@@ -5,7 +5,7 @@ import {
   PHABRICATOR_REVISION_URL,
   graphStates,
 } from "./config.js";
-import { isWorkingTreeCommit } from "./commit-model.js";
+import { getTryPillState, isWorkingTreeCommit } from "./commit-model.js";
 import { updateCommitRowStates } from "./lane-renderer.js";
 import { showDiff } from "./commit-actions.js";
 import { showSystemConfirmation } from "./system-dialog.js";
@@ -61,6 +61,8 @@ export function clearDiffSelection(index, message = "Select a commit in the grap
   viewer.querySelector(".amend-commit").hidden = true;
   viewer.querySelector(".submit-commit").hidden = true;
   viewer.querySelector(".patch-update-commit")?.setAttribute("hidden", "");
+  viewer.querySelector(".patch-verify-commit")?.setAttribute("hidden", "");
+  viewer.querySelector(".patch-freeform-commit")?.setAttribute("hidden", "");
   clearIntegrationStatus(viewer.querySelector(".integration-status"));
   viewer.querySelector(".checkout-status").textContent = "";
   setDiffStats(viewer.querySelector(".diff-stats"), null);
@@ -273,17 +275,41 @@ export function formatTryRunDate(value) {
 }
 
 export function createTryRunBadge(tryRun, label) {
-  return createStatusBadge({
-    label,
+  const { status, activity, color, icon: symbol } = getTryPillState(tryRun);
+  const badge = createStatusBadge({
+    label: label + " Status:",
     url: tryRun.url,
-    status: formatTryRunDate(tryRun.createdAt),
-    detail: tryRun.subject || "",
-    className: "try",
+    status,
+    className: "try try-" + color,
   });
+  const icon = document.createElement("span");
+  icon.className = "try-status-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = symbol;
+  badge.prepend(icon);
+  const metadata = [activity ? "[" + activity + "]" : "", formatTryRunDate(tryRun.createdAt)].filter(Boolean);
+  if (metadata.length) {
+    const meta = document.createElement("span");
+    meta.className = "try-activity";
+    meta.textContent = "- " + metadata.join(" - ");
+    badge.append(meta);
+  }
+  const notes = [label + " Status: " + status, ...metadata];
+  if (tryRun.status === "build-blocked") notes.push("No build completed successfully. This run did not validate the patch.");
+  if (tryRun.status === "failed-unclassified") notes.push("CI finished with failures. The cause has not been established; this is not an AI patch verdict.");
+  if (tryRun.stale) notes.push("This run tested an earlier version of this patch.");
+  if (tryRun.subject) notes.push(tryRun.subject);
+  if (notes.length) badge.title = notes.join(" ");
+  return badge;
 }
 
-export function createTryRunStatus(tryRuns = []) {
-  const runs = Array.isArray(tryRuns) ? tryRuns.filter((tryRun) => tryRun && tryRun.url) : [];
+const expandedTryHistory = new Map();
+
+export function createTryRunStatus(tryRuns = [], { expanded = false, onExpandedChange } = {}) {
+  const runs = Array.isArray(tryRuns)
+    ? tryRuns.filter((tryRun) => tryRun && tryRun.url).sort((a, b) =>
+      (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0))
+    : [];
 
   if (!runs.length) {
     return null;
@@ -301,18 +327,19 @@ export function createTryRunStatus(tryRuns = []) {
 
     toggle.className = "try-run-toggle";
     toggle.type = "button";
-    toggle.textContent = ">";
-    toggle.setAttribute("aria-label", "Show older try runs");
-    toggle.setAttribute("aria-expanded", "false");
+    toggle.textContent = expanded ? "v" : ">";
+    toggle.setAttribute("aria-label", expanded ? "Hide older try runs" : "Show older try runs");
+    toggle.setAttribute("aria-expanded", String(expanded));
 
     history.className = "try-run-history";
-    history.hidden = true;
+    history.hidden = !expanded;
     runs.slice(1).forEach((tryRun, index) => {
       history.append(createTryRunBadge(tryRun, "Try " + (index + 2)));
     });
 
     toggle.addEventListener("click", () => {
       history.hidden = !history.hidden;
+      onExpandedChange?.(!history.hidden);
       toggle.textContent = history.hidden ? ">" : "v";
       toggle.setAttribute("aria-expanded", history.hidden ? "false" : "true");
       toggle.setAttribute("aria-label", history.hidden ? "Show older try runs" : "Hide older try runs");
@@ -330,25 +357,14 @@ export function createTryRunStatus(tryRuns = []) {
 }
 
 function mergeTryRuns(primary = [], fallback = []) {
-  const seen = new Set();
-  const runs = [];
-
-  for (const tryRun of [...primary, ...fallback]) {
-    if (!tryRun?.url) {
-      continue;
-    }
-
-    const key = tryRun.id || tryRun.url;
-
-    if (seen.has(key)) {
-      continue;
-    }
-
-    seen.add(key);
-    runs.push(tryRun);
+  const runs = new Map();
+  for (const run of [...primary, ...fallback]) {
+    if (!run?.url) continue;
+    const old = runs.get(run.url);
+    if (!old || (run.status && !old.status) ||
+        (Date.parse(run.updatedAt || run.checkedAt) || 0) > (Date.parse(old.updatedAt || old.checkedAt) || 0)) runs.set(run.url, run);
   }
-
-  return runs;
+  return [...runs.values()];
 }
 
 export function createNotionStoryStatus(notion) {
@@ -380,13 +396,24 @@ export function createNotionStoryStatus(notion) {
 
 export function renderCommitIntegrationStatus(container, result, { index, commit }) {
   const badges = [];
-  const tryRunStatus = createTryRunStatus(mergeTryRuns(
+  const runs = mergeTryRuns(
     Array.isArray(result.tryRuns) ? result.tryRuns : [],
     Array.isArray(commit.tryRuns) ? commit.tryRuns : [],
-  ));
+  );
+  // Rendering a new verdict or a new run must not reset the user's choice.
+  // Keep fixup cards separate from the parent patch's history control.
+  const identity = commit.tryFixup || /^fixup! /i.test(commit.subject || "") ? commit.hash
+    : commit.tbToolsId || runs.find(run => run.tbToolsId)?.tbToolsId || commit.hash;
+  const historyKey = `${index}:${identity}`;
+  const tryRunStatus = createTryRunStatus(runs, {
+    expanded: expandedTryHistory.get(historyKey) || false,
+    onExpandedChange: expanded => expandedTryHistory.set(historyKey, expanded),
+  });
 
   if (tryRunStatus) {
     badges.push(tryRunStatus);
+  } else if (commit.tryMonitor) {
+    badges.push(createTryRunBadge(commit.tryMonitor, "Try"));
   }
 
   if (result.bug) {
@@ -499,7 +526,7 @@ export async function markBugForCheckin(button) {
 
   if (!await showSystemConfirmation({
     title: "Mark patch for checkin",
-    message: "Add checkin-needed-tb to Bug " + bugId + "?",
+    message: "Add checkin-needed-tb to Bug " + bugId + " and set its target milestone from the repository version?",
     confirmLabel: "Mark for checkin",
   })) {
     return;

@@ -92,7 +92,6 @@ import {
   splitPrettyDiffFiles,
 } from "../commands/graph/diff-renderer.mjs";
 import { expandDiffContext } from "../commands/graph/client/diff-context.js";
-import { DEFAULT_HEARTBEAT_TIMEOUT_MS } from "../commands/graph/constants.mjs";
 import {
   buildGraphHtml,
   buildInteractiveGraphLauncherHtml,
@@ -106,8 +105,17 @@ import { run } from "../lib/utils.mjs";
 
 const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "style.css", output: "graph-client/style.css" },
+  { source: "live-text.js", output: "graph-client/live-text.js" },
+  { source: "settings.js", output: "graph-client/settings.js" },
+  { source: "review-handled.js", output: "graph-client/review-handled.js" },
+  { source: "ai-dialog-controls.js", output: "graph-client/ai-dialog-controls.js" },
+  { source: "review-attention.js", output: "graph-client/review-attention.js" },
   { source: "config.js", output: "graph-client/config.js" },
   { source: "system-dialog.js", output: "graph-client/system-dialog.js" },
+  { source: "patch-session-resume.js", output: "graph-client/patch-session-resume.js" },
+  { source: "codex-run-status.js", output: "graph-client/codex-run-status.js" },
+  { source: "background-jobs.js", output: "graph-client/background-jobs.js" },
+  { source: "ai-task-tray.js", output: "graph-client/ai-task-tray.js" },
   { source: "commit-model.js", output: "graph-client/commit-model.js" },
   { source: "dom.js", output: "graph-client/dom.js" },
   { source: "pane-resizer.js", output: "graph-client/pane-resizer.js" },
@@ -124,9 +132,11 @@ const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "checkout-transfer-dialog.js", output: "graph-client/checkout-transfer-dialog.js" },
   { source: "review-sync-dialog.js", output: "graph-client/review-sync-dialog.js" },
   { source: "view-router.js", output: "graph-client/view-router.js" },
+  { source: "phabricator-cache.js", output: "graph-client/phabricator-cache.js" },
   { source: "patch-update-dialog.js", output: "graph-client/patch-update-dialog.js" },
   { source: "patch-review-dialog.js", output: "graph-client/patch-review-dialog.js" },
   { source: "dashboard.js", output: "graph-client/dashboard.js" },
+  { source: "implement.js", output: "graph-client/implement.js" },
   { source: "meta-board-colors.js", output: "graph-client/meta-board-colors.js" },
   { source: "markdown.js", output: "graph-client/markdown.js" },
   { source: "meta-boards.js", output: "graph-client/meta-boards.js" },
@@ -166,10 +176,6 @@ test("isGraphCommitOnOriginMain distinguishes published commits from local work"
     "published",
     "origin/main",
   ]);
-});
-
-test("interactive graph server defaults to a 24 hour heartbeat timeout", () => {
-  assert.equal(DEFAULT_HEARTBEAT_TIMEOUT_MS, 24 * 60 * 60 * 1000);
 });
 
 test("Patch Update amends an accepted source change before the server handles its comment", async () => {
@@ -284,7 +290,7 @@ test("Patch Update amends an accepted source change before the server handles it
     includeChanges: true,
     runCommand,
   }]);
-  assert.equal(item.changeAccepted, true);
+  assert.equal(item.changeAccepted, false);
   assert.equal(item.changesAmended, true);
   assert.equal(session.currentHash, "amended456");
   assert.equal(session.workingDiff, "");
@@ -2253,6 +2259,19 @@ test("getWorkingTreeCommits returns one uncommitted item for staged, unstaged, a
   assert.deepEqual(workingTree.commits[0].parents, ["abc123"]);
   assert.equal(workingTree.commits[0].workingTree, true);
   assert.match(workingTree.commits[0].changeId, /^[a-f0-9]{64}$/);
+  assert.equal(
+    workingTree.commits[0].changeId,
+    createHash("sha256").update([
+      "diff --git a/tracked.txt b/tracked.txt",
+      "index 1234567..89abcde 100644",
+      "--- a/tracked.txt",
+      "+++ b/tracked.txt",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      untrackedDiff,
+    ].join("\n")).digest("hex"),
+  );
   assert.match(
     workingTree.diffs[workingTree.commits[0].hash].text,
     /tracked\.txt/,
@@ -2275,6 +2294,31 @@ test("getWorkingTreeCommits returns one uncommitted item for staged, unstaged, a
     commands.some((command) => command.args.includes("--no-index")),
     true,
   );
+});
+
+test("tree snapshots do not build a diff for every untracked file", async (t) => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "tb-graph-untracked-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const files = Array.from({ length: 100 }, (_, index) => `review/file-${index}.txt`);
+  await mkdir(path.join(cwd, "review"));
+  await Promise.all(files.map((file) => writeFile(path.join(cwd, file), "original")));
+  const commands = [];
+  const runCommand = async (command) => {
+    commands.push(command);
+    if (command.args[0] === "ls-files") {
+      return `${files.join("\0")}\0`;
+    }
+    return "";
+  };
+
+  const first = await getWorkingTreeCommits({ cwd, diffs: false, runCommand });
+  assert.equal(first.commits.length, 1);
+  assert.equal(commands.filter((command) => command.args.includes("--no-index")).length, 0);
+  assert.equal(commands.length, 2);
+
+  await writeFile(path.join(cwd, files[0]), "changed content");
+  const second = await getWorkingTreeCommits({ cwd, diffs: false, runCommand });
+  assert.notEqual(second.commits[0].changeId, first.commits[0].changeId);
 });
 
 test("getWorkingTreeDiff returns an empty rendered diff when the working tree is clean", async () => {
@@ -2400,6 +2444,7 @@ test("getGraphCommitIntegrationStatus reads Bugzilla and Phabricator status", as
   assert.deepEqual(bugCalls, ["123456"]);
   assert.deepEqual(phabCalls, [
     {
+      cacheTtlMs: 15 * 60 * 1000,
       route: "differential.query",
       params: { ids: [987654] },
     },
@@ -2907,6 +2952,26 @@ test("Phabricator web session authenticates and caches inline suggestions", asyn
   assert.equal((await session.signOut()).state, "disconnected");
 });
 
+test("Phabricator web sessions never open the default browser during tests", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-blocked-"));
+  const previousBlock = globalThis.__tbToolsBlockExternalApis;
+
+  globalThis.__tbToolsBlockExternalApis = true;
+  t.after(async () => {
+    globalThis.__tbToolsBlockExternalApis = previousBlock;
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  await mkdir(path.join(directory, ".tb-tools", "phabricator-browser"), {
+    recursive: true,
+  });
+  const session = createPhabricatorWebSession({ homeDirectory: directory });
+  const status = await session.getStatus();
+
+  assert.equal(status.state, "error");
+  assert.match(status.message, /browser access is blocked during tests/);
+});
+
 test("Phabricator web session keeps Bugzilla OAuth open until Phabricator confirms it", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-oauth-"));
   const page = {
@@ -3016,330 +3081,8 @@ test("Phabricator web session fetches a missing suggestion from its revision dif
   assert.equal(page.url, "https://phabricator.services.mozilla.com/D290877?id=42");
 });
 
-test("Phabricator web session verifies Request Changes is available and applied", async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-review-"));
-  const profilePath = path.join(directory, "profile");
-  const requests = [];
-  let reviewPublished = false;
-  let requestChangesAvailable = true;
-  const form = {
-    action: "https://phabricator.services.mozilla.com/D123456/",
-    fields: [["__csrf__", "test-csrf"]],
-    querySelector(selector) {
-      if (selector === "input[name='editengine.actions']") {
-        return { name: "editengine.actions" };
-      }
-      return null;
-    },
-    querySelectorAll(selector) {
-      if (selector === "select") {
-        return [{
-          options: requestChangesAvailable && !reviewPublished
-            ? [{ value: "+" }, { value: "accept" }, { value: "reject" }]
-            : [{ value: "+" }],
-        }];
-      }
+// Native draft and review-form behavior is covered with Playwright in phab-web-review.test.mjs.
 
-      return [];
-    },
-  };
-  const page = {
-    async goto(url) {
-      this.url = url;
-    },
-    async evaluate(callback, value) {
-      class FakeFormData {
-        constructor(source) {
-          this.fields = new Map(source?.fields || []);
-        }
-
-        delete(name) {
-          this.fields.delete(name);
-        }
-
-        entries() {
-          return this.fields.entries();
-        }
-
-        get(name) {
-          return this.fields.get(name) || null;
-        }
-
-        set(name, fieldValue) {
-          this.fields.set(name, String(fieldValue));
-        }
-      }
-
-      const previousGlobals = new Map([
-        ["document", Object.getOwnPropertyDescriptor(globalThis, "document")],
-        ["fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch")],
-        ["FormData", Object.getOwnPropertyDescriptor(globalThis, "FormData")],
-      ]);
-
-      Object.defineProperties(globalThis, {
-        document: {
-          configurable: true,
-          value: {
-            querySelector: (selector) => (
-              selector === "form[data-sigil~='transaction-append']" ? form : null
-            ),
-          },
-          writable: true,
-        },
-        fetch: {
-          configurable: true,
-          value: async (endpoint, options) => {
-            requests.push({
-              endpoint,
-              fields: Object.fromEntries(options.body.entries()),
-              method: options.method,
-            });
-            reviewPublished = true;
-
-            return {
-              ok: true,
-              status: 200,
-              url: "https://phabricator.services.mozilla.com/D123456",
-            };
-          },
-          writable: true,
-        },
-        FormData: { configurable: true, value: FakeFormData, writable: true },
-      });
-
-      try {
-        return await callback(value);
-      } finally {
-        for (const [name, descriptor] of previousGlobals) {
-          if (descriptor) {
-            Object.defineProperty(globalThis, name, descriptor);
-          } else {
-            delete globalThis[name];
-          }
-        }
-      }
-    },
-  };
-  const browser = {
-    async launchPersistentContext() {
-      return {
-        pages: () => [page],
-        async addCookies() {},
-        async close() {},
-        async newPage() {
-          return page;
-        },
-        async storageState() {
-          return { cookies: [] };
-        },
-      };
-    },
-  };
-  await mkdir(profilePath, { recursive: true });
-  const session = createPhabricatorWebSession({
-    browserLoader: async () => browser,
-    getPageAuthenticationState: async () => true,
-    homeDirectory: directory,
-    profilePath,
-  });
-
-  t.after(async () => {
-    await session.close();
-    await rm(directory, { force: true, recursive: true });
-  });
-
-  const result = await session.publishRevisionReview({
-    action: "reject",
-    message: "Please address the focus regression.",
-    revision: "D123456",
-  });
-
-  assert.deepEqual(result, { action: "reject", revision: "D123456" });
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].method, "POST");
-  assert.equal(requests[0].fields.comment, "Please address the focus regression.");
-  assert.deepEqual(JSON.parse(requests[0].fields["editengine.actions"]), [{
-    initialValue: null,
-    type: "reject",
-    value: true,
-  }]);
-
-  reviewPublished = false;
-  const accepted = await session.publishRevisionReview({
-    action: "accept",
-    revision: "D123456",
-  });
-
-  assert.deepEqual(accepted, { action: "accept", revision: "D123456" });
-  assert.equal(requests.length, 2);
-  assert.deepEqual(JSON.parse(requests[1].fields["editengine.actions"]), [{
-    initialValue: null,
-    type: "accept",
-    value: true,
-  }]);
-
-  reviewPublished = false;
-  requestChangesAvailable = false;
-  await assert.rejects(
-    session.publishRevisionReview({
-      action: "reject",
-      message: "This must not silently become a comment.",
-      revision: "D123456",
-    }),
-    /does not offer Request Changes.*No review comment was posted/,
-  );
-  assert.equal(requests.length, 2);
-});
-
-test("Phabricator web session saves an inline reply draft with the exact parent", async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-tools-phab-inline-reply-"));
-  const profilePath = path.join(directory, "profile");
-  let postedDetails;
-  const requests = [];
-  const form = { fields: [["__csrf__", "test-csrf"]] };
-  const responsePayloads = [
-    { inline: { id: 24680 }, view: "<tr></tr>" },
-    { inline: { id: 24680 }, view: "<tr></tr>" },
-  ];
-  const page = {
-    async goto() {},
-    async evaluate(callback, value) {
-      assert.match(String(callback), /replyToCommentPHID/);
-      postedDetails = value;
-      const previousGlobals = new Map([
-        ["document", Object.getOwnPropertyDescriptor(globalThis, "document")],
-        ["fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch")],
-        ["FormData", Object.getOwnPropertyDescriptor(globalThis, "FormData")],
-        ["location", Object.getOwnPropertyDescriptor(globalThis, "location")],
-      ]);
-
-      class FakeFormData {
-        constructor(source) {
-          this.fields = new Map(source?.fields || []);
-        }
-
-        entries() {
-          return this.fields.entries();
-        }
-
-        get(name) {
-          return this.fields.get(name) || null;
-        }
-
-        set(name, fieldValue) {
-          this.fields.set(name, String(fieldValue));
-        }
-      }
-
-      Object.defineProperties(globalThis, {
-        document: {
-          configurable: true,
-          value: { querySelector: () => form },
-          writable: true,
-        },
-        fetch: {
-          configurable: true,
-          value: async (endpoint, options) => {
-            requests.push({
-              endpoint,
-              fields: Object.fromEntries(options.body.entries()),
-              method: options.method,
-            });
-            const payload = responsePayloads.shift();
-
-            return {
-              ok: true,
-              status: 200,
-              text: async () => `for (;;);${JSON.stringify({
-                error_code: null,
-                error_info: null,
-                payload,
-              })}`,
-            };
-          },
-          writable: true,
-        },
-        FormData: { configurable: true, value: FakeFormData, writable: true },
-        location: {
-          configurable: true,
-          value: { origin: "https://phabricator.services.mozilla.com" },
-          writable: true,
-        },
-      });
-
-      try {
-        return await callback(value);
-      } finally {
-        for (const [name, descriptor] of previousGlobals) {
-          if (descriptor) {
-            Object.defineProperty(globalThis, name, descriptor);
-          } else {
-            delete globalThis[name];
-          }
-        }
-      }
-    },
-  };
-  const browser = {
-    async launchPersistentContext() {
-      return {
-        pages: () => [page],
-        async addCookies() {},
-        async close() {},
-        async newPage() {
-          return page;
-        },
-        async storageState() {
-          return { cookies: [] };
-        },
-      };
-    },
-  };
-  await mkdir(profilePath, { recursive: true });
-  const session = createPhabricatorWebSession({
-    browserLoader: async () => browser,
-    getPageAuthenticationState: async () => true,
-    homeDirectory: directory,
-    profilePath,
-  });
-
-  t.after(async () => {
-    await session.close();
-    await rm(directory, { force: true, recursive: true });
-  });
-
-  const result = await session.postInlineReply({
-    commentPHID: "PHID-XCMT-test-parent",
-    message: "The replacement keeps the treegrid focus contract intact.",
-    revision: "D123456",
-  });
-
-  assert.deepEqual(postedDetails, {
-    content: "The replacement keeps the treegrid focus contract intact.",
-    parentCommentPHID: "PHID-XCMT-test-parent",
-    revision: "D123456",
-  });
-  assert.deepEqual(result, {
-    inlineId: 24680,
-    parentCommentPHID: "PHID-XCMT-test-parent",
-    revision: "D123456",
-  });
-  assert.equal(requests.length, 2);
-  assert.deepEqual(requests.map((request) => request.fields.op), ["reply", "save"]);
-  assert.equal(requests[0].fields.replyToCommentPHID, "PHID-XCMT-test-parent");
-  assert.equal(requests[1].fields.id, "24680");
-  assert.ok(requests.every((request) => (
-    request.endpoint.endsWith("/differential/comment/inline/edit/123456/")
-  )));
-  await assert.rejects(
-    session.postInlineReply({
-      commentPHID: "not-an-inline-parent",
-      message: "No detached comment.",
-      revision: "D123456",
-    }),
-    /will not post a detached reply/,
-  );
-});
 
 test("getGraphCommitIntegrationStatus includes Notion stories by bug id", async () => {
   const notionCalls = [];
@@ -3491,13 +3234,13 @@ test("interactive graph server shares an in-flight integration request across ta
       commits: [{ hash: "abc123", subject: "Bug 123456 - Fix thing D987654" }],
     }],
     html: "<!doctype html><p>graph</p>",
-    phab: async () => {
+    getBugzillaRevisions: async () => {
       phabCalls++;
       markPhabStarted();
       await new Promise((resolve) => {
         releasePhab.push(resolve);
       });
-      return { result: [{ id: 987654, status: "status-open" }] };
+      return [{ id: "D987654", status: "needs-review", long_status: "Needs Review" }];
     },
     runCommand: async (command) => (
       command.args[0] === "log" && command.args.includes("--format=%B")
@@ -3544,6 +3287,108 @@ test("interactive graph server shares an in-flight integration request across ta
   assert.equal(phabCalls, 1);
 });
 
+test("interactive graph server exposes local Phabricator cache controls without a Phabricator request", async (t) => {
+  const cleared = [];
+  let dashboardClears = 0;
+  let dashboardStatusCalls = 0;
+  let statusCalls = 0;
+  let timelineStatusCalls = 0;
+  let timelineClears = 0;
+  const serverInfo = await startInteractiveGraphServer({
+    clearDashboardCache: async () => {
+      dashboardClears++;
+      return { entries: 0, enabled: true };
+    },
+    clearDashboardTimelineCache: async () => {
+      timelineClears++;
+      return { entries: 0, enabled: true, users: 0 };
+    },
+    clearPhabricatorCache: async ({ category }) => {
+      cleared.push(category);
+      return {
+        categories: {
+          identities: { entries: 1 },
+          "revision-history": { entries: 0 },
+          "revision-status": { entries: 0 },
+        },
+        enabled: true,
+      };
+    },
+    getDashboardTimelineCacheStatus: async () => {
+      timelineStatusCalls++;
+      return { entries: 5, enabled: true, users: 1 };
+    },
+    getDashboardCacheStatus: async () => {
+      dashboardStatusCalls++;
+      return { entries: 1, enabled: true };
+    },
+    getPhabricatorCacheStatus: async () => {
+      statusCalls++;
+      return {
+        categories: {
+          identities: { entries: 1 },
+          "revision-history": { entries: 2 },
+          "revision-status": { entries: 3 },
+        },
+        enabled: true,
+      };
+    },
+    graphs: [{ label: "comm", path: "/repo/comm" }],
+    html: "<!doctype html><p>graph</p>",
+    phab: async () => assert.fail("The local cache endpoint must not call Phabricator."),
+    runCommand: async () => "",
+    token: "secret",
+  });
+
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const endpoint = new URL("api/phabricator-cache?token=secret", serverInfo.url);
+  const statusResponse = await fetch(endpoint);
+
+  assert.equal(statusResponse.ok, true);
+  assert.deepEqual(await statusResponse.json(), {
+    ok: true,
+    cache: {
+      categories: {
+        identities: { entries: 1 },
+        "revision-history": { entries: 2 },
+        "revision-status": { entries: 3 },
+      },
+      enabled: true,
+    },
+    dashboard: { entries: 1, enabled: true },
+    dashboardTimelines: { entries: 5, enabled: true, users: 1 },
+  });
+  assert.equal(dashboardStatusCalls, 1);
+  assert.equal(statusCalls, 1);
+  assert.equal(timelineStatusCalls, 1);
+
+  const clearResponse = await fetch(new URL("api/phabricator-cache", serverInfo.url), {
+    body: JSON.stringify({ category: "revision-history", token: "secret" }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+
+  assert.equal(clearResponse.ok, true);
+  assert.deepEqual(cleared, ["revision-history"]);
+  assert.equal(dashboardClears, 1);
+
+  const clearAllResponse = await fetch(new URL("api/phabricator-cache", serverInfo.url), {
+    body: JSON.stringify({ category: "all", token: "secret" }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+
+  assert.equal(clearAllResponse.ok, true);
+  assert.deepEqual(cleared, ["revision-history", "all"]);
+  assert.equal(dashboardClears, 2);
+  assert.equal(timelineClears, 1);
+});
+
 test("interactive graph server does not cache an unavailable Phabricator status", async (t) => {
   let phabCalls = 0;
   const serverInfo = await startInteractiveGraphServer({
@@ -3555,7 +3400,7 @@ test("interactive graph server does not cache an unavailable Phabricator status"
       commits: [{ hash: "abc123", subject: "Bug 123456 - Fix thing D987654" }],
     }],
     html: "<!doctype html><p>graph</p>",
-    phab: async () => {
+    getBugzillaRevisions: async () => {
       phabCalls++;
       throw new Error("Phabricator differential.query temporarily rate limited.");
     },
@@ -3652,14 +3497,19 @@ test("getGraphCommitIntegrationStatus keeps subject-matched legacy try runs", as
   assert.equal(result.tryRuns[0].hash, "current-part3");
 });
 
-test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected bug", async () => {
+test("markGraphBugForCheckin sets the repository milestone and checkin-needed-tb keyword", async (t) => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "tb-checkin-milestone-"));
+  t.after(() => rm(repoPath, { recursive: true, force: true }));
+  await mkdir(path.join(repoPath, "mail", "config"), { recursive: true });
+  await writeFile(path.join(repoPath, "mail", "config", "version.txt"), "153.0a1\n");
   const calls = [];
   const updates = [];
   let marked = false;
-  const result = await markGraphBugForCheckin({
+  const options = {
+    getBugzillaRevisions: async () => [{ id: "D987654", status: "accepted", long_status: "Accepted", title: "Bug 123456 - Fix thing" }],
     graph: {
       label: "comm",
-      path: "/repo/comm",
+      path: repoPath,
       commits: [
         {
           hash: "abc123",
@@ -3702,7 +3552,8 @@ test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected 
       ],
     }),
     getNotionStoriesByBugId: async () => null,
-  });
+  };
+  const result = await markGraphBugForCheckin(options);
 
   assert.deepEqual(
     calls.map((call) => call.args),
@@ -3717,6 +3568,7 @@ test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected 
     [
       "123456",
       {
+        target_milestone: "153 Branch",
         keywords: {
           add: ["checkin-needed-tb"],
         },
@@ -3726,6 +3578,18 @@ test("markGraphBugForCheckin adds the checkin-needed-tb keyword to the detected 
   assert.equal(result.message, "Bug 123456 marked for checkin.");
   assert.equal(result.bug.hasCheckinNeeded, true);
   assert.deepEqual(result.bug.keywords, ["checkin-needed-tb"]);
+
+  await markGraphBugForCheckin(options);
+  assert.equal(updates.length, 1, "An already marked bug needs no update.");
+
+  marked = false;
+  await writeFile(path.join(repoPath, "mail", "config", "version.txt"), "invalid\n");
+  await assert.rejects(markGraphBugForCheckin(options), /Cannot determine the target milestone/);
+  assert.equal(updates.length, 1, "An invalid version must not update Bugzilla.");
+
+  await rm(path.join(repoPath, "mail", "config", "version.txt"));
+  await assert.rejects(markGraphBugForCheckin(options), /ENOENT/);
+  assert.equal(updates.length, 1, "A missing version must not update Bugzilla.");
 });
 
 test("markGraphBugForCheckin refuses patches that are not accepted", async () => {
@@ -5167,14 +5031,14 @@ test("createBranchForCommit requires a Bug number in the selected commit", async
   );
 });
 
-test("rebaseCommit rebases a selected local branch tip onto the current checkout", async () => {
+test("rebaseCommit can rebase a Git-resolved commit outside the loaded graph page", async () => {
   const calls = [];
   const result = await rebaseCommit({
     graph: {
       label: "comm",
       path: "/repo/comm",
       branch: "(detached)",
-      knownHashes: new Set(["abc123"]),
+      knownHashes: new Set(),
     },
     hash: "abc123",
     runCommand: async (command) => {
@@ -5216,6 +5080,7 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
   assert.deepEqual(
     calls.map((call) => call.args),
     [
+      ["cat-file", "-e", "abc123^{commit}"],
       ["status", "--porcelain"],
       ["branch", "--show-current"],
       ["rev-parse", "HEAD"],
@@ -5267,6 +5132,52 @@ test("rebaseCommit rebases a selected local branch tip onto the current checkout
       ["rev-parse", "HEAD"],
     ],
   );
+});
+
+test("rebaseCommit rejects concurrent replays for the same checkout", async () => {
+  const graph = {
+    label: "comm",
+    path: "/repo/comm",
+    branch: "main",
+    knownHashes: new Set(["a111"]),
+  };
+  let releaseStatus;
+  let markStatusStarted;
+  const statusStarted = new Promise((resolve) => {
+    markStatusStarted = resolve;
+  });
+  const statusHeld = new Promise((resolve) => {
+    releaseStatus = resolve;
+  });
+  const first = rebaseCommit({
+    graph,
+    hash: "a111",
+    runCommand: async (command) => {
+      if (command.args[0] === "status") {
+        markStatusStarted();
+        await statusHeld;
+        return "";
+      }
+
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "a111\n";
+      }
+
+      return "";
+    },
+  });
+
+  await statusStarted;
+  await assert.rejects(
+    rebaseCommit({ graph, hash: "a111" }),
+    /A rebase is already running for comm/,
+  );
+  releaseStatus();
+  await assert.rejects(first, /already checked out/);
 });
 
 test("rebaseCommit rebases a selected commit onto the current checkout without a branch tip", async () => {
@@ -5686,7 +5597,7 @@ test("rebaseCommit moves child branch tips when rebasing the bottom commit", asy
 
 test("rebaseCommit uses the selected branch hint for equal length stacks", async () => {
   const calls = [];
-  const rewrittenHashes = ["base000", "new111", "new444", "new555", "new555"];
+  const rewrittenHashes = ["base000", "new111", "new222", "new333", "new444", "new555", "new555"];
   const result = await rebaseCommit({
     graph: {
       label: "comm",
@@ -5728,6 +5639,11 @@ test("rebaseCommit uses the selected branch hint for equal length stacks", async
         return "Bug-100\nBug-102\nBug-202\n";
       }
 
+      if (command.args[0] === "rev-list" && command.args[1] === "--parents") {
+        const commit = command.args.at(-1);
+        return `${commit} ${{ a111: "oldbase", b222: "a111", c333: "b222", d444: "a111", e555: "d444" }[commit]}\n`;
+      }
+
       if (command.args[0] === "rev-list") {
         return {
           "a111..Bug-100": "",
@@ -5748,11 +5664,13 @@ test("rebaseCommit uses the selected branch hint for equal length stacks", async
     },
   });
 
-  assert.equal(result.message, "comm rebased branch Bug-202 (3 commits) onto main.");
+  assert.equal(result.message, "comm rebased branch Bug-202 (5 commits) onto main.");
   assert.equal(result.branch, "Bug-202");
-  assert.deepEqual(result.commits, ["a111", "d444", "e555"]);
+  assert.deepEqual(result.commits, ["a111", "b222", "c333", "d444", "e555"]);
   assert.deepEqual(result.branchUpdates, [
     { branch: "Bug-100", originalHash: "a111", hash: "new111" },
+    { branch: "Bug-101", originalHash: "b222", hash: "new222" },
+    { branch: "Bug-102", originalHash: "c333", hash: "new333" },
     { branch: "Bug-201", originalHash: "d444", hash: "new444" },
     { branch: "Bug-202", originalHash: "e555", hash: "new555" },
   ]);
@@ -5762,6 +5680,8 @@ test("rebaseCommit uses the selected branch hint for equal length stacks", async
       .map((call) => call.args),
     [
       ["cherry-pick", "--no-commit", "a111"],
+      ["cherry-pick", "--no-commit", "b222"],
+      ["cherry-pick", "--no-commit", "c333"],
       ["cherry-pick", "--no-commit", "d444"],
       ["cherry-pick", "--no-commit", "e555"],
     ],
@@ -6522,6 +6442,85 @@ test("rebaseCommit skips an empty cherry-pick and keeps rebasing descendants", a
   );
 });
 
+test("rebaseCommit never replaces a patch branch with main when every replay is empty", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    rebaseCommit({
+      graph: {
+        label: "comm",
+        path: "/repo/comm",
+        branch: "main",
+        knownHashes: new Set(["a111"]),
+      },
+      hash: "a111",
+      runCommand: async (command) => {
+        calls.push(command);
+
+        if (command.args[0] === "status") {
+          return "";
+        }
+
+        if (command.args[0] === "branch" && command.args[1] === "--show-current") {
+          return "main\n";
+        }
+
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--points-at")
+        ) {
+          return "patch-branch\n";
+        }
+
+        if (
+          command.args[0] === "for-each-ref" &&
+          command.args.includes("--contains")
+        ) {
+          return "patch-branch\n";
+        }
+
+        if (command.args[0] === "rev-list") {
+          return command.args.at(-1) === "origin/main..a111"
+            ? "a111\n"
+            : "";
+        }
+
+        if (command.args[0] === "merge-base") {
+          throw new Error("not on main");
+        }
+
+        if (command.args[0] === "cherry-pick") {
+          const error = new Error("The previous cherry-pick is now empty.");
+          error.stderr = "The previous cherry-pick is now empty.";
+          throw error;
+        }
+
+        if (command.args[0] === "rev-parse") {
+          return "base000\n";
+        }
+
+        return "";
+      },
+    }),
+    /No branch references were changed/,
+  );
+
+  assert.equal(
+    calls.some((call) => (
+      call.args[0] === "branch" &&
+      call.args[1] === "-f" &&
+      call.args[2] === "patch-branch"
+    )),
+    false,
+  );
+  assert.equal(
+    calls.some((call) => (
+      call.args[0] === "switch" && call.args[1] === "patch-branch"
+    )),
+    true,
+  );
+});
+
 test("rebaseCommit reports conflicts without restoring the checkout", async () => {
   const calls = [];
   let rejectedError;
@@ -6939,63 +6938,6 @@ test("rebaseCommit stack mode prepends unpublished ancestors and skips main comm
       ["cherry-pick", "--no-commit", "a111"],
       ["cherry-pick", "--no-commit", "b222"],
     ],
-  );
-});
-
-test("rebaseCommit rejects equal length stacks without a matching branch hint", async () => {
-  await assert.rejects(
-    rebaseCommit({
-      graph: {
-        label: "comm",
-        path: "/repo/comm",
-        branch: "main",
-        knownHashes: new Set(["a111"]),
-      },
-      hash: "a111",
-      preferredBranch: "Bug-999",
-      runCommand: async (command) => {
-        if (command.args[0] === "status") {
-          return "";
-        }
-
-        if (command.args[0] === "branch") {
-          return "main\n";
-        }
-
-        if (
-          command.args[0] === "for-each-ref" &&
-          command.args.includes("--points-at")
-        ) {
-          return "Bug-100\n";
-        }
-
-        if (
-          command.args[0] === "for-each-ref" &&
-          command.args.includes("--contains")
-        ) {
-          return "Bug-100\nBug-102\nBug-202\n";
-        }
-
-        if (command.args[0] === "rev-list") {
-          return {
-            "a111..Bug-100": "",
-            "a111..Bug-102": "b222\nc333\n",
-            "a111..Bug-202": "d444\ne555\n",
-          }[command.args.at(-1)] || "";
-        }
-
-        if (command.args[0] === "merge-base") {
-          throw new Error("not on main");
-        }
-
-        if (command.args[0] === "rev-parse") {
-          return "base000\n";
-        }
-
-        return "";
-      },
-    }),
-    /multiple descendant branch stacks \(Bug-102, Bug-202\)/,
   );
 });
 
@@ -8717,6 +8659,51 @@ test("runGraphRepositoryUpdate can shelf dirty changes before updating", async (
       ["pull", "--ff-only", "origin", "main"],
       ["branch", "--show-current"],
       ["rev-parse", "HEAD"],
+    ],
+  );
+});
+
+test("runGraphRepositoryUpdate can discard dirty changes and conflicts before updating", async () => {
+  const calls = [];
+  const graphs = [{
+    label: "comm",
+    path: "/repo/comm",
+  }];
+  const result = await runGraphRepositoryUpdate({
+    graphs,
+    mode: "update",
+    dirtyAction: "discard",
+    runCommand: async (command) => {
+      calls.push(command);
+
+      if (command.args[0] === "status") {
+        return "UU conflicted-file.txt\n M changed-file.txt\n";
+      }
+
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "rev-parse") {
+        return "updated123\n";
+      }
+
+      return "";
+    },
+  });
+
+  assert.equal(result.dirtyAction, "discard");
+  assert.deepEqual(result.dirtyResults, [{
+    label: "comm",
+    path: "/repo/comm",
+    message: "comm discarded uncommitted changes.",
+  }]);
+  assert.deepEqual(
+    calls.slice(0, 3).map((call) => call.args),
+    [
+      ["status", "--porcelain"],
+      ["reset", "--hard", "HEAD"],
+      ["clean", "-fd"],
     ],
   );
 });
@@ -10485,7 +10472,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   assert.match(style, /\.context-menu button\[hidden\] \{ display: none; \}/);
   assert.match(
     style,
-    /\.checkout-commit, \.amend-commit, \.submit-commit, \.patch-update-commit, \.load-more/,
+    /\.checkout-commit, \.amend-commit, \.submit-commit, \.patch-update-commit, \.patch-verify-commit, \.patch-freeform-commit, \.load-more/,
   );
   assert.match(style, /\.amend-dialog \{/);
   assert.match(style, /\.amend-message \{/);
@@ -10611,7 +10598,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   );
   assert.match(client, /function scheduleOriginMainStatusRetry/);
   assert.match(client, /originMainStatusRetryTimer/);
-  assert.match(client, /submitOutput\.textContent = session\.output \|\| ""/);
+  assert.match(client, /setLiveText\(submitOutput, session\.output \|\| ""\)/);
   assert.match(client, /function isWorkingTreeCommit/);
   assert.match(client, /function getSnapshotFingerprint/);
   assert.match(client, /function refreshGraphFromServer/);
@@ -10764,7 +10751,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
     /loadSelectedCommitIntegrationStatus\(index, commit, integrationStatus, \{\s*onLoaded:/,
   );
   assert.match(client, /function configurePatchUpdateButton/);
-  assert.match(client, /event\.target\.closest\("\.patch-update-commit"\)/);
+  assert.match(client, /event\.target\.closest\("\.patch-update-commit, \.patch-verify-commit, \.patch-freeform-commit"\)/);
   assert.match(
     client,
     /!result\.bug\.error && isAcceptedPhabricatorStatus\(result\.phabricator\)/,
@@ -10928,9 +10915,9 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.doesNotMatch(html, /dashboard-needinfo-tray/);
   assert.doesNotMatch(html, /dashboard-bug-inbox/);
   assert.match(html, /<dialog class="patch-update-dialog" id="patch-update-dialog">/);
-  assert.doesNotMatch(html, /Codex assessment/);
+  assert.doesNotMatch(html, /Codex analysis/);
   assert.doesNotMatch(html, /Suggested reply/);
-  assert.doesNotMatch(html, /Save Reply Draft/);
+  assert.doesNotMatch(html, /Comment Posted/);
   assert.doesNotMatch(html, /Submit Patch/);
   assert.doesNotMatch(html, /data-dashboard-section="approved-not-marked"/);
   assert.doesNotMatch(html, /data-dashboard-section="reviewed-awaiting-review"/);
@@ -11168,10 +11155,9 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
     /applyGraphSnapshot\(graphIndex, result\.snapshot, \{ force: true \}\)/,
   );
   assert.match(client, /\/api\/close/);
-  assert.match(client, /\/api\/ping/);
   assert.match(client, /clientId/);
-  assert.match(client, /function sendHeartbeat/);
-  assert.match(client, /sendHeartbeat\(\)/);
+  assert.doesNotMatch(client, /\/api\/ping/);
+  assert.doesNotMatch(client, /function sendHeartbeat/);
   assert.match(client, /window\.addEventListener\(\s*"pagehide"/);
   assert.doesNotMatch(client, /beforeunload/);
   assert.match(html, /checkout-commit/);
@@ -11203,37 +11189,49 @@ test("buildGraphHtml only renders Codex patch review controls when enabled", () 
     interactive: { enabled: true, aiEnabled: true, token: "secret" },
   });
 
-  assert.match(disabledHtml, /class="patch-update-title">Update patch<\/h2>/);
+  assert.match(disabledHtml, /class="patch-update-title">Review Update<\/h2>/);
   assert.match(disabledHtml, /class="patch-update-output-toggle"/);
-  assert.doesNotMatch(disabledHtml, /Codex assessment/);
+  assert.doesNotMatch(disabledHtml, /Codex analysis/);
   assert.doesNotMatch(disabledHtml, /Suggested reply/);
   assert.doesNotMatch(disabledHtml, /Review comment/);
-  assert.doesNotMatch(disabledHtml, /Save Reply Draft/);
+  assert.doesNotMatch(disabledHtml, /Comment Posted/);
   assert.doesNotMatch(disabledHtml, /Guide Codex/);
   assert.doesNotMatch(disabledHtml, /Submit Patch/);
   assert.doesNotMatch(disabledHtml, /class="patch-update-commit"/);
-  assert.match(enabledHtml, /Codex recommendation/);
-  assert.match(enabledHtml, /What Codex found/);
-  assert.match(enabledHtml, /Working tree changes/);
-  assert.match(enabledHtml, /Actual uncommitted diff/);
+  assert.doesNotMatch(disabledHtml, /class="patch-verify-commit"/);
+  assert.match(enabledHtml, /class="patch-verify-commit" type="button" hidden>Verify<\/button>/);
+  assert.match(enabledHtml, /class="patch-update-sidebar" aria-label="Patch update context"/);
+  assert.match(enabledHtml, /class="patch-update-context-diff-content"/);
   assert.match(enabledHtml, /Codex activity/);
   assert.match(enabledHtml, /class="patch-update-steer-label"[^>]*>Guide Codex<\/label>/);
-  assert.match(enabledHtml, /<label class="patch-update-reply-label">Reply/);
-  assert.match(enabledHtml, /Save Reply Draft/);
   assert.doesNotMatch(enabledHtml, /Prepare Change/);
-  assert.match(enabledHtml, /Keep and Amend/);
-  assert.match(enabledHtml, /Revert Change/);
   assert.match(enabledHtml, /Amend Patch/);
   assert.match(enabledHtml, /Submit Patch/);
   assert.match(
     enabledHtml,
-    /class="patch-update-commit" type="button" hidden>Update<\/button>/,
+    /class="patch-update-commit" type="button" hidden>Review Update<\/button>/,
   );
   assert.match(enabledHtml, /<dialog class="patch-review-dialog" id="patch-review-dialog">/);
-  assert.match(enabledHtml, /Add Comment as Pending/);
-  assert.match(enabledHtml, /Apply in Review Checkout/);
-  assert.match(enabledHtml, /Add Comment \+ Code Suggestion as Pending/);
+  assert.match(enabledHtml, /class="patch-review-sidebar"/);
+  assert.match(enabledHtml, /class="patch-review-diff-column" aria-label="Patch diff"/);
+  assert.doesNotMatch(enabledHtml, /class="patch-review-issue"/);
+  assert.doesNotMatch(enabledHtml, /class="patch-review-issue-actions"/);
   assert.match(enabledHtml, /Request Changes/);
+});
+
+test("patch review keeps a prose inline draft action available with a ready finding", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-review-dialog.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /function appendInlineFinding\(row, issue\)/);
+  assert.match(source, /data-review-inline-action/);
+  assert.match(source, /"inline-comment"/);
+  assert.match(source, /"inline-suggestion"/);
+  assert.match(source, /"Save Inline Comment Draft"/);
+  assert.match(source, /void runAction\("inline", \{\n {8}itemId: issue\.id,\n {8}kind: "comment",/);
+  assert.match(source, /function renderSuggestedSourceDiff/);
 });
 
 test("patch update dialog clears the prior session before starting another update", () => {
@@ -11245,8 +11243,8 @@ test("patch update dialog clears the prior session before starting another updat
   assert.match(source, /function resetPatchUpdateDialog\(patch\)/);
   assert.match(source, /session = undefined;/);
   assert.match(source, /output\.textContent = "";/);
-  assert.match(source, /setComment\(null\);/);
-  assert.match(source, /resetPatchUpdateDialog\(patch\);\n {2}setPageScrollLocked\(true\);\n {2}dialog\.showModal\(\);/);
+  assert.match(source, /patchDiffContent\?\.replaceChildren\(\);/);
+  assert.match(source, /resetPatchUpdateDialog\(patch\);\n {2}const generation = viewGeneration;\n {2}setPageScrollLocked\(true\);\n {2}dialog\.showModal\(\);/);
 });
 
 test("patch update locks background page scrolling while its dialog is open", () => {
@@ -11261,7 +11259,7 @@ test("patch update locks background page scrolling while its dialog is open", ()
 
   assert.match(source, /function setPageScrollLocked\(isLocked\)/);
   assert.match(source, /setPageScrollLocked\(true\);\n {2}dialog\.showModal\(\);/);
-  assert.match(source, /dialog\.addEventListener\("close", \(\) => \{\n {4}setPageScrollLocked\(false\);/);
+  assert.match(source, /dialog\.addEventListener\("close", \(\) => \{\n {4}if \(!dialog\.open\) setPageScrollLocked\(false\);/);
   assert.match(style, /html\.patch-update-open,\nbody\.patch-update-open \{\n {2}overflow: hidden;/);
 });
 
@@ -11273,13 +11271,13 @@ test("patch update actions display immediate pending feedback", () => {
 
   assert.match(source, /let pendingAction = "";/);
   assert.match(source, /pendingAction = action;\n {2}renderSession\(session\);/);
-  assert.match(source, /pendingAction === "comment"\n {6}\? "Saving Reply\.\.\."/);
+  assert.match(source, /pendingAction === "comment"\n {6}\? "Posting\.\.\."/);
   assert.match(source, /item\.state === "applying"/);
-  assert.match(source, /isCommentFeedback \? "feedback" : "steer"/);
-  assert.match(source, /pendingAction === "steer" \|\| pendingAction === "feedback"/);
+  assert.match(source, /isCommentFeedback && item\.changeApplied && !item\.changesAmended\s+\? "revise"/);
+  assert.match(source, /pendingAction === "steer" \|\| pendingAction === "feedback" \|\| pendingAction === "revise"/);
 });
 
-test("patch update keeps patch context above compact reviewer feedback in scrollable columns", () => {
+test("patch update puts context and activity beside the source patch diff", () => {
   const html = buildGraphHtml({
     graphs: [],
     interactive: { aiEnabled: true, enabled: true, token: "secret" },
@@ -11289,29 +11287,37 @@ test("patch update keeps patch context above compact reviewer feedback in scroll
     "utf8",
   );
 
-  assert.match(html, /class="patch-update-workspace">\s*<section class="patch-update-review-column"/);
+  assert.match(html, /class="patch-update-workspace">\s*<aside class="patch-update-sidebar"/);
   assert.ok(
     html.indexOf('class="patch-update-context"') <
-      html.indexOf('class="patch-update-reviewer-feedback"'),
+      html.indexOf('class="patch-update-progress"'),
   );
   assert.match(html, /class="patch-update-context-toggle" type="button" aria-controls="patch-update-context-details" aria-expanded="false"/);
   assert.match(html, /class="patch-update-context-details" id="patch-update-context-details" hidden/);
-  assert.match(html, /class="patch-update-change-plan" hidden/);
-  assert.match(html, /<h4>Planned source change<\/h4>/);
-  assert.match(html, /<h4>Working tree changes<\/h4>/);
-  assert.match(html, /Actual uncommitted diff/);
-  assert.match(html, /class="patch-update-comment-context" hidden aria-label="Review context"/);
-  assert.match(style, /\.patch-update-workspace \{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);[\s\S]*?overflow: hidden;/);
-  assert.match(style, /\.patch-update-review-column,[\s\S]*?\.patch-update-analysis \{[\s\S]*?overflow: auto;/);
-  assert.match(style, /\.patch-update-context \{[\s\S]*?flex: 0 0 auto;[\s\S]*?max-height: none;/);
-  assert.match(style, /\.patch-update-context\.is-expanded \{[\s\S]*?flex: 0 1 min\(26dvh, 240px\);[\s\S]*?max-height: min\(26dvh, 240px\);/);
+  assert.match(html, /class="patch-update-diff-column" aria-label="Patch diff"/);
+  assert.match(html, /class="patch-update-context-diff-content"/);
+  assert.doesNotMatch(html, /class="patch-update-review-column"/);
+  assert.doesNotMatch(html, /class="patch-update-comment-context"/);
+  assert.match(style, /\.patch-update-workspace \{\n {2}gap: 14px;\n {2}grid-template-columns: minmax\(320px, 0\.8fr\) minmax\(0, 1\.8fr\);/);
+  assert.match(style, /\.patch-update-sidebar \{/);
+  assert.match(style, /\.patch-update-context-diff \{/);
+  assert.match(style, /\.patch-update-inline-finding,/);
+  assert.match(style, /\.patch-update-working-diff \{/);
   assert.match(style, /\.patch-update-context-toggle\[aria-expanded="true"\]::after/);
   assert.match(style, /\.patch-update-context-details\[hidden\] \{\s*display: none;/);
-  assert.match(style, /\.patch-update-comment-content \{[\s\S]*?max-height: none;[\s\S]*?overflow: visible;/);
-  assert.match(style, /\.patch-update-comment \{[\s\S]*?flex: 1 1 0;[\s\S]*?min-height: 0;/);
-  assert.match(style, /\.patch-update-reviewer-context \{[\s\S]*?display: flex;[\s\S]*?flex: 1 1 auto;[\s\S]*?flex-direction: column;[\s\S]*?overflow: auto;/);
-  assert.match(style, /\.patch-update-comment-context \{[\s\S]*?flex: 1 1 auto;[\s\S]*?min-height: 220px;/);
-  assert.match(style, /\.patch-update-comment-context-diff \{[\s\S]*?height: auto;[\s\S]*?min-height: 220px;[\s\S]*?overflow: auto;/);
+});
+
+test("patch update labels suggested replies by their Phabricator target", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /item\.type === "inline"/);
+  assert.match(source, /"Suggested inline reply"/);
+  assert.match(source, /"Suggested overall reply"/);
+  assert.match(source, /`Reason: \$\{item\.rationale\}`/);
+  assert.match(source, /`Checks: \$\{item\.validation\}`/);
 });
 
 test("Patch Update automatically prepares and shows the actual working-tree diff", () => {
@@ -11324,23 +11330,26 @@ test("Patch Update automatically prepares and shows the actual working-tree diff
     "utf8",
   );
 
-  assert.match(source, /function setWorkingTreeDiff\(item\) \{/);
+  assert.match(source, /function getWorkingTreeDiffState\(item\) \{/);
   assert.match(source, /function loadWorkingTreeDiff\(item\) \{/);
+  assert.match(source, /function loadPatchDiff\(\) \{/);
+  assert.match(source, /function appendWorkingTreeDiff\(item\) \{/);
+  assert.match(source, /function setPatchDiff\(item\) \{/);
   assert.match(source, /\/diff\/uncommitted-changes\?token=/);
   assert.match(source, /const hasWorkingDiff = Boolean\(workingDiff \|\| workingDiffHtml\);/);
-  assert.match(source, /const \{ needsChange \} = setWorkingTreeDiff\(item\);/);
-  assert.match(source, /rawDiff\.textContent = workingDiff;/);
-  assert.match(source, /if \(!item\) \{[\s\S]*?analysis\.hidden = !session\?\.id;[\s\S]*?return;/);
-  assert.match(source, /analysis\.hidden = !hasAnalysis;/);
-  assert.match(source, /changePlan\.hidden = !needsChange;/);
-  assert.match(source, /if \(hasWorkingDiff\) \{/);
+  assert.match(source, /const \{ currentDiff, hasWorkingDiff, shouldLoadWorkingTreeDiff \} = getWorkingTreeDiffState\(item\);/);
+  assert.match(source, /rawDiff\.textContent = currentDiff\.text;/);
+  assert.match(source, /patchDiffContent\.innerHTML = currentDiff\.html;/);
+  assert.match(source, /appendWorkingTreeDiff\(item\);/);
+  assert.match(source, /renderedPatchDiffKey = "";/);
   assert.match(source, /session\.workingTreeDiffVersion/);
-  assert.doesNotMatch(source, /proposedDiff\.hidden = !item\.proposedDiffHtml/);
   assert.doesNotMatch(source, /Prepare Change/);
-  assert.match(source, /runAction\("keep", \{ itemId: item\.id \}\)/);
-  assert.match(source, /runAction\("revert", \{ itemId: item\.id \}\)/);
+  assert.match(source, /data-update-inline-action/);
+  assert.match(source, /createInlineAction\("apply", "Make Change"/);
+  assert.match(source, /createInlineAction\("keep", "Amend Change"/);
+  assert.match(source, /createInlineAction\("revert", "Revert Change"/);
   assert.match(patchUpdate, /function hasGraphPatchUpdateChangeRecommendation\(item\)/);
-  assert.match(patchUpdate, /applyGraphPatchUpdateRecommendedChange/);
+  assert.match(patchUpdate, /export async function reviseGraphPatchUpdateChange/);
   assert.match(
     patchUpdate,
     /Codex did not provide a complete source-change recommendation\./,
@@ -11364,6 +11373,10 @@ test("patch update keeps the purpose collapsed until the user expands it", () =>
 test("patch update keeps Codex activity visible with Notes and All filters", () => {
   const source = readFileSync(
     new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
+    "utf8",
+  );
+  const controls = readFileSync(
+    new URL("../commands/graph/client/ai-dialog-controls.js", import.meta.url),
     "utf8",
   );
   const html = buildGraphHtml({
@@ -11401,10 +11414,11 @@ test("patch update keeps Codex activity visible with Notes and All filters", () 
   assert.doesNotMatch(source, /items\.filter\(\(entry\) => !isCommandActivity\(entry\)\)/);
   assert.match(source, /items\[items\.length - 1\]/);
   assert.match(source, /No Codex notes yet\. Select All to include other activity\./);
-  assert.match(source, /function createCommandActivityDisclosure\(entry\)/);
-  assert.match(source, /details\.open = expandedActivityCommandIds\.has\(entry\.id\);/);
+  assert.match(source, /createSharedActivityEntry\(entry, expandedActivityCommandIds\)/);
+  assert.match(controls, /function createCommandActivityDisclosure\(entry, expandedActivityCommandIds\)/);
+  assert.match(controls, /details\.open = expandedActivityCommandIds\.has\(entry\.id\);/);
   assert.match(source, /function getActivityCommandPreview\(detail\)/);
-  assert.match(source, /patch-update-activity-command-row/);
+  assert.match(controls, /patch-update-activity-command-row/);
   assert.match(source, /const activityProgress = dialog\?\.querySelector\("\.patch-update-progress"\);/);
   assert.match(source, /activityProgress\.open = true;/);
   assert.match(style, /\.patch-update-progress-summary \{/);
@@ -11427,22 +11441,23 @@ test("patch update reuses graph inline review threads in the contextual diff", (
     "utf8",
   );
 
-  assert.match(source, /import \{ appendInlineReviewComment \} from "\.\/review-viewer\.js";/);
-  assert.match(source, /appendInlineReviewComment\(anchor, \{/);
-  assert.match(source, /const isInlineInContext = item\.type === "inline"/);
+  assert.match(source, /import \{ appendInlineReviewComment, findReviewLine \} from "\.\/review-viewer\.js";/);
+  assert.match(source, /appendInlineReviewComment\(row, \{/);
+  assert.match(source, /findReviewLine\(patchDiffContent, item\)/);
   assert.match(reviewViewer, /export function appendInlineReviewComment\(row, comment\)/);
 });
 
-test("patch update anchors a Phabricator review context diff at the commented line", () => {
+test("patch update anchors review feedback in the complete local patch diff", () => {
   const source = readFileSync(
     new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
     "utf8",
   );
 
-  assert.match(source, /function setCommentContext\(item\)/);
-  assert.match(source, /commentContextDiff\.innerHTML = html;/);
-  assert.match(source, /\.diff-line\[data-\$\{side\}-line=/);
-  assert.match(source, /row\.classList\.add\("comment-context-line"\)/);
+  assert.match(source, /function setPatchDiff\(item\)/);
+  assert.match(source, /patchDiffContent\.innerHTML = currentDiff\.html;/);
+  assert.match(source, /const anchor = \["inline", "finding"\]\.includes\(item\.type\) \? findReviewLine\(patchDiffContent, item\) : null;/);
+  assert.match(source, /anchor\.classList\.add\("patch-update-context-line"\)/);
+  assert.match(source, /appendUpdateFinding\(anchor, item\);/);
 });
 
 test("dashboard and meta boards show an accessible loading indicator", () => {
@@ -11502,16 +11517,13 @@ test("meta board columns show filtered point totals except backlog", () => {
   assert.match(style, /\.meta-board-column header \.meta-board-column-points \{/);
 });
 
-test("patch update enables saving the generated reply after advancing to a comment", () => {
+test("patch update reads the active inline reply after advancing to a comment", () => {
   const source = readFileSync(
     new URL("../commands/graph/client/patch-update-dialog.js", import.meta.url),
     "utf8",
   );
-  const renderComment = source.indexOf("setComment(busy ? null : item);");
-  const readReply = source.indexOf("const replyValue = reply?.value || \"\";", renderComment);
-
-  assert.ok(renderComment >= 0);
-  assert.ok(readReply > renderComment);
+  assert.match(source, /setPatchDiff\(freeform && !item\?\.changeApplied \? null : item\);/);
+  assert.match(source, /function updateInlineFindingActions\(item\) \{[\s\S]*?const replyValue = replyInput\?\.value \|\| "";/);
 });
 
 test("patch update output remains hidden until the user expands it", () => {
@@ -11537,7 +11549,7 @@ test("patch update activity follows new entries until the user scrolls away", ()
   assert.match(source, /let activityFollowsLatest = true;/);
   assert.match(source, /function updateActivityFollowState\(\)/);
   assert.match(source, /activityList\?\.addEventListener\("scroll", updateActivityFollowState/);
-  assert.match(source, /window\.requestAnimationFrame\(\(\) => \{\n {6}activityList\.scrollTop = activityList\.scrollHeight;/);
+  assert.match(source, /if \(!hasSelectedText\(activityList\)\) activityList\.scrollTop = activityList\.scrollHeight;/);
   assert.match(source, /activityFollowsLatest = true;\n {2}renderActivityFilter\(\);/);
 });
 
@@ -12025,12 +12037,125 @@ test("patch update always targets the working comm checkout", async (t) => {
   );
 });
 
+test("smaller snapshots keep loaded commits available for rebase", async (t) => {
+  let checkingRebase = false;
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    graphs: [{ label: "comm", path: "/work/comm", commits: [{ hash: "aaa111" }] }],
+    runCommand: async ({ args }) => {
+      if (args[0] === "status" && checkingRebase) {
+        return " M file.txt\n";
+      }
+      if (args[0] === "cat-file" && args.at(-1) === "ddd444^{commit}") throw new Error("missing object");
+      if (args[0] === "branch") return "main\n";
+      if (args[0] === "log" && args.includes("--format=%B")) return "Local patch\n";
+      if (args[0] === "log") {
+        const hash = args.includes("--skip=1") ? "bbb222" : "ccc333";
+        return `\x1e${hash}\x1f\x1f\x1fAlice\x1falice@example.com\x1f1710000000\x1fLocal patch\n`;
+      }
+      return "";
+    },
+  });
+  t.after(() => serverInfo.server.close());
+
+  const page = await fetch(new URL("api/graph/0/commits?offset=1&limit=1&token=secret", serverInfo.url));
+  assert.equal((await page.json()).commits[0].hash, "bbb222");
+  const snapshot = await fetch(new URL("api/graph/0/snapshot?limit=1&token=secret", serverInfo.url));
+  assert.deepEqual((await snapshot.json()).commits.map(commit => commit.hash), ["ccc333"]);
+
+  // Stop at the clean-checkout guard so this test cannot rewrite a repository.
+  checkingRebase = true;
+  for (const hash of ["aaa111", "bbb222", "ccc333", "ddd444"]) {
+    const response = await fetch(new URL("api/commit-action", serverInfo.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret", graphIndex: 0, hash, action: "rebase" }),
+    });
+    const result = await response.json();
+    assert.equal(result.ok, false);
+    if (hash === "ddd444") {
+      assert.equal(response.status, 404);
+      assert.match(result.error, /does not exist in comm/);
+    } else {
+      assert.equal(response.status, 409);
+      assert.match(result.error, /has local changes/, hash);
+    }
+  }
+});
+
+test("patch update keeps Git-resolved hashes addressable across graph snapshots", async (t) => {
+  let resolvePrepared;
+  const prepared = new Promise((resolve) => {
+    resolvePrepared = resolve;
+  });
+  const originalHash = "original-not-in-page";
+  const rewrittenHash = "rewritten-not-in-page";
+  const serverInfo = await startInteractiveGraphServer({
+    html: "<!doctype html><p>graph</p>",
+    token: "secret",
+    graphs: [{
+      checkout: "working",
+      repository: "comm",
+      label: "Working comm",
+      path: "/work/comm",
+    }],
+    preparePatchUpdateSession: async ({ session }) => {
+      session.originalHash = originalHash;
+      session.currentHash = rewrittenHash;
+      resolvePrepared();
+    },
+    runCommand: async (command) => {
+      if (command.args[0] === "branch") {
+        return "main\n";
+      }
+
+      if (command.args[0] === "log" && command.args.includes("--format=%B")) {
+        return "A local patch\n";
+      }
+
+      return "";
+    },
+  });
+  t.after(() => {
+    if (serverInfo.server.listening) {
+      serverInfo.server.close();
+    }
+  });
+
+  const createResponse = await fetch(new URL("api/patch-update", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "secret",
+      graphIndex: 0,
+      revision: "D123456",
+    }),
+  });
+  assert.equal(createResponse.ok, true);
+  await prepared;
+
+  const snapshotResponse = await fetch(
+    new URL("api/graph/0/snapshot?limit=1&token=secret", serverInfo.url),
+  );
+  assert.equal(snapshotResponse.ok, true);
+
+  for (const hash of [originalHash, rewrittenHash]) {
+    const response = await fetch(
+      new URL(`api/graph/0/message/${hash}?token=secret`, serverInfo.url),
+    );
+
+    assert.equal(response.ok, true);
+  }
+});
+
 test("patch update posts only the reply body to its inline Phabricator parent", async (t) => {
   let resolvePrepared;
   const prepared = new Promise((resolve) => {
     resolvePrepared = resolve;
   });
   const postedReplies = [];
+  const doneComments = [];
   const handledComments = [];
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
@@ -12044,6 +12169,9 @@ test("patch update posts only the reply body to its inline Phabricator parent", 
     }],
     phabWebSession: {
       async close() {},
+      async markInlineCommentDone(details) {
+        doneComments.push(details);
+      },
       async postInlineReply(details) {
         postedReplies.push(details);
       },
@@ -12105,14 +12233,33 @@ test("patch update posts only the reply body to its inline Phabricator parent", 
     message: reply,
   }]);
   assert.equal(payload.items[0].draftReply, reply);
-  assert.equal(payload.items[0].state, "handled");
-  assert.equal(payload.currentItemIndex, 1);
+  assert.equal(payload.items[0].draftSaved, true);
+  assert.equal(payload.items[0].state, "ready");
+  assert.equal(payload.currentItemIndex, 0);
+  assert.deepEqual(handledComments, []);
+  assert.match(payload.message, /reply draft saved/i);
+  assert.doesNotMatch(postedReplies[0].message, /responses? to review comments|response to .*\(/i);
+
+  const doneResponse = await fetch(
+    new URL(`api/patch-update/${encodeURIComponent(created.id)}/handled`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret", itemId: "inline:PHID-XCMT-parent" }),
+    },
+  );
+  const donePayload = await doneResponse.json();
+
+  assert.equal(doneResponse.ok, true);
+  assert.equal(donePayload.items[0].state, "handled");
+  assert.deepEqual(doneComments, [{
+    revision: "D123456",
+    commentPHID: "PHID-XCMT-parent",
+  }]);
   assert.deepEqual(handledComments, [{
     revision: "D123456",
     itemId: "inline:PHID-XCMT-parent",
   }]);
-  assert.match(payload.message, /reply draft saved.*marked handled/i);
-  assert.doesNotMatch(postedReplies[0].message, /responses? to review comments|response to .*\(/i);
 });
 
 test("patch update keeps, amends, and handles a source response before moving on", async (t) => {
@@ -12121,6 +12268,7 @@ test("patch update keeps, amends, and handles a source response before moving on
     resolvePrepared = resolve;
   });
   const acceptedChanges = [];
+  const doneComments = [];
   const handledComments = [];
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
@@ -12136,12 +12284,20 @@ test("patch update keeps, amends, and handles a source response before moving on
       const item = session.items.find((candidate) => candidate.id === itemId);
 
       acceptedChanges.push(itemId);
-      item.changeAccepted = true;
+      item.changeAccepted = false;
+      item.changeApplied = false;
       item.changesAmended = true;
       session.currentHash = "amended456";
       session.workingDiff = "";
       session.workingDiffHtml = "";
       session.workingTreeDiffVersion = 1;
+      session.message = "Source change was amended into the current commit. You can now post a reply, skip, or mark this comment done.";
+    },
+    phabWebSession: {
+      async close() {},
+      async markInlineCommentDone(details) {
+        doneComments.push(details);
+      },
     },
     persistPatchUpdateHandledComment: async (details) => {
       handledComments.push(details);
@@ -12155,7 +12311,9 @@ test("patch update keeps, amends, and handles a source response before moving on
           changeApplied: true,
           changesAmended: false,
           id: "inline:1",
+          parentCommentPHID: "PHID-XCMT-1",
           state: "ready",
+          type: "inline",
         },
         { id: "inline:2", state: "ready" },
       ];
@@ -12196,17 +12354,30 @@ test("patch update keeps, amends, and handles a source response before moving on
 
   assert.equal(response.ok, true);
   assert.deepEqual(acceptedChanges, ["inline:1"]);
-  assert.deepEqual(handledComments, [{
-    revision: "D123456",
-    itemId: "inline:1",
-  }]);
+  assert.deepEqual(handledComments, []);
   assert.equal(payload.currentHash, "amended456");
   assert.equal(payload.workingDiff, "");
   assert.equal(payload.items[0].changesAmended, true);
-  assert.equal(payload.items[0].state, "handled");
-  assert.equal(payload.currentItemIndex, 1);
+  assert.equal(payload.items[0].state, "ready");
+  assert.equal(payload.currentItemIndex, 0);
   assert.equal(payload.items[1].state, "ready");
-  assert.match(payload.message, /amended.*marked handled/i);
+  assert.match(payload.message, /post a reply, skip, or mark this comment done/i);
+
+  const doneResponse = await fetch(
+    new URL(`api/patch-update/${encodeURIComponent(created.id)}/handled`, serverInfo.url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret", itemId: "inline:1" }),
+    },
+  );
+  const donePayload = await doneResponse.json();
+
+  assert.equal(doneResponse.ok, true);
+  assert.equal(donePayload.items[0].state, "handled");
+  assert.equal(donePayload.currentItemIndex, 1);
+  assert.deepEqual(doneComments, [{ revision: "D123456", commentPHID: "PHID-XCMT-1" }]);
+  assert.deepEqual(handledComments, [{ revision: "D123456", itemId: "inline:1" }]);
 });
 
 test("interactive graph server scopes origin and Rust status to the selected checkout", async (t) => {
@@ -12486,6 +12657,16 @@ test("interactive graph submit checks out a selected local commit before submitt
     true,
   );
 
+  const blockedResponse = await fetch(new URL("api/submit", serverInfo.url), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret", graphIndex: 0, hash: localHash }),
+  });
+  assert.equal(blockedResponse.status, 409);
+  assert.match((await blockedResponse.json()).error, /Submit is still using/);
+  await fetch(new URL(`api/submit/${localResult.id}/cancel`, serverInfo.url), {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "secret" }),
+  });
+
   const publishedResponse = await fetch(new URL("api/submit", serverInfo.url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -12502,18 +12683,34 @@ test("interactive graph submit checks out a selected local commit before submitt
 });
 
 test("interactive graph server streams commits, diffs, checkout responses, and closes", async (t) => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "tb-checkin-milestone-"));
+  t.after(() => rm(repoPath, { recursive: true, force: true }));
+  await mkdir(path.join(repoPath, "mail", "config"), { recursive: true });
+  await writeFile(path.join(repoPath, "mail", "config", "version.txt"), "153.0a1\n");
   const calls = [];
   const bugUpdates = [];
   let checkinMarked = false;
   let reviewTransactionRequests = 0;
   const serverInfo = await startInteractiveGraphServer({
+    phabWebSession: {
+      getReview: async () => {
+        reviewTransactionRequests++;
+        return {
+          comments: [{ content: "Please take a look at this." }],
+          inlineComments: [{ filePath: "file.txt", content: "", codeSuggestion: {
+            content: "new", url: "https://phabricator.services.mozilla.com/D987654#inline-100",
+          } }],
+        };
+      },
+    },
+    getBugzillaRevisions: async () => [{ id: "D987654", status: "accepted", long_status: "Accepted", title: "Bug 123456 - Fix the thing" }],
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     pageSize: 1,
     graphs: [
       {
         label: "comm",
-        path: "/repo/comm",
+        path: repoPath,
         branch: "main",
         commits: [],
         commitCount: 0,
@@ -12784,6 +12981,7 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     [
       "123456",
       {
+        target_milestone: "153 Branch",
         keywords: {
           add: ["checkin-needed-tb"],
         },
@@ -12930,7 +13128,7 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     calls.some(
       (call) =>
         call.cmd.endsWith("mach") &&
-        call.cwd === "/repo/comm" &&
+        call.cwd === repoPath &&
         call.args.join(" ") === "build",
     ),
     true,
@@ -12939,7 +13137,7 @@ test("interactive graph server streams commits, diffs, checkout responses, and c
     calls.some(
       (call) =>
         call.cmd.endsWith("mach") &&
-        call.cwd === "/repo/comm" &&
+        call.cwd === repoPath &&
         call.args.join(" ") === "run",
     ),
     true,
@@ -15549,7 +15747,7 @@ test("interactive graph server submits current commit through browser prompts", 
     session.output,
     /Submitted https:\/\/phabricator\.services\.mozilla\.com\/D123456/,
   );
-  assert.match(session.output, /\$ \.\.\/mach try auto --artifact/);
+  assert.match(session.output, /\$ \.\.\/mach try auto --no-artifact/);
   assert.match(
     session.output,
     /Created try push: https:\/\/treeherder\.mozilla\.org\/jobs\?repo=try&revision=abc/,
@@ -15589,7 +15787,7 @@ test("interactive graph server submits current commit through browser prompts", 
       (call) =>
         call.cmd.endsWith("mach") &&
         call.cwd === "/repo/comm" &&
-        call.args.join(" ") === "try auto --artifact",
+        call.args.join(" ") === "try auto --no-artifact",
     ),
     true,
   );
@@ -15836,12 +16034,11 @@ test("interactive graph submit replays descendant branches after moz-phab amends
   await closePromise;
 });
 
-test("interactive graph server closes when page heartbeats stop", async (t) => {
+test("interactive graph server stays alive when browser tabs are idle or close", async (t) => {
   const serverInfo = await startInteractiveGraphServer({
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     heartbeatIntervalMs: 10,
-    heartbeatTimeoutMs: 30,
     graphs: [
       {
         label: "comm",
@@ -15863,11 +16060,21 @@ test("interactive graph server closes when page heartbeats stop", async (t) => {
   const pageResponse = await fetch(serverInfo.url);
   assert.equal(pageResponse.ok, true);
 
-  await new Promise((resolve) => serverInfo.server.once("close", resolve));
-  assert.equal(serverInfo.server.listening, false);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(serverInfo.server.listening, true);
+
+  const response = await fetch(new URL("api/close", serverInfo.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "secret", clientId: "tab-one" }),
+  });
+  assert.deepEqual(await response.json(), { ok: true, remainingClients: 0 });
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(
-    serverInfo.server.closeReason,
-    "browser heartbeat timed out after 1 second",
+    serverInfo.server.listening,
+    true,
+    "closing a browser tab must not shut down the console server",
   );
 });
 
@@ -15876,8 +16083,6 @@ test("interactive graph server survives refreshes and multiple browser clients",
     html: "<!doctype html><p>graph</p>",
     token: "secret",
     heartbeatIntervalMs: 10,
-    heartbeatTimeoutMs: 500,
-    clientDisconnectGraceMs: 80,
     graphs: [
       {
         label: "comm",
@@ -15920,7 +16125,7 @@ test("interactive graph server survives refreshes and multiple browser clients",
 
   assert.deepEqual(await ping("tab-one"), { ok: true, clientId: "tab-one" });
   assert.deepEqual(await ping("tab-two"), { ok: true, clientId: "tab-two" });
-  assert.deepEqual(await close("tab-one"), { ok: true, remainingClients: 1 });
+  assert.deepEqual(await close("tab-one"), { ok: true, remainingClients: 0 });
 
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.equal(serverInfo.server.listening, true);
@@ -15935,14 +16140,9 @@ test("interactive graph server survives refreshes and multiple browser clients",
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.equal(serverInfo.server.listening, true);
 
-  const closePromise = new Promise((resolve) =>
-    serverInfo.server.once("close", resolve),
-  );
   assert.deepEqual(await close("tab-three"), { ok: true, remainingClients: 0 });
-  await closePromise;
-
-  assert.equal(serverInfo.server.listening, false);
-  assert.equal(serverInfo.server.closeReason, "all browser tabs closed");
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(serverInfo.server.listening, true);
 });
 
 test("interactive graph server asks browser tabs to close on shutdown", async (t) => {
@@ -15988,7 +16188,7 @@ test("interactive graph server asks browser tabs to close on shutdown", async (t
   assert.equal(serverInfo.server.closeReason, "terminal signal received");
 });
 
-test("interactive graph server serves the token-protected browser launcher", async (t) => {
+test("interactive graph launcher accepts old links while actions require the current token", async (t) => {
   const launcherHtml = buildInteractiveGraphLauncherHtml({
     consolePath: "/",
     tabName: "tb-tools-console-secret",
@@ -16021,9 +16221,20 @@ test("interactive graph server serves the token-protected browser launcher", asy
   assert.equal(response.status, 200);
   assert.equal(await response.text(), launcherHtml);
 
-  const rejected = await fetch(new URL("launch?token=wrong", serverInfo.url));
-
-  assert.equal(rejected.status, 403);
+  for (const suffix of ["", "?token=previous-process"]) {
+    const launch = await fetch(new URL(`launch${suffix}`, serverInfo.url));
+    assert.equal(launch.status, 200);
+    assert.equal(launch.headers.get("cache-control"), "no-store");
+    assert.equal(await launch.text(), launcherHtml);
+  }
+  for (const token of [undefined, "previous-process"]) {
+    const unauthorizedAction = await fetch(new URL("api/commit-action", serverInfo.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token, graphIndex: 0, action: "rebase", hash: "abc123" }),
+    });
+    assert.equal(unauthorizedAction.status, 403);
+  }
 });
 
 test("waitForInteractiveServerClose routes signals through the interactive shutdown hook", async () => {
@@ -16104,7 +16315,7 @@ test("console command serves interactive mode without writing static output", as
   assert.equal(url, "http://127.0.0.1:1234/");
   assert.deepEqual(calls, [
     ["server", true, true, true, "secret", 25, 4310, 0, true],
-    ["open", "http://127.0.0.1:1234/launch?token=secret"],
+    ["open", "http://127.0.0.1:1234/launch"],
     ["wait", {}],
   ]);
 });
@@ -16145,7 +16356,7 @@ test("console command can leave browser tabs open on process shutdown", async ()
 });
 
 test("interactive graph server falls back to a random port when the preferred port is busy", async (t) => {
-  const blocker = createServer();
+  const blocker = createServer((_request, response) => response.end("another service"));
 
   await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
   t.after(() => blocker.close());
@@ -16161,4 +16372,47 @@ test("interactive graph server falls back to a random port when the preferred po
   t.after(() => serverInfo.server.close());
 
   assert.notEqual(new URL(serverInfo.url).port, String(blocker.address().port));
+  assert.equal(blocker.listening, true);
+});
+
+test("interactive graph server replaces another console on the preferred port", async (t) => {
+  const graphs = [{ label: "comm", path: "/repo/comm" }];
+  const previous = await startInteractiveGraphServer({
+    graphs,
+    html: buildGraphHtml({
+      graphs,
+      interactive: { enabled: true, token: "previous-token" },
+      scriptSrcs: ["/assets/graph-client/init.js"],
+    }),
+    token: "previous-token",
+    port: 0,
+    closeBrowserTabsOnShutdown: false,
+  });
+  t.after(() => { if (previous.server.listening) previous.server.close(); });
+
+  const preferredPort = Number(new URL(previous.url).port);
+  const replacement = await startInteractiveGraphServer({
+    graphs,
+    html: "<!doctype html><p>replacement</p>",
+    token: "new-token",
+    port: preferredPort,
+    fallbackPort: 0,
+  });
+  t.after(() => replacement.server.close());
+
+  assert.equal(Number(new URL(replacement.url).port), preferredPort);
+  assert.equal(previous.server.closeReason, "browser tab closed");
+  assert.equal(previous.server.listening, false);
+
+  // The browser can finish opening the earlier URL after the port changes owners.
+  const delayedLaunch = await fetch(new URL("launch?token=previous-token", previous.url));
+  assert.equal(delayedLaunch.status, 200);
+  assert.equal(await delayedLaunch.text(), "<!doctype html><p>replacement</p>");
+
+  const staleAction = await fetch(new URL("api/commit-action", replacement.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "previous-token", graphIndex: 0, action: "rebase", hash: "abc123" }),
+  });
+  assert.equal(staleAction.status, 403);
 });
