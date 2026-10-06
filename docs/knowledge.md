@@ -62,8 +62,10 @@ and processes bounded evidence batches. At most four extraction calls run per UT
 day by default, shared across local consoles. Derived mirrors and raw CI
 observations remain searchable and receive an explicit `skipped` learning state.
 That state does not claim their code or history was studied. Eligible evidence
-uses a fair queue ordered by attempts and date; new captures cannot continuously
-hide earlier pending work. Existing related lessons help prevent duplicate claims.
+alternates recent work and older pending evidence, with fewer attempts first.
+New captures cannot continuously hide earlier work, and the backlog does not
+hold every new task until all old records finish. Existing related lessons help
+prevent duplicate claims.
 Calls have a 90-second limit; failed
 attempts count toward the budget and retry after an hour. Restarting does not reset
 the budget or completed work. There is no background daemon after the console exits.

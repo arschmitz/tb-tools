@@ -70,7 +70,9 @@ export async function learnKnowledge(store, { generate, maxCallsPerDay = 4, maxI
     const day = new Date(now).toISOString().slice(0, 10), key = `calls:${day}`;
     const calls = store.setting(key) || 0;
     if (!generate || calls >= maxCallsPerDay) return { budgetReached: calls >= maxCallsPerDay, skipped };
-    const candidates = store.db.prepare("SELECT r.body FROM jobs j JOIN records r ON j.id=r.id WHERE j.state='pending' AND j.retry<=? ORDER BY j.attempts ASC, json_extract(r.body,'$.at') ASC LIMIT 200").all(now);
+    const lane = store.setting("learning-lane") || "recent";
+    const order = lane === "backlog" ? "ASC" : "DESC";
+    const candidates = store.db.prepare(`SELECT r.body FROM jobs j JOIN records r ON j.id=r.id WHERE j.state='pending' AND j.retry<=? ORDER BY j.attempts ASC, json_extract(r.body,'$.at') ${order} LIMIT 200`).all(now);
     const records = [];
     let used = 0;
     for (const row of candidates) {
@@ -87,6 +89,7 @@ export async function learnKnowledge(store, { generate, maxCallsPerDay = 4, maxI
     if (!records.length) return { learned: 0 };
     const existing = existingLessonsFor(store, records);
     store.setting(key, calls + 1);
+    store.setting("learning-lane", lane === "backlog" ? "recent" : "backlog");
     try {
       const output = await generate(learningPrompt(records, existing));
       const learned = await acceptLessons(store, records, output);
@@ -97,7 +100,7 @@ export async function learnKnowledge(store, { generate, maxCallsPerDay = 4, maxI
           .run(offset >= store.get(record.id).text.length ? "done" : "pending", record.id);
       }
       await writeComponentGuides(store);
-      return { learned, calls: calls + 1, skipped };
+      return { learned, calls: calls + 1, skipped, lane };
     } catch (error) {
       for (const record of records) store.db.prepare("UPDATE jobs SET attempts=attempts+1, retry=? WHERE id=?").run(now + 3_600_000, record.id);
       throw error;

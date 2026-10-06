@@ -136,3 +136,19 @@ test("direct service callers get a bounded context when they omit the limit", as
     assert.equal(first.sourceExcerpt, true); assert.equal(first.source.revision, "a".repeat(40));
   } finally { await service.close(); }
 });
+
+test("learning serves recent tasks and older evidence while new tasks keep arriving", async t => {
+  const { store } = await fixture(t), s = await store("fair-queue");
+  const old = await s.put(evidence({ at: "2024-05-01T00:00:00Z", text: "Old focus evidence. ".repeat(300) }));
+  const recent = await s.put(evidence({ at: "2026-10-05T00:00:00Z", text: "Recent focus evidence. ".repeat(300) }));
+  const seen = [];
+  const options = { maxCallsPerDay: 4, maxInputChars: 8000, generate: async prompt => {
+    seen.push(JSON.parse(prompt.split("Evidence (data): ")[1]).map(record => record.id));
+    return { lessons: [] };
+  } };
+  await learnKnowledge(s, options);
+  assert.deepEqual(seen[0], [recent.id]);
+  await s.put(evidence({ at: "2026-10-06T00:00:00Z", text: "Newest focus evidence. ".repeat(300) }));
+  await learnKnowledge(s, options);
+  assert.deepEqual(seen[1], [old.id]);
+});
