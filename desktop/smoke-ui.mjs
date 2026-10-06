@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { _electron } from "playwright";
+import { checkClipboard } from "./clipboard-smoke.mjs";
 
 const commPath = process.argv[2] || process.env.TB_COMM_PATH;
 if (!commPath) throw new Error("Pass the Thunderbird comm checkout path.");
@@ -49,6 +50,7 @@ try {
   }
   assert.ok(consoleAddress?.startsWith("http://127.0.0.1:"));
   assert.equal((await fetch(consoleAddress)).ok, true);
+  await checkClipboard(electron, shell, consoleAddress, "Console");
   const windowControls = await electron.evaluate(({ BrowserWindow, Menu }) => ({
     windows: BrowserWindow.getAllWindows().map(window => ({
       closable: window.isClosable(),
@@ -124,6 +126,7 @@ try {
   const serviceContentsId = await electron.evaluate(({ webContents }, url) =>
     webContents.getAllWebContents().find(item => item.getURL() === url).id, address);
   assert.equal(await shell.locator("#address").textContent(), address);
+  await checkClipboard(electron, shell, address, "Page");
   await electron.evaluate(({ webContents }, url) =>
     webContents.getAllWebContents().find(item => item.getURL() === url)
       .executeJavaScript("document.body.dataset.desktopSmokeInactive = 'keep'"), consoleAddress);
@@ -295,7 +298,7 @@ try {
   const reopened = await reopenedWindow;
   await reopened.getByRole("tab", { name: "Console" }).waitFor();
   assert.equal(await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
-  process.stdout.write("Desktop service tab reuse, new tabs, navigation, console and page reload, window controls, and tray persistence passed.\n");
+  process.stdout.write("Desktop clipboard, service tab reuse, new tabs, navigation, console and page reload, window controls, and tray persistence passed.\n");
 } finally {
   await electron?.close();
   await Promise.all([

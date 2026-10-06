@@ -11,6 +11,9 @@ host, and port. Right-click any web link in the console or a page to open a new
 tab or use the system browser. The Pages menu also controls the active page.
 Reload and Cmd/Ctrl+R reload the selected tab, including Console. The console
 server and background tasks keep running during a page reload.
+The Edit menu supplies the normal copy, paste, cut, undo, and select-all shortcuts.
+Right-click selected text to copy it. Right-click a text field to use its editing
+commands. These commands work in Console and external pages.
 
 The daily build service stores its schedule and state in `~/.tb-tools/daily-build`.
 It fetches both `origin/main` branches and builds in its own detached worktree.
@@ -28,8 +31,9 @@ Pairing, actions, revocation, and the proxy have focused tests. A real cellular
 test needs Tailscale signed in on the computer and phone.
 
 Run `npm run desktop:package` before `npm run desktop:smoke -- /path/to/comm`.
-The smoke test hides its window and uses private temporary app data. It checks
-tab opening, tab reuse, Back, Forward, Reload, close, right-click menu wiring, native
+The smoke test uses private temporary app data. Its window appears briefly for
+native keyboard checks and stays hidden for the other checks. It checks
+tab opening, tab reuse, Back, Forward, Reload, close, clipboard commands, right-click menu wiring, native
 window controls, and tray persistence. Run `npm run desktop:package:all` to
 build macOS arm64, Windows x64, and Linux x64 bundles from one checkout. You can
 also pass targets such as `win32:arm64` or `linux:arm64` to

@@ -81,15 +81,44 @@ function webAddress(address) {
   } catch { return null; }
 }
 
-function showLinkMenu(contents) {
+function installPageCommands(contents) {
+  contents.on("before-input-event", (event, input) => {
+    const modifier = process.platform === "darwin" ? input.meta : input.control;
+    const otherModifier = process.platform === "darwin" ? input.control : input.meta;
+    if (input.type !== "keyDown" || !modifier || otherModifier || input.alt || input.isComposing) return;
+    const key = input.key.toLowerCase();
+    const action = input.shift ? { z: "redo", v: "pasteAndMatchStyle" }[key]
+      : { a: "selectAll", c: "copy", v: "paste", x: "cut", z: "undo",
+        y: process.platform === "win32" ? "redo" : undefined }[key];
+    if (!action) return;
+    event.preventDefault();
+    contents[action]();
+  });
   contents.on("context-menu", (_event, params) => {
     const url = webAddress(params.linkURL);
-    if (!url || !consoleWindow || consoleWindow.isDestroyed()) return;
-    Menu.buildFromTemplate([
-      { label: "Open in New Tab", click: () => openManagedPage(url.href, { newTab: true }) },
-      { label: "Open in Browser", click: () => { void shell.openExternal(url.href); } },
-      { label: "Copy Link Address", click: () => clipboard.writeText(url.href) },
-    ]).popup({ window: consoleWindow });
+    if (!consoleWindow || consoleWindow.isDestroyed()) return;
+    const items = [];
+    const flags = params.editFlags || {};
+    const editItem = (label, action, enabled) => ({ label, enabled: Boolean(enabled),
+      click: () => { if (!contents.isDestroyed()) contents[action](); } });
+    if (params.isEditable) {
+      items.push(editItem("Undo", "undo", flags.canUndo),
+        editItem("Redo", "redo", flags.canRedo), { type: "separator" },
+        editItem("Cut", "cut", flags.canCut), editItem("Copy", "copy", flags.canCopy),
+        editItem("Paste", "paste", flags.canPaste), { type: "separator" },
+        editItem("Select All", "selectAll", flags.canSelectAll));
+    } else if (params.selectionText) {
+      items.push(editItem("Copy", "copy", flags.canCopy));
+    }
+    if (url) {
+      if (items.length) items.push({ type: "separator" });
+      items.push(
+        { label: "Open in New Tab", click: () => openManagedPage(url.href, { newTab: true }) },
+        { label: "Open in Browser", click: () => { void shell.openExternal(url.href); } },
+        { label: "Copy Link Address", click: () => clipboard.writeText(url.href) },
+      );
+    }
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: consoleWindow });
   });
 }
 
@@ -125,6 +154,11 @@ function layoutBrowser() {
     height: Math.max(0, height - browserHeaderHeight) });
 }
 
+function focusActivePage() {
+  const contents = activeView?.webContents;
+  if (contents && !contents.isDestroyed()) contents.focus();
+}
+
 function activateTab(id) {
   if (!consoleWindow || consoleWindow.isDestroyed()) return;
   const next = id === "console" ? consoleView : browserTabs.get(id)?.view;
@@ -139,7 +173,7 @@ function activateTab(id) {
   if (tab) tab.lastActive = ++tabActivationOrder;
   layoutBrowser();
   sendBrowserState();
-  if (process.env.TB_DESKTOP_TEST !== "1") next.webContents.focus();
+  if (process.env.TB_DESKTOP_TEST !== "1") focusActivePage();
 }
 
 function closeTab(id = activeTabId) {
@@ -199,6 +233,8 @@ function showConsole() {
     consoleWindow.webContents.on("will-navigate", (event, url) => {
       if (!url.startsWith("file:")) event.preventDefault();
     });
+    installPageCommands(consoleWindow.webContents);
+    consoleWindow.on("focus", focusActivePage);
     consoleWindow.on("resize", layoutBrowser);
     for (const event of ["maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
       consoleWindow.on(event, sendBrowserState);
@@ -224,17 +260,17 @@ function showConsole() {
         openManagedPage(url);
       }
     });
-    showLinkMenu(consoleView.webContents);
+    installPageCommands(consoleView.webContents);
     activateTab("console");
     if (process.env.TB_DESKTOP_TEST !== "1") {
-      consoleWindow.once("ready-to-show", () => consoleWindow.show());
+      consoleWindow.once("ready-to-show", () => { consoleWindow.show(); focusActivePage(); });
     }
     void consoleWindow.loadFile(path.join(__dirname, "browser-shell.html"));
     void consoleView.webContents.loadURL(consoleServer.url);
   } else {
-    activateTab("console");
     consoleWindow.show();
     consoleWindow.focus();
+    activateTab("console");
   }
 }
 
@@ -279,10 +315,19 @@ function openManagedPage(address, { newTab = false } = {}) {
   view.webContents.on("did-navigate", update);
   view.webContents.on("did-navigate-in-page", update);
   view.webContents.on("did-stop-loading", update);
-  showLinkMenu(view.webContents);
+  installPageCommands(view.webContents);
   view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   activateTab(id);
   void view.webContents.loadURL(url.href);
+}
+
+function restoreAppWindow() {
+  if (!consoleWindow || consoleWindow.isDestroyed()) showConsole();
+  else {
+    consoleWindow.show();
+    consoleWindow.focus();
+    focusActivePage();
+  }
 }
 
 async function pairPhone() {
@@ -318,6 +363,7 @@ function installMenu() {
       { label: "Revoke Paired Phones", click: () => { void mobileGateway.revokeAll(); } },
       { role: "quit" },
     ] },
+    { role: "editMenu" },
     { label: "View", submenu: [{ role: "toggleDevTools" }] },
     { label: "Pages", submenu: [
       { label: "Back", accelerator: "CmdOrCtrl+[", click: () => { const page = selectedPage();
@@ -414,7 +460,7 @@ async function start() {
 if (process.env.TB_DESKTOP_TEST !== "1" && !app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", () => showConsole());
-  app.on("activate", showConsole);
+  app.on("activate", restoreAppWindow);
   app.on("window-all-closed", () => { /* The service and tray stay available. */ });
   app.on("before-quit", event => {
     if (quitting) return;
