@@ -1,3 +1,4 @@
+import { CODEX_MEMORY_ARGS } from "../commands/knowledge/instructions.mjs";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
@@ -39,7 +40,7 @@ test("Codex app-server names explicitly named threads after creating them", asyn
     threadName: "D320328 - Update 2026-09-08 14:37",
     spawnProcess(command, args, options) {
       assert.equal(command, "codex");
-      assert.deepEqual(args, ["app-server", "--stdio"]);
+      assert.deepEqual(args, ["app-server", "--stdio", ...CODEX_MEMORY_ARGS]);
       assert.equal(options.cwd, "/work/comm");
       return child;
     },
@@ -55,7 +56,7 @@ test("Codex app-server names explicitly named threads after creating them", asyn
         method: "initialize",
         params: {
           clientInfo: { name: "tb-tools", version: "1.0" },
-          capabilities: {},
+          capabilities: { experimentalApi: true },
         },
       },
       {
@@ -66,6 +67,7 @@ test("Codex app-server names explicitly named threads after creating them", asyn
           sandbox: "danger-full-access",
         },
       },
+      { method: "thread/memoryMode/set", params: { threadId: "thread-1", mode: "disabled" } },
       {
         method: "thread/name/set",
         params: {
@@ -92,7 +94,7 @@ test("Codex app-server leaves unnamed threads untouched", async () => {
 
   assert.deepEqual(
     requests.map(({ method }) => method),
-    ["initialize", "thread/start"],
+    ["initialize", "thread/start", "thread/memoryMode/set"],
   );
 
   client.close();

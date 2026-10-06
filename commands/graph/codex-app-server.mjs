@@ -1,3 +1,5 @@
+import { CODEX_MEMORY_ARGS, knowledgeInstructions } from "../knowledge/instructions.mjs";
+import { consoleKnowledgeDirectory, consoleKnowledgeRepository, getDefaultKnowledgeService } from "../knowledge-service.mjs";
 import { spawn as defaultSpawn } from "node:child_process";
 
 const APP_SERVER_STARTUP_TIMEOUT_MS = 30 * 1000;
@@ -16,8 +18,9 @@ export function createGraphCodexAppServer({
   onNotification,
   onStderr,
   spawnProcess = defaultSpawn,
+  knowledge,
 }) {
-  const child = spawnProcess(command, ["app-server", "--stdio"], {
+  const child = spawnProcess(command, ["app-server", "--stdio", ...CODEX_MEMORY_ARGS], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -28,6 +31,8 @@ export function createGraphCodexAppServer({
   let nextRequestId = 1;
   let stdoutBuffer = "";
   let closed = false;
+  let knowledgeService;
+  const evidenceByTurn = new Map();
 
   const rejectPending = (error) => {
     for (const { reject } of pending.values()) {
@@ -63,6 +68,19 @@ export function createGraphCodexAppServer({
   const handleNotification = (message) => {
     onNotification?.(message);
     const params = message.params || {};
+    if (knowledgeService && message.method === "item/completed" &&
+        ["commandExecution", "fileChange", "mcpToolCall", "webSearch"].includes(params.item?.type)) {
+      const evidence = evidenceByTurn.get(params.turnId) || { events: [], size: 0, truncated: false };
+      const item = params.item;
+      const event = { type: item.type, command: item.command, output: item.aggregatedOutput,
+        exitCode: item.exitCode, changes: item.changes, server: item.server, tool: item.tool,
+        arguments: item.arguments, result: item.result, query: item.query };
+      const text = JSON.stringify(event);
+      if (evidence.size + text.length <= 160_000) { evidence.events.push(event); evidence.size += text.length; }
+      else evidence.truncated = true;
+      evidenceByTurn.set(params.turnId, evidence);
+    }
+
 
     if (message.method === "item/completed" && params.item?.type === "agentMessage") {
       const current = messages.get(params.turnId) || "";
@@ -151,7 +169,7 @@ export function createGraphCodexAppServer({
     async start() {
       await request("initialize", {
         clientInfo: { name: "tb-tools", version: "1.0" },
-        capabilities: {},
+        capabilities: { experimentalApi: true },
       });
       const result = await request("thread/start", {
         approvalPolicy: "never",
@@ -159,6 +177,7 @@ export function createGraphCodexAppServer({
         sandbox: "danger-full-access",
       });
       const thread = result.thread;
+      await request("thread/memoryMode/set", { threadId: thread.id, mode: "disabled" });
       const name = String(threadName || "").trim();
 
       if (name && thread?.id) {
@@ -170,20 +189,38 @@ export function createGraphCodexAppServer({
 
       return thread;
     },
-    async startTurn({ prompt, threadId, onTurnStarted }) {
-      const result = await request("turn/start", {
-        threadId,
-        input: [{ type: "text", text: prompt }],
-      });
+    async startTurn({ prompt, threadId, onTurnStarted, task, knowledgeQuery = prompt }) {
+      let memory;
+      try {
+        knowledgeService = knowledge === false ? null : knowledge || await getDefaultKnowledgeService();
+        memory = await knowledgeService?.beforeTurn({ cwd, prompt: knowledgeQuery, task });
+      } catch (error) { onStderr?.(`Knowledge retrieval unavailable: ${error.message}\n`); }
+      const context = memory?.text ? `${prompt}\n\n${memory.text}` : prompt;
+      const input = `${context}\n\n${knowledgeInstructions(knowledgeService?.store?.directory || consoleKnowledgeDirectory(), consoleKnowledgeRepository())}`;
+      const result = await request("turn/start", { threadId, input: [{ type: "text", text: input }] });
       const turn = result.turn;
-
       onTurnStarted?.(turn.id);
-      return waitForTurn(turn.id);
+      const completed = await waitForTurn(turn.id);
+      try {
+        await knowledgeService?.capture({ context: memory?.context, prompt: knowledgeQuery,
+          message: completed.message, task, threadId, turnId: turn.id, status: completed.turn?.status,
+          ...evidenceByTurn.get(turn.id) });
+      } catch (error) { onStderr?.(`Could not save knowledge evidence: ${error.message}\n`); }
+      evidenceByTurn.delete(turn.id);
+      return completed;
     },
     async steerTurn({ prompt, threadId, turnId }) {
+      if (knowledgeService) {
+        const evidence = evidenceByTurn.get(turnId) || { events: [], size: 0, truncated: false };
+        if (evidence.size + prompt.length <= 160_000) {
+          evidence.events.push({ type: "user-followup", text: prompt }); evidence.size += prompt.length;
+        } else evidence.truncated = true;
+        evidenceByTurn.set(turnId, evidence);
+      }
+
       return request("turn/steer", {
         expectedTurnId: turnId,
-        input: [{ type: "text", text: prompt }],
+        input: [{ type: "text", text: `${prompt}\n\n${knowledgeInstructions(knowledgeService?.store?.directory || consoleKnowledgeDirectory(), consoleKnowledgeRepository())}` }],
         threadId,
       });
     },
@@ -205,6 +242,7 @@ export async function startGraphCodexAppServer({
   onNotification,
   onStderr,
   spawnProcess,
+  knowledge,
 }) {
   const client = createGraphCodexAppServer({
     command,
@@ -213,6 +251,7 @@ export async function startGraphCodexAppServer({
     onNotification,
     onStderr,
     spawnProcess,
+    knowledge,
   });
   const thread = await Promise.race([
     client.start(),

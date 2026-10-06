@@ -1,3 +1,4 @@
+import { getDefaultKnowledgeService, stopDefaultKnowledgeService } from "../knowledge-service.mjs";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
@@ -3551,7 +3552,9 @@ export async function startInteractiveGraphServer({
     await listen(fallbackPort);
   }
 
+  void getDefaultKnowledgeService();
   server.once("close", () => {
+    void stopDefaultKnowledgeService().catch(() => {});
     clearInterval(heartbeatTimer);
     clearNoClientCloseTimer();
 

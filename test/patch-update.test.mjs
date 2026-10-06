@@ -1,3 +1,4 @@
+import { CODEX_MEMORY_ARGS } from "../commands/knowledge/instructions.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -283,28 +284,29 @@ test("Codex patch updates use a full-access noninteractive invocation", () => {
     "never",
     "-C",
     "/work/comm",
+    ...CODEX_MEMORY_ARGS,
     "Review this patch.",
   ]);
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--approve-for-me"), false);
 });
 
-test("Codex patch updates make the shared memory store available", () => {
+test("Codex patch updates use standalone knowledge and disable native memory", () => {
   const args = getGraphCodexExecArgs({
-    memoryDirectory: "/Users/example/.codex/memories",
+    memoryDirectory: "/Users/example/.tb-tools/knowledge",
     session: { codexSessionId: "", graph: { path: "/work/comm" } },
     prompt: "Review this patch.",
   });
 
   assert.deepEqual(args.slice(-3), [
     "--add-dir",
-    "/Users/example/.codex/memories",
+    "/Users/example/.tb-tools/knowledge",
     "Review this patch.",
   ]);
 
   assert.deepEqual(
     getGraphCodexExecArgs({
-      memoryDirectory: "/Users/example/.codex/memories",
+      memoryDirectory: "/Users/example/.tb-tools/knowledge",
       session: { codexSessionId: "existing-session", graph: { path: "/work/comm" } },
       prompt: "Apply the selected change.",
     }),
@@ -313,6 +315,7 @@ test("Codex patch updates make the shared memory store available", () => {
       "resume",
       "--json",
       "--dangerously-bypass-approvals-and-sandbox",
+      ...CODEX_MEMORY_ARGS,
       "existing-session",
       "Apply the selected change.",
     ],
@@ -336,7 +339,7 @@ test("author patch-update prompts establish purpose before assessing comments", 
   assert.match(prompt, /Do not invoke, read, or follow the thunderbird-patch-review skill/i);
   assert.match(prompt, /patchContext before evaluating comments/i);
   assert.match(prompt, /rg exits with status 1/);
-  assert.match(prompt, /ad-hoc notes/);
+  assert.match(prompt, /targeted tb knowledge search/);
   assert.match(prompt, /Current patch commit: abc123/);
   assert.match(prompt, /Bug 123456 - Fix the thing/);
 
@@ -356,35 +359,19 @@ test("author patch-update prompts establish purpose before assessing comments", 
   assert.match(promptWithMemory, /Shared Thunderbird history for the affected test/);
 });
 
-test("patch update injects the shared memory summary and its patch history", async () => {
+test("patch update reads only standalone patch histories", async () => {
   const files = new Map([
-    ["/memories/memory_summary.md", "Project-wide Thunderbird context."],
-    [
-      "/memories/MEMORY.md",
-      "# BCT4 a11y work\n\nThe BCT4 stack protects accessibility test behavior.\n\n## Other work\n",
-    ],
-    [
-      "/memories/extensions/ad_hoc/notes/tb-tools-patch-d123456.md",
-      "Prior patch update context.",
-    ],
+    ["/knowledge/private/legacy-patch-history/tb-tools-patch-d123456.md", "Imported review decision."],
+    ["/knowledge/private/patch-history/tb-tools-patch-d123456.md", "Current review result."],
   ]);
+  const reads = [];
   const context = await getGraphPatchUpdateMemoryContext({
-    memoryDirectory: "/memories",
-    revision: "D123456",
-    commitMessage: "Bug 123456 - BCT4 a11y test fix",
-    readMemoryFile: async (filePath) => {
-      if (!files.has(filePath)) {
-        throw new Error("missing");
-      }
-
-      return files.get(filePath);
-    },
+    memoryDirectory: "/knowledge", revision: "D123456",
+    readMemoryFile: async file => { reads.push(file); return files.get(file) || ""; },
   });
-
-  assert.match(context, /Project-wide Thunderbird context/);
-  assert.match(context, /Prior Patch Update history/);
-  assert.match(context, /Relevant shared-memory index excerpts/);
-  assert.match(context, /BCT4 stack protects accessibility test behavior/);
+  assert.deepEqual(reads, [...files.keys()]);
+  assert.match(context, /Imported review decision/);
+  assert.match(context, /Current review result/);
 });
 
 test("Codex activity shows useful execution events without structured review output", () => {

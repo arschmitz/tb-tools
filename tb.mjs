@@ -33,6 +33,7 @@ import fs from "fs";
 import path from "path";
 import graphCommand from './commands/graph.mjs';
 import consoleCommand from './commands/console.mjs';
+import knowledgeCommand from './commands/knowledge.mjs';
 
 
 const mainDefinitions = [
@@ -42,6 +43,10 @@ const { command, _unknown } = args(mainDefinitions, { stopAtFirstUnknown: true }
 const argv = _unknown || [];
 
 const commands = {
+  knowledge: {
+    description: "Use shared project knowledge: status, search, show, record, lesson, catalog, rebuild, import, maintain, publish, repair, sync, or index. See docs/knowledge.md.",
+    run: () => knowledgeCommand(argv),
+  },
   "version": {
     description: false,
     run: async () => {
@@ -480,7 +485,7 @@ Object.entries(commands).forEach(([name, { description, header, options }]) => {
   sections.push({ header, content: getUsageOptions(options) });
 });
 
-if (command && !["help", "readme"].includes(command)) {
+if (command && !["help", "readme", "knowledge"].includes(command)) {
   checkDir();
 }
 

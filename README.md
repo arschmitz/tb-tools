@@ -68,6 +68,8 @@ Use the console to:
 - monitor comm and Firefox `origin/main` freshness plus Rust dependency sync warnings before remote-build workflows like try and submit
 - close console browser tabs automatically when the local console process exits, with an opt-out for keeping tabs open
 
+AI tasks use the standalone [shared knowledge repository](https://github.com/arschmitz/tb-knowledge), with bounded retrieval and automatic project lesson publication. See [Console knowledge](docs/knowledge.md) for consumer setup, learning budgets, private evidence, Git sync, and inspection commands.
+
 ![Thunderbird Desktop Console showing a selected commit, integration badges, and a GitHub-style diff](/images/console-overview.png)
 
 _The main console view keeps the comm graph, checkout state, Bugzilla and Phabricator status, tracked try runs, and a syntax-highlighted diff in one place._
