@@ -59,6 +59,7 @@ test("bug saves immediately update board points, assignees, and columns", { time
   const assignee = page.locator(".meta-board-detail-assignee");
   const save = page.locator(".meta-board-detail-save");
   const column = (name) => page.locator(`[data-meta-board-column="${name}"]`);
+  await page.waitForFunction(() => !globalThis.document.querySelector(".meta-board-detail-save").disabled);
   const startSave = async (expectedColumn, expectedPoints, expectedAssignees = []) => {
     releaseSave = null;
     await save.click();

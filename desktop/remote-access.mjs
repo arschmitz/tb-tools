@@ -29,8 +29,9 @@ export function createRemoteAccessService({ gatewayUrl, stateFile = path.join(os
 
   async function tailscale(args) {
     const cmd = executable || await findTailscale();
+    const extraPath = process.platform === "win32" ? [] : ["/opt/homebrew/bin", "/usr/local/bin"];
     return String(await runCommand({ cmd, args, capture: true, silent: true,
-      timeoutMs: 30_000, env: { PATH: `${process.env.PATH || ""}:/opt/homebrew/bin:/usr/local/bin` } })).trim();
+      timeoutMs: 30_000, env: { PATH: [process.env.PATH || "", ...extraPath].join(path.delimiter) } })).trim();
   }
 
   async function save() {
@@ -63,7 +64,7 @@ export function createRemoteAccessService({ gatewayUrl, stateFile = path.join(os
   async function apply() {
     const status = JSON.parse(await tailscale(["status", "--json"]));
     if (status.BackendState !== "Running" || !status.Self?.DNSName) {
-      throw new Error("Sign in to Tailscale on this Mac before enabling phone access.");
+      throw new Error("Sign in to Tailscale on this computer before enabling phone access.");
     }
     await assertServePortAvailable();
     await tailscale(["serve", "--bg", "--yes", `--https=${port}`, gatewayUrl]);
