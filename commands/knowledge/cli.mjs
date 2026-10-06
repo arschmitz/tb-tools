@@ -75,15 +75,18 @@ export async function runKnowledgeCommand(argv = [], { config = {}, generate } =
       result = { accepted: await acceptLessons(store, evidence, input), publication: await publishProjectLessons(store, options) };
     }
     if (action === "repair") result = { ...await repairPortableRecords(store), skipped: classifyLearningQueue(store) };
-    if (action === "publish") result = { publication: await publishProjectLessons(store, options),
-      sync: await syncKnowledgeRepository(store, options) };
+    if (action === "publish") {
+      result = { publication: await publishProjectLessons(store, options), sync: await syncKnowledgeRepository(store, options) };
+      store.setting("lastSync", { ...result.sync, at: new Date().toISOString() });
+    }
     if (action === "rebuild") result = { records: await store.rebuild() };
     if (action === "catalog") {
       const records = store.all(values.repository), groups = claimGroups(records), seen = new Set();
       result = records.filter(record => record.kind === "lesson").map(record => groups.representatives.get(record.id))
         .filter(record => { if (seen.has(record.id)) return false; seen.add(record.id); return true; })
         .map(({ id, repository, component, title, status, paths, source }) => ({ id, repository, component, title, status, paths,
-          file: `records/${id}.json`, sourceAt: source.sourceAt || store.get(id).at }))
+          file: store.get(id).visibility === "shared" ? `records/${id}.json` : store.file(store.get(id)),
+          sourceAt: source.sourceAt || store.get(id).at }))
         .sort((a, b) => (a.repository + a.component + a.title).localeCompare(b.repository + b.component + b.title));
     }
     if (action === "maintain") { await service.tick(); result = store.setting("lastLearning"); }
