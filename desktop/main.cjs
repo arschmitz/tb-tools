@@ -12,6 +12,7 @@ let consoleWindow;
 let consoleView;
 let activeView;
 let activeTabId = "console";
+let tabActivationOrder = 0;
 let consoleServer;
 let mobileGateway;
 let mobileAddress;
@@ -85,6 +86,7 @@ function showLinkMenu(contents) {
     const url = webAddress(params.linkURL);
     if (!url || !consoleWindow || consoleWindow.isDestroyed()) return;
     Menu.buildFromTemplate([
+      { label: "Open in New Tab", click: () => openManagedPage(url.href, { newTab: true }) },
       { label: "Open in Browser", click: () => { void shell.openExternal(url.href); } },
       { label: "Copy Link Address", click: () => clipboard.writeText(url.href) },
     ]).popup({ window: consoleWindow });
@@ -103,6 +105,7 @@ function browserState() {
     address: active?.view.webContents.getURL() || active?.url || "Console",
     canGoBack: index > 0,
     canGoForward: Boolean(history && index < history.length() - 1),
+    canReload: Boolean(activeView && !activeView.webContents.isDestroyed()),
     tabs: [{ id: "console", title: "Console", url: "" },
       ...[...browserTabs.values()].map(tab => ({ id: tab.id,
         title: tab.title || webAddress(tab.url)?.hostname || "Page", url: tab.url }))],
@@ -132,6 +135,8 @@ function activateTab(id) {
     activeView = next;
   }
   activeTabId = id;
+  const tab = browserTabs.get(id);
+  if (tab) tab.lastActive = ++tabActivationOrder;
   layoutBrowser();
   sendBrowserState();
   if (process.env.TB_DESKTOP_TEST !== "1") next.webContents.focus();
@@ -148,6 +153,11 @@ function closeTab(id = activeTabId) {
   sendBrowserState();
 }
 
+function reloadActivePage() {
+  const contents = activeView?.webContents;
+  if (contents && !contents.isDestroyed()) contents.reload();
+}
+
 function handleBrowserAction(event, { action, tabId } = {}) {
   if (event.sender !== consoleWindow?.webContents) return;
   if (action === "window-close") { consoleWindow.close(); return; }
@@ -161,6 +171,7 @@ function handleBrowserAction(event, { action, tabId } = {}) {
   }
   if (action === "select") { activateTab(tabId); return; }
   if (action === "close") { closeTab(tabId || activeTabId); return; }
+  if (action === "reload") { reloadActivePage(); return; }
   const tab = browserTabs.get(activeTabId);
   if (!tab) return;
   const contents = tab.view.webContents;
@@ -168,7 +179,6 @@ function handleBrowserAction(event, { action, tabId } = {}) {
   const index = history.getActiveIndex();
   if (action === "back" && index > 0) history.goToIndex(index - 1);
   else if (action === "forward" && index < history.length() - 1) history.goToIndex(index + 1);
-  else if (action === "reload") contents.reload();
   else if (action === "open-browser") {
     const url = webAddress(contents.getURL());
     if (url) void shell.openExternal(url.href);
@@ -228,24 +238,38 @@ function showConsole() {
   }
 }
 
-function openManagedPage(address) {
+function openManagedPage(address, { newTab = false } = {}) {
   const url = webAddress(address);
   if (!url) return;
   if (!consoleWindow || consoleWindow.isDestroyed()) showConsole();
-  const existing = [...browserTabs.values()].find(tab => tab.url === url.href);
-  if (existing) { activateTab(existing.id); return; }
+  const existing = !newTab && [...browserTabs.values()]
+    .filter(tab => webAddress(tab.url)?.origin === url.origin)
+    .sort((first, second) => second.lastActive - first.lastActive)[0];
+  if (existing) {
+    if (existing.url !== url.href) {
+      existing.url = url.href;
+      void existing.view.webContents.loadURL(url.href);
+    }
+    activateTab(existing.id);
+    return;
+  }
   const id = randomUUID();
   const view = new WebContentsView({ webPreferences: {
     partition: "persist:commands-browser", contextIsolation: true,
     nodeIntegration: false, sandbox: true } });
-  const tab = { id, url: url.href, title: url.hostname, view };
+  const tab = { id, url: url.href, title: url.hostname, lastActive: 0, view };
   browserTabs.set(id, tab);
   view.webContents.setWindowOpenHandler(({ url: next }) => {
     openManagedPage(next);
     return { action: "deny" };
   });
   view.webContents.on("will-navigate", (event, next) => {
-    if (!webAddress(next)) event.preventDefault();
+    const nextUrl = webAddress(next);
+    if (!nextUrl) event.preventDefault();
+    else if (nextUrl.origin !== webAddress(tab.url)?.origin) {
+      event.preventDefault();
+      openManagedPage(nextUrl.href);
+    }
   });
   view.webContents.on("page-title-updated", (_event, title) => {
     tab.title = title || webAddress(tab.url)?.hostname || "Page";
@@ -304,7 +328,7 @@ function installMenu() {
         if (history && history.getActiveIndex() < history.length() - 1) {
           history.goToIndex(history.getActiveIndex() + 1);
         } } },
-      { label: "Reload Page", accelerator: "CmdOrCtrl+R", click: () => selectedPage()?.view.webContents.reload() },
+      { label: "Reload Page", accelerator: "CmdOrCtrl+R", click: reloadActivePage },
       { label: "Close Page", click: () => closeTab() },
       { label: "Close All Pages", click: () => {
         for (const id of [...browserTabs.keys()]) closeTab(id);

@@ -5,9 +5,12 @@ its window closes. It creates a Review worktree pair before loading the console.
 External links open as tabs inside the main window. A fixed header keeps Back,
 Forward, Reload, Close tab, and the tab list visible while a page is open.
 The console stays in its own tab. Pages run in sandboxed `WebContentsView`
-instances that share a browser session for sign-in. Right-click any web link in
-the console or a page to open it in the system browser. The Pages menu also
-controls the active page.
+instances that share a browser session for sign-in. Normal clicks reuse the most
+recently used tab for the same service. A service is one URL origin: its scheme,
+host, and port. Right-click any web link in the console or a page to open a new
+tab or use the system browser. The Pages menu also controls the active page.
+Reload and Cmd/Ctrl+R reload the selected tab, including Console. The console
+server and background tasks keep running during a page reload.
 
 The daily build service stores its schedule and state in `~/.tb-tools/daily-build`.
 It fetches both `origin/main` branches and builds in its own detached worktree.
@@ -26,7 +29,7 @@ test needs Tailscale signed in on the computer and phone.
 
 Run `npm run desktop:package` before `npm run desktop:smoke -- /path/to/comm`.
 The smoke test hides its window and uses private temporary app data. It checks
-tab opening, tab reuse, Back, Forward, close, right-click menu wiring, native
+tab opening, tab reuse, Back, Forward, Reload, close, right-click menu wiring, native
 window controls, and tray persistence. Run `npm run desktop:package:all` to
 build macOS arm64, Windows x64, and Linux x64 bundles from one checkout. You can
 also pass targets such as `win32:arm64` or `linux:arm64` to

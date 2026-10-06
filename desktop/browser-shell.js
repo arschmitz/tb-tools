@@ -12,7 +12,7 @@ function render(state) {
   maximize.textContent = state.maximized ? "❐" : "□";
   document.getElementById("back").disabled = !state.canGoBack;
   document.getElementById("forward").disabled = !state.canGoForward;
-  document.getElementById("reload").disabled = state.activeId === "console";
+  document.getElementById("reload").disabled = !state.canReload;
   document.getElementById("open-browser").disabled = state.activeId === "console";
   document.getElementById("close").disabled = state.activeId === "console";
   address.textContent = state.address || "Console";

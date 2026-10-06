@@ -15,8 +15,16 @@ const site = createServer((request, response) => {
     ? "<!doctype html><title>Second page</title><p>Second page</p>"
     : "<!doctype html><title>Managed test page</title><a id='next' href='/second'>Next page</a>");
 });
-await new Promise(resolve => site.listen(0, "127.0.0.1", resolve));
+const otherSite = createServer((_request, response) => {
+  response.writeHead(200, { "content-type": "text/html" });
+  response.end("<!doctype html><title>Other service</title><p>Other service</p>");
+});
+await Promise.all([
+  new Promise(resolve => site.listen(0, "127.0.0.1", resolve)),
+  new Promise(resolve => otherSite.listen(0, "127.0.0.1", resolve)),
+]);
 const address = `http://127.0.0.1:${site.address().port}/`;
+const otherAddress = `http://127.0.0.1:${otherSite.address().port}/`;
 const executablePath = process.env.TB_DESKTOP_EXECUTABLE || path.resolve("dist",
   `Thunderbird-Commands-${process.platform}-${process.arch}`,
   process.platform === "darwin" ? "Thunderbird-Commands.app/Contents/MacOS/Thunderbird-Commands"
@@ -58,6 +66,43 @@ try {
     assert.equal(await shell.getByRole("button", { name }).isVisible(), true);
   }
 
+  const reloadAndWait = async (url, trigger) => {
+    const id = await electron.evaluate(async ({ webContents }, target) => {
+      const contents = webContents.getAllWebContents().find(item => item.getURL() === target);
+      if (contents.isLoading()) await new Promise(resolve => contents.once("did-stop-loading", resolve));
+      await contents.executeJavaScript("document.body.dataset.desktopSmokeReload = 'before'");
+      contents.desktopSmokeReloadFinished = false;
+      contents.once("did-finish-load", () => { contents.desktopSmokeReloadFinished = true; });
+      return contents.id;
+    }, url);
+    await trigger();
+    let finished = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      finished = await electron.evaluate(({ webContents }, contentsId) =>
+        webContents.fromId(contentsId)?.desktopSmokeReloadFinished === true, id);
+      if (finished) break;
+      await shell.waitForTimeout(100);
+    }
+    assert.equal(finished, true, `Reload did not finish for ${url}`);
+    assert.equal(await electron.evaluate(({ webContents }, contentsId) =>
+      webContents.fromId(contentsId).executeJavaScript("document.body.dataset.desktopSmokeReload"), id), undefined);
+    assert.equal(await shell.evaluate(() => document.body.dataset.desktopSmokeShell), "keep");
+  };
+  const reloadFromMenu = async () => {
+    const accelerator = await electron.evaluate(({ Menu }) => {
+      const reload = Menu.getApplicationMenu().items.find(item => item.label === "Pages")
+        .submenu.items.find(item => item.label === "Reload Page");
+      reload.click();
+      return reload.accelerator;
+    });
+    assert.equal(accelerator, "CmdOrCtrl+R");
+  };
+  await shell.evaluate(() => { document.body.dataset.desktopSmokeShell = "keep"; });
+  assert.equal(await shell.getByRole("button", { name: "Reload", exact: true }).isEnabled(), true);
+  await reloadAndWait(consoleAddress, () => shell.getByRole("button", { name: "Reload", exact: true }).click());
+  await reloadAndWait(consoleAddress, reloadFromMenu);
+  assert.equal((await fetch(consoleAddress)).ok, true);
+
   const openFromConsole = url => electron.evaluate(({ webContents }, target) => {
     const contents = webContents.getAllWebContents().find(item =>
       item.getTitle() === "Thunderbird Desktop Console");
@@ -76,7 +121,18 @@ try {
   assert.equal(await electron.evaluate(({ webContents }, url) =>
     webContents.getAllWebContents().filter(contents => contents.getURL() === url).length,
   address), 1);
+  const serviceContentsId = await electron.evaluate(({ webContents }, url) =>
+    webContents.getAllWebContents().find(item => item.getURL() === url).id, address);
   assert.equal(await shell.locator("#address").textContent(), address);
+  await electron.evaluate(({ webContents }, url) =>
+    webContents.getAllWebContents().find(item => item.getURL() === url)
+      .executeJavaScript("document.body.dataset.desktopSmokeInactive = 'keep'"), consoleAddress);
+  await reloadAndWait(address, () => shell.getByRole("button", { name: "Reload", exact: true }).click());
+  await reloadAndWait(address, reloadFromMenu);
+  assert.equal(await shell.getByRole("tab").count(), 2);
+  assert.equal(await electron.evaluate(({ webContents }, url) =>
+    webContents.getAllWebContents().find(item => item.getURL() === url)
+      .executeJavaScript("document.body.dataset.desktopSmokeInactive"), consoleAddress), "keep");
   const linkMenus = await electron.evaluate(({ webContents, Menu }, url) => {
     const original = Menu.buildFromTemplate;
     const labels = [];
@@ -93,8 +149,8 @@ try {
     return labels;
   }, address);
   assert.deepEqual(linkMenus, [
-    ["Open in Browser", "Copy Link Address"],
-    ["Open in Browser", "Copy Link Address"],
+    ["Open in New Tab", "Open in Browser", "Copy Link Address"],
+    ["Open in New Tab", "Open in Browser", "Copy Link Address"],
   ]);
 
   await shell.getByRole("tab", { name: "Console" }).click();
@@ -131,11 +187,65 @@ try {
   }, address);
   await shell.waitForFunction(url => document.getElementById("address").textContent === url,
     `${address}third`);
+  assert.equal(await shell.getByRole("tab").count(), 2);
+  assert.equal(await electron.evaluate(({ webContents }, id) =>
+    webContents.fromId(id).getURL(), serviceContentsId), `${address}third`);
+  await shell.getByRole("button", { name: "Back" }).click();
+  await shell.waitForFunction(url => document.getElementById("address").textContent === url,
+    `${address}second`);
+  await electron.evaluate(({ webContents, Menu }, url) => {
+    const contents = webContents.getAllWebContents().find(item =>
+      item.getTitle() === "Thunderbird Desktop Console");
+    const original = Menu.buildFromTemplate;
+    Menu.buildFromTemplate = items => ({ popup() {
+      items.find(item => item.label === "Open in New Tab").click();
+    } });
+    try { contents.emit("context-menu", {}, { linkURL: url }); }
+    finally { Menu.buildFromTemplate = original; }
+  }, `${address}second`);
+  await shell.waitForFunction(() => [...document.querySelectorAll('[role="tab"]')]
+    .filter(tab => tab.textContent === "Second page").length === 2);
+  assert.equal(await electron.evaluate(({ webContents }, url) =>
+    webContents.getAllWebContents().filter(item => item.getURL() === url).length,
+  `${address}second`), 2);
+  await openFromConsole(`${address}third`);
+  await shell.waitForFunction(url => document.getElementById("address").textContent === url,
+    `${address}third`);
   assert.equal(await shell.getByRole("tab").count(), 3);
+  assert.equal(await electron.evaluate(({ webContents }, id) =>
+    webContents.fromId(id).getURL(), serviceContentsId), `${address}second`);
   assert.equal(await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
   await shell.getByRole("button", { name: "Close tab" }).click();
   await shell.waitForFunction(url => document.getElementById("address").textContent === url,
     `${address}second`);
+  await openFromConsole(otherAddress);
+  await shell.getByRole("tab", { name: "Other service" }).waitFor();
+  assert.equal(await shell.getByRole("tab").count(), 3);
+  await shell.getByRole("tab", { name: "Second page" }).click();
+  const clickPageLink = (contentsId, url) => electron.evaluate(({ webContents }, target) =>
+    webContents.fromId(target.id).executeJavaScript(`(() => {
+      const link = document.createElement('a');
+      link.href = ${JSON.stringify(target.url)};
+      document.body.append(link);
+      link.click();
+      link.remove();
+    })()`), { id: contentsId, url });
+  await clickPageLink(serviceContentsId, otherAddress);
+  await shell.waitForFunction(url => document.getElementById("address").textContent === url, otherAddress);
+  assert.equal(await shell.getByRole("tab").count(), 3);
+  assert.equal(await electron.evaluate(({ webContents }, id) =>
+    webContents.fromId(id).getURL(), serviceContentsId), `${address}second`);
+  const otherContentsId = await electron.evaluate(({ webContents }, url) =>
+    webContents.getAllWebContents().find(item => item.getURL() === url).id, otherAddress);
+  await clickPageLink(otherContentsId, address);
+  await shell.waitForFunction(url => document.getElementById("address").textContent === url, address);
+  assert.equal(await shell.getByRole("tab").count(), 3);
+  assert.equal(await electron.evaluate(({ webContents }, id) =>
+    webContents.fromId(id).getURL(), serviceContentsId), address);
+  assert.equal(await electron.evaluate(({ webContents }, url) =>
+    webContents.getAllWebContents().filter(item => item.getURL() === url).length, otherAddress), 1);
+  await shell.getByRole("button", { name: "Close tab" }).click();
+  await shell.waitForFunction(url => document.getElementById("address").textContent === url, otherAddress);
   await shell.getByRole("button", { name: "Close tab" }).click();
   assert.equal(await shell.getByRole("tab").count(), 1);
   assert.equal(await shell.getByRole("tab", { name: "Console" }).getAttribute("aria-selected"), "true");
@@ -185,9 +295,12 @@ try {
   const reopened = await reopenedWindow;
   await reopened.getByRole("tab", { name: "Console" }).waitFor();
   assert.equal(await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
-  process.stdout.write("Desktop tabs, navigation, window controls, and tray persistence passed.\n");
+  process.stdout.write("Desktop service tab reuse, new tabs, navigation, console and page reload, window controls, and tray persistence passed.\n");
 } finally {
   await electron?.close();
-  await new Promise(resolve => site.close(resolve));
+  await Promise.all([
+    new Promise(resolve => site.close(resolve)),
+    new Promise(resolve => otherSite.close(resolve)),
+  ]);
   await fs.rm(testUserData, { recursive: true, force: true });
 }

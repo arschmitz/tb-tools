@@ -93,7 +93,7 @@ _Test runs preserve colored output and add parsed summaries, failed-file actions
 
 ## Standalone desktop app
 
-Run `npm ci`, then `npm run desktop -- --comm=/path/to/firefox/comm`. Run `npm run desktop:package` to make a native app for the current system. The app keeps running in the tray after its console window closes. Links open in app-owned windows. Pages from the same site reuse a window. The Pages menu can go back, go forward, reload, or close those windows.
+Run `npm ci`, then `npm run desktop -- --comm=/path/to/firefox/comm`. Run `npm run desktop:package` to make a native app for the current system. The app keeps running in the tray after its console window closes. Links open as tabs in the main window. Normal clicks reuse the most recently used tab for the same service. Right-click a link for Open in New Tab or Open in Browser. The fixed header keeps window controls, Back, Forward, Reload, and Close tab visible. Reload and Cmd/Ctrl+R also work on the Console tab.
 
 The desktop app creates paired Review worktrees in `~/.tb-tools/worktrees`. Each revision under review gets its own pair, so different reviews can run together. Each active worktree has its own writable object directory. Completed artifact snapshots live in `~/.tb-tools/build-cache`. When sccache is installed, its compiler-result storage is shared; cache hits across worktrees depend on the active sccache server's base paths. The app turns off sccache direct mode to avoid stale headers across worktrees. A new worktree can build without copying another live object directory. Try repair worktrees also get a Thunderbird build config with a private object directory. Windows builds need Visual Studio C++ tools, MozillaBuild's `bin` directory on PATH, and native Python.
 
