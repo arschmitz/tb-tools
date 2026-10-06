@@ -9,7 +9,9 @@ import { readGitBlobs } from "./git-data.mjs";
 import { publishProjectLessons, exportLessonNotes } from "./publication.mjs";
 
 const execute = promisify(execFile);
-const documents = new Set(["README.md", "AGENTS.md", "CONTRIBUTING.md", "FORMAT.md", "SCHEMA.md", "CONSUMING.md", ".gitignore"]);
+const documents = new Set(["README.md", "AGENTS.md", "CONTRIBUTING.md", "FORMAT.md", "SCHEMA.md", "CONSUMING.md", "SKILLS.md", ".gitignore"]);
+const skillDocument = /^skills\/[a-z0-9]+(?:-[a-z0-9]+)*\/(?:SKILL\.md|references\/[a-z0-9]+(?:-[a-z0-9]+)*\.md)$/;
+const instructionFile = file => documents.has(file) || skillDocument.test(file);
 const noteName = /^notes\/[a-z0-9-]+\.md$/;
 const recordName = /^records\/[a-f0-9]{64}\.json$/;
 const git = async (cwd, args) => (await execute("git", ["-c", "core.hooksPath=/dev/null", ...args], {
@@ -31,7 +33,7 @@ export function parseKnowledgeNote(text) {
 }
 
 async function importFile(store, file, text) {
-  if (documents.has(file)) return;
+  if (instructionFile(file)) return;
   if (noteName.test(file)) {
     const fingerprint = digest(text.trimEnd()), key = `shared-note:${file}`;
     if (store.setting(key) && store.setting(key) !== fingerprint) throw new Error(`Shared note was edited: ${file}. Add a correction instead.`);
@@ -71,7 +73,7 @@ async function importTree(store, directory, ref) {
   const pending = [];
   for (const entry of entries) {
     const match = entry.match(/^100644 blob ([a-f0-9]+)\t(.+)$/);
-    if (!match || !(documents.has(match[2]) || noteName.test(match[2]) || recordName.test(match[2]))) {
+    if (!match || !(instructionFile(match[2]) || noteName.test(match[2]) || recordName.test(match[2]))) {
       throw new Error("Knowledge repository contains unsupported files or modes.");
     }
     const key = `repository-blob:${directory}:${match[2]}`;

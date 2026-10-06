@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, chmod, symlink } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -65,4 +65,46 @@ test("memory sync accepts plain notes without installed console commands", async
   await readKnowledgeRepository(a.store, a.directory);
   assert.equal(a.store.all()[0].title, "Manual evidence");
   assert.equal(a.store.all()[0].source.reference, "review:D123");
+});
+
+test("shared skills sync as reviewed instructions without becoming learning evidence", async t => {
+  const { root, remote, clone } = await fixture(t), a = await clone("skills-writer");
+  const folder = path.join(a.directory, "skills/thunderbird-review");
+  await mkdir(path.join(folder, "references"), { recursive: true });
+  await writeFile(path.join(folder, "SKILL.md"), "---\nname: thunderbird-review\ndescription: Review an exact patch.\n---\nRead the raw diff.\n");
+  await writeFile(path.join(folder, "references/anchors.md"), "Use exact raw-diff coordinates.\n");
+  await writeFile(path.join(a.directory, "SKILLS.md"), "Read the selected standalone workflow.\n");
+  await git(a.directory, "add", "skills", "SKILLS.md");
+  await git(a.directory, "commit", "-m", "Add reviewed skill instructions");
+  await writeFile(path.join(a.directory, "notes/result.md"), note("Review observation"));
+  const result = await syncKnowledgeRepository(a.store, { repositoryDirectory: a.directory });
+  assert.equal(result.pushed, true);
+  const reader = await clone("skills-reader");
+  await syncKnowledgeRepository(reader.store, { repositoryDirectory: reader.directory, push: false });
+  assert.equal(await readFile(path.join(reader.directory, "skills/thunderbird-review/references/anchors.md"), "utf8"), "Use exact raw-diff coordinates.\n");
+  assert.deepEqual(reader.store.all().map(record => record.title), ["Review observation"]);
+  assert.equal(reader.store.db.prepare("SELECT count(*) AS count FROM jobs").get().count, 1);
+  const tip = await git(root, "--git-dir", remote, "rev-parse", "main");
+  await writeFile(path.join(folder, "SKILL.md"), "Unfinished user edit\n");
+  await assert.rejects(syncKnowledgeRepository(a.store, { repositoryDirectory: a.directory }), /tracked memory repository edits/);
+  assert.equal(await readFile(path.join(folder, "SKILL.md"), "utf8"), "Unfinished user edit\n");
+  assert.equal(await git(root, "--git-dir", remote, "rev-parse", "main"), tip);
+});
+
+test("shared skill support still rejects scripts, executable files, and symbolic links", async t => {
+  const { clone } = await fixture(t);
+  for (const variant of ["script", "executable", "symlink"]) {
+    const a = await clone(variant), folder = path.join(a.directory, "skills/thunderbird-review");
+    await mkdir(folder, { recursive: true });
+    if (variant === "script") {
+      await mkdir(path.join(folder, "scripts"));
+      await writeFile(path.join(folder, "scripts/run.sh"), "#!/bin/sh\nexit 0\n");
+    } else if (variant === "executable") {
+      await writeFile(path.join(folder, "SKILL.md"), "Reviewed instructions\n");
+      await chmod(path.join(folder, "SKILL.md"), 0o755);
+    } else await symlink("../../AGENTS.md", path.join(folder, "SKILL.md"));
+    await git(a.directory, "add", "skills");
+    await git(a.directory, "commit", "-m", "Unsupported skill file");
+    await assert.rejects(syncKnowledgeRepository(a.store, { repositoryDirectory: a.directory }), /unsupported files or modes/);
+  }
 });

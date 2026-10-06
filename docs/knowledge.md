@@ -180,6 +180,11 @@ do not establish that memory improves review or generation quality.
 `--repository-directory` selects a shared clone. `rebuild` imports it into a
 fresh exact-search cache without running learning. `catalog` lists scoped lessons
 for architecture, behavior, tests, syntax, naming, and style navigation.
+The shared clone can also contain SKILLS.md, `skills/<name>/SKILL.md` and Markdown
+files in each skill's `references/` directory. Sync accepts these committed
+instructions without creating evidence or learning jobs from them. It does not
+stage or install skills. Skill changes need deliberate review; executable files,
+scripts and symlinks remain unsupported.
 `lesson --file lessons.json` validates a cited extraction batch. `publish` writes
 eligible lessons and syncs; `repair` only appends portable corrections and
 classifies the learning queue. Follow `repair` with `publish` to share its records.
