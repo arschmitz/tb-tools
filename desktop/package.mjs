@@ -43,8 +43,8 @@ for (const target of targets) {
       overwrite: true,
       asar: { unpack: "**/*.{node,dll,dylib,so,so.*}" },
       prune: !crossTarget,
-      icon: platform === "darwin" ? path.join(root, "desktop", "icon.icns")
-        : platform === "win32" ? path.join(root, "desktop", "icon.ico") : undefined,
+      icon: platform === "darwin" ? path.join(root, "assets", "branding", "app-icon.icns")
+        : platform === "win32" ? path.join(root, "assets", "branding", "app-icon.ico") : undefined,
       ignore: [
         /^\/test(?:\/|$)/,
         /^\/dist(?:\/|$)/,

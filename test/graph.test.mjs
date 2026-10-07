@@ -10871,10 +10871,10 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /originMainStatusRefreshQueued/);
   assert.match(client, /const checkout = uiState\.checkoutMode/);
   assert.match(html, /<title>Thunderbird Desktop Console<\/title>/);
-  assert.match(html, /<h1>Thunderbird Desktop Console<\/h1>/);
+  assert.match(html, /<h1[^>]*><picture>.*alt="Thunderbird Development Dashboard".*<\/picture><\/h1>/);
   assert.match(
     html,
-    /<h1>Thunderbird Desktop Console<\/h1>\s*<div class="origin-main-status"/,
+    /<\/picture><\/h1>\s*<div class="origin-main-status"/,
   );
   assert.match(
     html,

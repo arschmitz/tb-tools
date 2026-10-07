@@ -11,7 +11,7 @@ export async function checkClipboard(electron, shell, url, label) {
     BrowserWindow.getAllWindows()[0].isVisible());
   await electron.evaluate(async ({ clipboard, ClipboardItem, Menu }) => {
     const saved = await clipboard.read();
-    globalThis.desktopSmokeSavedClipboard = await Promise.all(saved.map(async item =>
+    globalThis.desktopSmokeSavedClipboard = await Promise.all(saved.filter(item => item.types.length).map(async item =>
       new ClipboardItem(Object.fromEntries(await Promise.all(item.types.map(async type =>
         [type, await item.getType(type)]))))));
     globalThis.desktopSmokeOriginalMenuBuilder = Menu.buildFromTemplate;

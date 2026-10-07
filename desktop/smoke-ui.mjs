@@ -59,6 +59,25 @@ try {
   }
   assert.ok(consoleAddress?.startsWith("http://127.0.0.1:"));
   assert.equal((await fetch(consoleAddress)).ok, true);
+  for (const [url, file] of [
+    ["/favicon.ico", "favicon-v3.ico"],
+    ["/assets/branding/app-icon.png", "thunderbird-development-dashboard-app-icon-v2.png"],
+    ["/assets/branding/logo-light.png", "thunderbird-development-dashboard-horizontal-mono-light-v7.png"],
+    ["/assets/branding/logo-dark.png", "thunderbird-development-dashboard-horizontal-mono-dark-v7.png"],
+  ]) {
+    const response = await fetch(new URL(url, consoleAddress));
+    assert.equal(response.status, 200, url);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()),
+      await fs.readFile(new URL(`../assets/branding/${file}`, import.meta.url)));
+  }
+  const logoLoaded = await electron.evaluate(({ webContents }) =>
+    webContents.getAllWebContents().find(contents => contents.getTitle() === "Thunderbird Desktop Console")
+      .executeJavaScript(`(async () => {
+        const logo = document.querySelector('h1 img[alt="Thunderbird Development Dashboard"]');
+        await logo.decode();
+        return logo.naturalWidth > 0 && logo.naturalHeight > 0;
+      })()`));
+  assert.equal(logoLoaded, true);
   const repositoryUi = await electron.evaluate(({ webContents }) =>
     webContents.getAllWebContents().find(contents => contents.getTitle() === "Thunderbird Desktop Console")
       .executeJavaScript(`import("/assets/graph-client/config.js").then(({ GRAPHS }) => ({

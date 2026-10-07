@@ -8,6 +8,7 @@ const path = require("node:path");
 process.env.SCCACHE_DIRECT = "false";
 
 const projectRoot = path.resolve(__dirname, "..");
+const appIconPath = path.join(projectRoot, "assets", "branding", "thunderbird-development-dashboard-app-icon-v2.png");
 let consoleWindow;
 let consoleView;
 let activeView;
@@ -32,7 +33,7 @@ function createStandardWindow(options) {
     ...options,
     frame: true,
     titleBarStyle: "default",
-    icon: process.platform === "linux" ? path.join(projectRoot, "desktop", "icon.png") : undefined,
+    icon: process.platform === "linux" ? appIconPath : undefined,
     closable: true,
     minimizable: true,
     maximizable: true,
@@ -379,7 +380,7 @@ function installMenu() {
       { role: "togglefullscreen" }, { role: "close" }] },
   ]);
   Menu.setApplicationMenu(menu);
-  const icon = nativeImage.createFromPath(path.join(projectRoot, "desktop", "icon.png"))
+  const icon = nativeImage.createFromPath(appIconPath)
     .resize({ width: 18, height: 18 });
   tray = new Tray(icon);
   tray.setToolTip("Thunderbird Commands");
@@ -390,7 +391,7 @@ function installMenu() {
   ]));
   tray.on("double-click", showConsole);
   if (process.platform === "darwin") {
-    app.dock.setIcon(path.join(projectRoot, "desktop", "icon-512.png"));
+    app.dock.setIcon(appIconPath);
   }
 }
 

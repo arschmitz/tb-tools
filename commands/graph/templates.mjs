@@ -53,6 +53,7 @@ export function buildInteractiveGraphLauncherHtml({
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Opening Thunderbird Desktop Console</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
 </head>
 <body class="graph-view-active">
   <p id="status">Opening Thunderbird Desktop Console...</p>
@@ -800,13 +801,15 @@ export function buildGraphHtml({
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Thunderbird Desktop Console</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/assets/branding/app-icon.png">
   <link rel="stylesheet" href="${escapeHtml(stylesheetHref)}">
 </head>
 <body>
   <header>
     <div class="header-row">
       <div class="title-row">
-        <h1>Thunderbird Desktop Console</h1>
+        <h1 style="margin: 0"><picture><source media="(prefers-color-scheme: dark)" srcset="/assets/branding/logo-dark.png"><img src="/assets/branding/logo-light.png" alt="Thunderbird Development Dashboard" width="360" height="150" style="display: block; max-width: 100%; object-fit: contain"></picture></h1>
         ${originMainStatus}
       </div>
       <div class="header-actions">
