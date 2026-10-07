@@ -127,9 +127,6 @@ function browserState() {
   const history = active?.view.webContents.navigationHistory;
   const index = history?.getActiveIndex() ?? -1;
   return {
-    platform: process.platform,
-    maximized: Boolean(consoleWindow && !consoleWindow.isDestroyed() &&
-      (consoleWindow.isMaximized() || consoleWindow.isFullScreen())),
     activeId: activeTabId,
     address: active?.view.webContents.getURL() || active?.url || "Console",
     canGoBack: index > 0,
@@ -192,17 +189,22 @@ function reloadActivePage() {
   if (contents && !contents.isDestroyed()) contents.reload();
 }
 
+function showTabMenu(id) {
+  if (!consoleWindow || consoleWindow.isDestroyed()) return;
+  const tab = browserTabs.get(id);
+  const contents = id === "console" ? consoleView?.webContents : tab?.view.webContents;
+  if (!contents || contents.isDestroyed()) return;
+  const url = webAddress(contents.getURL()) ||
+    webAddress(id === "console" ? consoleServer.url : tab.url);
+  if (!url) return;
+  Menu.buildFromTemplate([
+    { label: "Open in Browser", click: () => { void shell.openExternal(url.href); } },
+  ]).popup({ window: consoleWindow });
+}
+
 function handleBrowserAction(event, { action, tabId } = {}) {
   if (event.sender !== consoleWindow?.webContents) return;
-  if (action === "window-close") { consoleWindow.close(); return; }
-  if (action === "window-minimize") { consoleWindow.minimize(); return; }
-  if (action === "window-maximize") {
-    if (consoleWindow.isFullScreen()) consoleWindow.setFullScreen(false);
-    else if (consoleWindow.isMaximized()) consoleWindow.unmaximize();
-    else consoleWindow.maximize();
-    sendBrowserState();
-    return;
-  }
+  if (action === "tab-menu") { showTabMenu(tabId); return; }
   if (action === "select") { activateTab(tabId); return; }
   if (action === "close") { closeTab(tabId || activeTabId); return; }
   if (action === "reload") { reloadActivePage(); return; }
@@ -213,10 +215,6 @@ function handleBrowserAction(event, { action, tabId } = {}) {
   const index = history.getActiveIndex();
   if (action === "back" && index > 0) history.goToIndex(index - 1);
   else if (action === "forward" && index < history.length() - 1) history.goToIndex(index + 1);
-  else if (action === "open-browser") {
-    const url = webAddress(contents.getURL());
-    if (url) void shell.openExternal(url.href);
-  }
 }
 
 ipcMain.on("commands-browser-action", handleBrowserAction);
@@ -236,9 +234,6 @@ function showConsole() {
     installPageCommands(consoleWindow.webContents);
     consoleWindow.on("focus", focusActivePage);
     consoleWindow.on("resize", layoutBrowser);
-    for (const event of ["maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
-      consoleWindow.on(event, sendBrowserState);
-    }
     consoleWindow.on("closed", () => {
       consoleView?.webContents.close();
       for (const tab of browserTabs.values()) tab.view.webContents.close();

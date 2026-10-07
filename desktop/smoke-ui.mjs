@@ -36,7 +36,16 @@ try {
   electron = await _electron.launch({ executablePath, args: [`--comm=${commPath}`],
     env: { ...process.env, TB_DESKTOP_TEST: "1", TB_DESKTOP_TEST_USER_DATA: testUserData },
     timeout: 120_000 });
-  const shell = await electron.firstWindow();
+  const waitForShellWindow = async () => {
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const page = electron.context().pages().find(page => !page.isClosed() &&
+        page.url().endsWith("/desktop/browser-shell.html"));
+      if (page) return page;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error("The desktop shell did not load.");
+  };
+  const shell = await waitForShellWindow();
   await shell.locator(".browser-header").waitFor({ state: "attached", timeout: 30_000 });
   assert.match(await shell.title(), /Thunderbird/i);
   await shell.getByRole("tab", { name: "Console" }).waitFor();
@@ -64,9 +73,51 @@ try {
     { closable: true, minimizable: true, maximizable: true },
   ]);
   assert.deepEqual(windowControls.menuRoles, ["minimize", "zoom", "togglefullscreen", "close"]);
-  for (const name of ["Close window", "Minimize window", "Maximize window"]) {
-    assert.equal(await shell.getByRole("button", { name }).isVisible(), true);
+  for (const name of ["Close window", "Minimize window", "Maximize window", "Open in Browser", "Close tab"]) {
+    assert.equal(await shell.getByRole("button", { name, exact: true }).count(), 0);
   }
+  assert.equal(await shell.locator(".toolbar button").count(), 3);
+  const closeActiveTab = () => shell.locator(".tab.active .tab-close").click();
+  const openTabInBrowser = async (name, expectedUrl) => {
+    const activeId = await shell.locator('[role="tab"][aria-selected="true"]')
+      .getAttribute("data-tab-id");
+    await electron.evaluate(({ Menu, shell }) => {
+      globalThis.desktopSmokeTabMenuBuilder = Menu.buildFromTemplate;
+      globalThis.desktopSmokeOpenExternal = shell.openExternal;
+      globalThis.desktopSmokeOpenedUrls = [];
+      globalThis.desktopSmokeTabMenuLabels = undefined;
+      shell.openExternal = url => {
+        globalThis.desktopSmokeOpenedUrls.push(url);
+        return Promise.resolve();
+      };
+      Menu.buildFromTemplate = items => ({ popup() {
+        globalThis.desktopSmokeTabMenuLabels = items.map(item => item.label);
+        items.find(item => item.label === "Open in Browser")?.click();
+      } });
+    });
+    try {
+      await shell.getByRole("tab", { name, exact: true }).click({ button: "right" });
+      let urls;
+      for (let attempt = 0; attempt < 50; attempt++) {
+        urls = await electron.evaluate(() => globalThis.desktopSmokeOpenedUrls);
+        if (urls.length) break;
+        await shell.waitForTimeout(50);
+      }
+      assert.deepEqual(urls, [expectedUrl], `Wrong browser destination for ${name}`);
+      assert.deepEqual(await electron.evaluate(() => globalThis.desktopSmokeTabMenuLabels), ["Open in Browser"]);
+      assert.equal(await shell.locator('[role="tab"][aria-selected="true"]')
+        .getAttribute("data-tab-id"), activeId, "Right-click changed the selected tab");
+    } finally {
+      await electron.evaluate(({ Menu, shell }) => {
+        Menu.buildFromTemplate = globalThis.desktopSmokeTabMenuBuilder;
+        shell.openExternal = globalThis.desktopSmokeOpenExternal;
+        delete globalThis.desktopSmokeTabMenuBuilder;
+        delete globalThis.desktopSmokeOpenExternal;
+        delete globalThis.desktopSmokeOpenedUrls;
+        delete globalThis.desktopSmokeTabMenuLabels;
+      });
+    }
+  };
 
   const reloadAndWait = async (url, trigger) => {
     const id = await electron.evaluate(async ({ webContents }, target) => {
@@ -127,6 +178,10 @@ try {
     webContents.getAllWebContents().find(item => item.getURL() === url).id, address);
   assert.equal(await shell.locator("#address").textContent(), address);
   await checkClipboard(electron, shell, address, "Page");
+  await openTabInBrowser("Console", consoleAddress);
+  await shell.getByRole("tab", { name: "Console" }).click();
+  await openTabInBrowser("Managed test page", address);
+  await shell.getByRole("tab", { name: "Managed test page" }).click();
   await electron.evaluate(({ webContents }, url) =>
     webContents.getAllWebContents().find(item => item.getURL() === url)
       .executeJavaScript("document.body.dataset.desktopSmokeInactive = 'keep'"), consoleAddress);
@@ -168,6 +223,7 @@ try {
   }, address);
   await shell.waitForFunction(url => document.getElementById("address").textContent === url,
     `${address}second`);
+  await openTabInBrowser("Second page", `${address}second`);
   await shell.waitForFunction(() => !document.getElementById("back").disabled);
   assert.equal(await shell.getByRole("button", { name: "Back" }).isEnabled(), true);
   await shell.getByRole("button", { name: "Back" }).click();
@@ -218,7 +274,7 @@ try {
   assert.equal(await electron.evaluate(({ webContents }, id) =>
     webContents.fromId(id).getURL(), serviceContentsId), `${address}second`);
   assert.equal(await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
-  await shell.getByRole("button", { name: "Close tab" }).click();
+  await closeActiveTab();
   await shell.waitForFunction(url => document.getElementById("address").textContent === url,
     `${address}second`);
   await openFromConsole(otherAddress);
@@ -247,9 +303,9 @@ try {
     webContents.fromId(id).getURL(), serviceContentsId), address);
   assert.equal(await electron.evaluate(({ webContents }, url) =>
     webContents.getAllWebContents().filter(item => item.getURL() === url).length, otherAddress), 1);
-  await shell.getByRole("button", { name: "Close tab" }).click();
+  await closeActiveTab();
   await shell.waitForFunction(url => document.getElementById("address").textContent === url, otherAddress);
-  await shell.getByRole("button", { name: "Close tab" }).click();
+  await closeActiveTab();
   assert.equal(await shell.getByRole("tab").count(), 1);
   assert.equal(await shell.getByRole("tab", { name: "Console" }).getAttribute("aria-selected"), "true");
   assert.equal(await electron.evaluate(({ webContents }, url) =>
@@ -270,15 +326,13 @@ try {
   assert.equal(await shell.getByRole("tab").count(), 2);
   assert.equal(await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
   await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].showInactive());
-  await shell.getByRole("button", { name: "Maximize window" }).click();
-  await shell.getByRole("button", { name: "Restore window" }).waitFor();
+  await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].maximize());
   assert.equal(await electron.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].isMaximized()), true);
-  await shell.getByRole("button", { name: "Restore window" }).click();
-  await shell.getByRole("button", { name: "Maximize window" }).waitFor();
+  await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].unmaximize());
   assert.equal(await electron.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].isMaximized()), false);
-  await shell.getByRole("button", { name: "Minimize window" }).click();
+  await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].minimize());
   for (let attempt = 0; attempt < 50; attempt++) {
     if (await electron.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].isMinimized())) break;
@@ -287,18 +341,19 @@ try {
   assert.equal(await electron.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].isMinimized()), true);
   await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].restore());
-  await shell.getByRole("button", { name: "Close window" }).click();
+  const closedWindow = shell.waitForEvent("close");
+  await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  await closedWindow;
   assert.equal(await electron.evaluate(({ app }) => app.isReady()), true);
   assert.equal((await fetch(consoleAddress)).ok, true);
-  const reopenedWindow = electron.waitForEvent("window");
   await electron.evaluate(({ Menu }) => {
     Menu.getApplicationMenu().items.find(item => item.label === "Commands")
       .submenu.items.find(item => item.label === "Show Console").click();
   });
-  const reopened = await reopenedWindow;
+  const reopened = await waitForShellWindow();
   await reopened.getByRole("tab", { name: "Console" }).waitFor();
   assert.equal(await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
-  process.stdout.write("Desktop clipboard, service tab reuse, new tabs, navigation, console and page reload, window controls, and tray persistence passed.\n");
+  process.stdout.write("Desktop tab menus, clipboard, service tab reuse, new tabs, navigation, console and page reload, native window controls, and tray persistence passed.\n");
 } finally {
   await electron?.close();
   await Promise.all([

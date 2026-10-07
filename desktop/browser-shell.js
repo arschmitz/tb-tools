@@ -4,23 +4,16 @@ const tabs = document.getElementById("tabs");
 const address = document.getElementById("address");
 
 function render(state) {
-  document.body.dataset.platform = state.platform;
-  const maximize = document.getElementById("window-maximize");
-  const maximizeLabel = state.maximized ? "Restore window" : "Maximize window";
-  maximize.setAttribute("aria-label", maximizeLabel);
-  maximize.title = maximizeLabel;
-  maximize.textContent = state.maximized ? "❐" : "□";
   document.getElementById("back").disabled = !state.canGoBack;
   document.getElementById("forward").disabled = !state.canGoForward;
   document.getElementById("reload").disabled = !state.canReload;
-  document.getElementById("open-browser").disabled = state.activeId === "console";
-  document.getElementById("close").disabled = state.activeId === "console";
   address.textContent = state.address || "Console";
   address.title = state.address || "Console";
   tabs.replaceChildren();
   for (const tab of state.tabs) {
     const item = document.createElement("div");
     item.className = `tab${tab.id === state.activeId ? " active" : ""}`;
+    item.dataset.tabId = tab.id;
     const select = document.createElement("button");
     select.type = "button";
     select.className = "tab-select";
@@ -48,5 +41,11 @@ function render(state) {
 document.addEventListener("click", event => {
   const button = event.target.closest("button[data-action]");
   if (button && !button.disabled) api.action(button.dataset.action, button.dataset.tabId);
+});
+tabs.addEventListener("contextmenu", event => {
+  const tab = event.target.closest(".tab");
+  if (!tab) return;
+  event.preventDefault();
+  api.action("tab-menu", tab.dataset.tabId);
 });
 api.onState(render);

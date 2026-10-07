@@ -2,8 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("commandsBrowser", {
   action(action, tabId) {
-    if (["back", "forward", "reload", "open-browser", "close", "select",
-      "window-close", "window-minimize", "window-maximize"].includes(action)) {
+    if (["back", "forward", "reload", "close", "select", "tab-menu"].includes(action)) {
       ipcRenderer.send("commands-browser-action", { action, tabId });
     }
   },

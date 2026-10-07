@@ -3,7 +3,9 @@
 `main.cjs` starts the existing console server on loopback and keeps it alive when
 its window closes. It creates a Review worktree pair before loading the console.
 External links open as tabs inside the main window. A fixed header keeps Back,
-Forward, Reload, Close tab, and the tab list visible while a page is open.
+Forward, Reload, and the tab list visible while a page is open. Native window
+controls close, minimize, or maximize the window. Each external tab has a close
+button. Right-click any tab for Open in Browser.
 The console stays in its own tab. Pages run in sandboxed `WebContentsView`
 instances that share a browser session for sign-in. Normal clicks reuse the most
 recently used tab for the same service. A service is one URL origin: its scheme,
