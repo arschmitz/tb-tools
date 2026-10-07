@@ -176,22 +176,15 @@ test("meta board uses Bugzilla attachments and Phabricator revision status for s
         }] : []),
       ],
     })),
-    phab: async ({ route, params, cacheNamespace, cacheTtlMs }) => {
-      phabricatorRequests.push({ route, params, cacheNamespace, cacheTtlMs });
-
-      if (route === "differential.query") {
-        return {
-          result: params.ids.map((id) => ({
-            id: String(id),
-            status: id === 200005 ? "status-needs-review" : "status-needs-revision",
-            statusName: id === 200005 ? "Needs Review" : "Needs Revision",
+    getBugzillaRevisions: async (bugId) => {
+      phabricatorRequests.push(bugId);
+      return attachmentIds.get(bugId).map((id) => ({
+            id: `D${id}`,
+            status: id === "200005" ? "status-needs-review" : "status-needs-revision",
+            long_status: id === "200005" ? "Needs Review" : "Needs Revision",
             title: `Revision ${id}`,
             uri: `https://phabricator.services.mozilla.com/D${id}`,
-          })),
-        };
-      }
-
-      throw new Error(`Unexpected Phabricator route: ${route}`);
+          }));
     },
   });
 
@@ -228,12 +221,7 @@ test("meta board uses Bugzilla attachments and Phabricator revision status for s
     url: "https://phabricator.services.mozilla.com/D200005",
     waitingForReview: true,
   }]);
-  assert.deepEqual(phabricatorRequests.map((request) => request.route), [
-    "differential.query",
-  ]);
-  assert.ok(phabricatorRequests.every((request) => (
-    request.cacheNamespace === "meta-board" && request.cacheTtlMs === 15 * 60 * 1000
-  )));
+  assert.deepEqual(phabricatorRequests.sort(), ["100004", "100005"]);
   assert.deepEqual(data.assignees.map((assignee) => assignee.email), [
     "alice@example.com",
     "bob@example.com",
@@ -261,7 +249,7 @@ test("meta board keeps attached stories visible when Phabricator is rate limited
         is_obsolete: false,
       }],
     }],
-    phab: async () => {
+    getBugzillaRevisions: async () => {
       throw rateLimitError;
     },
   });
@@ -643,4 +631,34 @@ test("interactive graph server loads review group assignees without delaying the
     { email: "reviewer@example.com", name: "Review Group Member" },
   ]);
   assert.deepEqual(reviewGroupForces, [false, true]);
+});
+
+test("approved patches are complete while unfinished patches keep their board status", async () => {
+  for (const [statuses, expected] of [
+    [["accepted"], "complete"],
+    [["status-accepted"], "complete"],
+    [["approved"], "complete"],
+    [["accepted", "published"], "complete"],
+    [["accepted", "needs-review"], "in-review"],
+    [["accepted", "needs-revision"], "in-progress"],
+  ]) {
+    const bugs = new Map([
+      ["900000", makeBug({ id: "900000", keywords: ["meta"], dependsOn: ["100001"] })],
+      ["100001", makeBug({ id: "100001", points: 3 })],
+    ]);
+    const data = await getMetaBoardData({
+      metaBugId: "900000",
+      getBugsByIds: async ids => ids.map(id => bugs.get(String(id))).filter(Boolean),
+      getBugsWithAttachmentsByIds: async ids => ids.map(id => ({
+        id,
+        attachments: statuses.map((_, index) => ({
+          content_type: "text/x-phabricator-request", file_name: `request-D${200001 + index}`,
+        })),
+      })),
+      getBugzillaRevisions: async () => statuses.map((status, index) => ({
+        id: String(200001 + index), status, long_status: status === "needs-review" ? "Needs Review" : status,
+      })),
+    });
+    assert.equal(data.cards[0].column, expected, statuses.join(", "));
+  }
 });

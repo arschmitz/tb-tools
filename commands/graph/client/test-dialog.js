@@ -1,3 +1,4 @@
+import { replaceChangedChildren, hasSelectedText } from "./live-text.js";
 import {
   INTERACTIVE,
   testClose,
@@ -194,7 +195,8 @@ export function renderAnsiOutput(container, output = "") {
     return;
   }
 
-  container.replaceChildren();
+  const rendered = document.createElement("div");
+  const follow = container.scrollHeight - container.scrollTop - container.clientHeight < 24;
 
   const state = {
     color: "",
@@ -207,7 +209,7 @@ export function renderAnsiOutput(container, output = "") {
   let match;
 
   while ((match = ANSI_PATTERN.exec(text))) {
-    appendAnsiText(container, text.slice(lastIndex, match.index), state);
+    appendAnsiText(rendered, text.slice(lastIndex, match.index), state);
 
     if (match[2] === "m") {
       applyAnsiCodes(state, match[1]);
@@ -216,8 +218,9 @@ export function renderAnsiOutput(container, output = "") {
     lastIndex = ANSI_PATTERN.lastIndex;
   }
 
-  appendAnsiText(container, text.slice(lastIndex), state);
-  container.scrollTop = container.scrollHeight;
+  appendAnsiText(rendered, text.slice(lastIndex), state);
+  const changed = replaceChangedChildren(container, ...rendered.childNodes);
+  if (changed && follow && !hasSelectedText(container)) container.scrollTop = container.scrollHeight;
 }
 
 function splitPatternInput(value = "") {
@@ -296,6 +299,8 @@ function showOnlyTestOutputTab() {
   if (dashboardPanel) {
     dashboardPanel.hidden = true;
   }
+  document.querySelector(".phabricator-cache-panel")?.setAttribute("hidden", "");
+  document.querySelector(".sprint-panel")?.setAttribute("hidden", "");
   const metaBoardsPanel = document.querySelector(".meta-boards-panel");
 
   if (metaBoardsPanel) {

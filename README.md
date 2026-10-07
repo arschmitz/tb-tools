@@ -8,6 +8,18 @@ Simplify tasks related to developing thunderbird.
 Right now these are only things that I have personally used and found useful but happy to add more.
 ## Installation
 `npm install -g https://github.com/arschmitz/tb-tools`
+## Desktop app
+
+Run `tb desktop` from a Thunderbird comm checkout to start the Electron app.
+The terminal returns after the app starts. Outside a comm checkout, the app uses
+its saved checkout or asks you to choose one.
+
+Use `tb desktop --comm=/path/to/firefox/comm` to choose a checkout.
+Use `--project=/path/to/commands` if the desktop source is in another directory.
+Set `desktop.projectDirectory` in `~/.tb.json` to save that source directory.
+Run `npm install` in the desktop source directory to install Electron.
+`tb console` continues to start the web console.
+
 ## Configuration
 TB Tools uses a configuration `.tb.json` file in your user's home directory to enable some features.
 This file currently contains credentials for phabricator, bugzilla, and optional Notion story lookups, plus optional defaults for Lando. The Lando CLI itself reads credentials from `~/.mozbuild/lando.toml` or its documented environment variables.
@@ -61,6 +73,8 @@ Use the console to:
 - create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, blocking-review toggles, and a durable `TB-Tools-Id` trailer for console metadata
 - checkout, rebase, interactively reorder/squash/fixup/drop local commit ranges, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit
 - copy a selected commit or local stack between the Working and Review clone pairs on a new destination branch, with an atomic rollback if cherry-picking fails
+- use artifact builds and `build faster` for frontend-only comm changes; use a normal build for native or Firefox changes
+- reuse matching console binary snapshots from either checkout and the shared mach download cache; keep each checkout’s object directory separate
 - destructively replace the complete Review pair with the Working Git history and copy Firefox build artifacts for a fast review build
 - choose whether Pull or Rebase acts on the selected clone pair or both pairs; build/run, lint, test, pull patch, and try follow the selected comm tab
 - pull both repositories, rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches
@@ -71,7 +85,7 @@ Use the console to:
 - monitor comm and Firefox `origin/main` freshness plus Rust dependency sync warnings before remote-build workflows like try and submit
 - close console browser tabs automatically when the local console process exits, with an opt-out for keeping tabs open
 
-AI tasks use the standalone [shared knowledge repository](https://github.com/arschmitz/tb-knowledge), with bounded retrieval and automatic project lesson publication. See [Console knowledge](docs/knowledge.md) for consumer setup, learning budgets, private evidence, Git sync, and inspection commands.
+AI tasks use automatic local knowledge capture and bounded retrieval. See [Console knowledge](docs/knowledge.md) for learning budgets, private records, Git sync, and inspection commands.
 
 ![Thunderbird Desktop Console showing a selected commit, integration badges, and a GitHub-style diff](/images/console-overview.png)
 
@@ -91,6 +105,7 @@ _Test runs preserve colored output and add parsed summaries, failed-file actions
 
 ## Command List
 ##### <ins>Quick Links</ins>
+- [knowledge](#knowledge)
 - [amend](#amend)
 - [comment](#comment)
 - [commit](#commit)
@@ -134,6 +149,14 @@ _Test runs preserve colored output and add parsed summaries, failed-file actions
 ## Sheriff Duty
 
 The land command is your all in one tool for handling landings in thunderbird. This command integrates with bugzilla, phabricator, and the Lando CLI to form an all in one solution. Just run the land command and tb-tools will check for rust changes and any accompanying patches. Then pulls all bugs marked for checkin and guide you through the process of landing them 1 at a time including viewing and updating the associated bugs and patches. If run with sanity enabled it will run linting and a build at the end before submitting commits through Lando. For detailed workflow and documentation see the land command below.
+### knowledge
+---
+Use shared project knowledge: status, search, show, record, lesson, catalog, rebuild, import, maintain, publish, repair, sync, or index. See docs/knowledge.md.
+```bash
+tb knowledge
+```
+
+<br/><br/>
 ### amend
 ---
 Amends the current commit optionally adding new files
@@ -251,7 +274,7 @@ tb console
 |--firefox||Include the Firefox parent checkout tab|true|`tb console --firefox=false`
 |--maxDiffBytes||Maximum server-loaded diff bytes per commit|200000|`tb console --maxDiffBytes=200000`
 |--pageSize||Commit page size for infinite loading|80|`tb console --pageSize=80`
-|--port||Localhost port. Defaults to 4310 and falls back to a random free port when busy. Use 0 for a random free port|4310|`tb console --port=4310`
+|--port||Localhost port. Defaults to 4310 and closes an earlier console on that port. Uses a random free port if another service owns it. Use 0 for a random free port|4310|`tb console --port=4310`
 
 <br/><br/>
 ### build-rebase
@@ -512,7 +535,7 @@ tb submit
 |--query|-q|fuzzy selector query||`tb submit --query=<value>`
 |--tasks-regex|-t|auto selector task regex||`tb submit --tasks-regex=<value>`
 |--preset||mach try preset to load||`tb submit --preset=<value>`
-|--artifact||force artifact builds where possible|true|`tb submit --artifact=false`
+|--artifact||force artifact builds where possible|false|`tb submit --artifact`
 |--comment|-c|Post try link as comment to phab revision|false|`tb submit --comment`
 
 <br/><br/>

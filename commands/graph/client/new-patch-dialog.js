@@ -1,3 +1,4 @@
+import { setLiveText, hasSelectedText } from "./live-text.js";
 import {
   INTERACTIVE,
   newPatchBug,
@@ -89,8 +90,8 @@ export function renderGraphNewPatchSession(session) {
 
   newPatchStatus.textContent = getNewPatchSessionStatusText(session);
   newPatchStatus.classList.toggle("error", session.status === "error");
-  newPatchOutput.textContent = session.output || "";
-  newPatchOutput.scrollTop = newPatchOutput.scrollHeight;
+  setLiveText(newPatchOutput, session.output || "");
+  if (!hasSelectedText(newPatchOutput)) newPatchOutput.scrollTop = newPatchOutput.scrollHeight;
   setNewPatchLinks(session.links || []);
   setNewPatchDialogBusy(active);
 

@@ -5,13 +5,18 @@ import {
   getBugsWithAttachmentsByIds as defaultGetBugsWithAttachmentsByIds,
   getNeedinfoOpenBugs as defaultGetNeedinfoOpenBugs,
 } from "../../lib/bugzilla.mjs";
-import defaultPhab from "../../lib/phab.mjs";
+import defaultPhab, { findCachedReviewer } from "../../lib/phab.mjs";
+import { getBugzillaRevisions as defaultGetBugzillaRevisions } from "../../lib/bugzilla-revisions.mjs";
 import { getBugIdFromText, getBugUrl, getPhabUrl } from "../../lib/workflow.mjs";
 import { CHECKIN_NEEDED_KEYWORD } from "./constants.mjs";
 import {
   loadReviewerGroupCache as defaultLoadReviewerGroupCache,
   saveReviewerGroupCache as defaultSaveReviewerGroupCache,
 } from "./reviewer-groups-cache.mjs";
+import {
+  loadDashboardTimelineCache as defaultLoadDashboardTimelineCache,
+  saveDashboardTimelineCache as defaultSaveDashboardTimelineCache,
+} from "./dashboard-timeline-cache.mjs";
 
 const CHANGE_TRANSACTION_TYPES = new Set([
   "diff",
@@ -27,7 +32,13 @@ const REVIEW_TRANSACTION_TYPES = new Set([
   "request-changes",
   "resign",
 ]);
+const REQUEST_CHANGES_TRANSACTION_TYPES = new Set([
+  "reject",
+  "request-changes",
+]);
+const DASHBOARD_BUGZILLA_REVISION_CONCURRENCY = 8;
 const PHABRICATOR_QUERY_BATCH_SIZE = 100;
+const DASHBOARD_PHABRICATOR_CACHE_TTL_MS = 15 * 60 * 1000;
 
 function normalizeTimestamp(value) {
   const numericTimestamp = Number(value || 0);
@@ -96,6 +107,10 @@ function isChangeTransaction(transaction = {}) {
   return CHANGE_TRANSACTION_TYPES.has(getTransactionType(transaction));
 }
 
+function isRequestChangesTransaction(transaction = {}) {
+  return REQUEST_CHANGES_TRANSACTION_TYPES.has(getTransactionType(transaction));
+}
+
 function isNeedsReview(revision = {}) {
   return /needs review/i.test(revision.statusName || revision.status || "");
 }
@@ -144,6 +159,11 @@ function getUserDisplayName(user = {}) {
   ).trim();
 }
 
+function hasCurrentAcceptance(timeline = {}) {
+  const acceptedAt = Number(timeline.latestYourAcceptanceAt || 0);
+  return acceptedAt > 0 && acceptedAt >= Number(timeline.latestReviewRequestAt || 0);
+}
+
 function getRevisionTimeline({ revision, transactions = [], currentUserPhid }) {
   const patchUpdates = transactions.filter((transaction) => (
     isChangeTransaction(transaction) &&
@@ -170,17 +190,35 @@ function getRevisionTimeline({ revision, transactions = [], currentUserPhid }) {
   const yourReviewEvents = reviewEvents.filter((transaction) => (
     getTransactionAuthor(transaction) === currentUserPhid
   ));
+  const comments = transactions.filter(hasComment);
+  const yourComments = comments.filter((transaction) => (
+    getTransactionAuthor(transaction) === currentUserPhid
+  ));
+  const otherComments = comments.filter((transaction) => (
+    getTransactionAuthor(transaction) !== currentUserPhid
+  ));
+  const yourAcceptances = yourReviewEvents.filter((transaction) => (
+    getTransactionType(transaction) === "accept"
+  ));
+  const yourRequestChanges = yourReviewEvents.filter(isRequestChangesTransaction);
 
   return {
     currentReviewEventCount: currentReviewEvents.length,
+    latestReviewRequestAt: Math.max(...transactions.filter(transaction =>
+      ["request", "request-review"].includes(getTransactionType(transaction)) &&
+      getTransactionAuthor(transaction) === revision.authorPHID
+    ).map(getTransactionTimestamp), 0),
+    latestOtherCommentAt: Math.max(...otherComments.map(getTransactionTimestamp), 0),
     latestPatchUpdateAt,
     latestReviewAt: Math.max(...reviewEvents.map(getTransactionTimestamp), 0),
-    latestCurrentReviewAt: Math.max(
-      ...currentReviewEvents.map(getTransactionTimestamp),
+    latestYourAcceptanceAt: Math.max(...yourAcceptances.map(getTransactionTimestamp), 0),
+    latestYourCommentAt: Math.max(...yourComments.map(getTransactionTimestamp), 0),
+    latestYourRequestChangesAt: Math.max(
+      ...yourRequestChanges.map(getTransactionTimestamp),
       0,
     ),
-    latestYourReviewAt: Math.max(
-      ...yourReviewEvents.map(getTransactionTimestamp),
+    latestCurrentReviewAt: Math.max(
+      ...currentReviewEvents.map(getTransactionTimestamp),
       0,
     ),
   };
@@ -224,6 +262,31 @@ function getUniqueValues(values) {
   return Array.from(new Set(values.map(String).filter(Boolean)));
 }
 
+function getDashboardRowModified({ attachment, row }) {
+  return Date.parse(
+    row?.modifiedText?.replace(
+      /\(UTC([+-]\d+)\)/,
+      (_, hours) => `GMT${Number(hours) < 0 ? "-" : "+"}${String(Math.abs(Number(hours))).padStart(2, "0")}00`,
+    ) || "",
+  ) || normalizeTimestamp(attachment?.last_change_time);
+}
+
+function getDashboardRowReviewers({ currentUser, groups, row }) {
+  const reviewers = {};
+
+  for (const review of row?.reviewers || []) {
+    const name = String(review?.name || review?.user || "").trim();
+    const group = groups.find((item) => [item.name, item.slug].includes(name));
+    const phid = name === currentUser.userName ? currentUser.phid : group?.phid;
+
+    if (phid) {
+      reviewers[phid] = "added";
+    }
+  }
+
+  return reviewers;
+}
+
 function chunkValues(values, size = PHABRICATOR_QUERY_BATCH_SIZE) {
   const chunks = [];
 
@@ -232,6 +295,25 @@ function chunkValues(values, size = PHABRICATOR_QUERY_BATCH_SIZE) {
   }
 
   return chunks;
+}
+
+async function mapWithConcurrency(values, callback, concurrency) {
+  const results = new Array(values.length);
+  let nextIndex = 0;
+
+  async function runWorker() {
+    while (nextIndex < values.length) {
+      const index = nextIndex++;
+
+      results[index] = await callback(values[index]);
+    }
+  }
+
+  await Promise.all(Array.from(
+    { length: Math.min(concurrency, values.length) },
+    runWorker,
+  ));
+  return results;
 }
 
 function normalizeAttachments(attachments) {
@@ -248,7 +330,7 @@ function normalizeAttachments(attachments) {
 
 function getPhabricatorIdsFromAttachments(attachments) {
   return normalizeAttachments(attachments).flatMap((attachment) => {
-    if (attachment?.content_type !== "text/x-phabricator-request") {
+    if (attachment?.content_type !== "text/x-phabricator-request" || attachment.is_obsolete) {
       return [];
     }
 
@@ -258,10 +340,60 @@ function getPhabricatorIdsFromAttachments(attachments) {
   });
 }
 
-async function getRevisionTimelines({ revisions, currentUserPhid, phab }) {
-  const timelines = new Map();
+function getCachedRevisionTimeline({ cachedTimelines, revision }) {
+  const cached = cachedTimelines?.[revision.id];
 
-  for (const chunk of chunkValues(revisions)) {
+  if (
+    !cached?.timeline ||
+    !revision.dateModified ||
+    Number(cached.dateModified) !== Number(revision.dateModified)
+  ) {
+    return null;
+  }
+
+  return cached.timeline;
+}
+
+function getTimelineCacheEntries({ revisions, timelines }) {
+  return Object.fromEntries(
+    revisions
+      .map((revision) => {
+        const history = timelines.get(revision.id);
+
+        if (history?.error || !revision.dateModified || !history?.timeline) {
+          return null;
+        }
+
+        return [revision.id, {
+          dateModified: revision.dateModified,
+          timeline: history.timeline,
+        }];
+      })
+      .filter(Boolean),
+  );
+}
+
+async function getRevisionTimelines({
+  bypassCache = false,
+  cachedTimelines = {},
+  revisions,
+  currentUserPhid,
+  phab,
+}) {
+  const timelines = new Map();
+  const revisionsToRefresh = [];
+
+  for (const revision of revisions) {
+    const timeline = getCachedRevisionTimeline({ cachedTimelines, revision });
+
+    if (timeline) {
+      timelines.set(revision.id, { timeline });
+    } else {
+      revisionsToRefresh.push(revision);
+    }
+  }
+
+  for (const chunk of chunkValues(revisionsToRefresh)) {
     try {
       const response = await phab({
         route: "differential.getrevisioncomments",
@@ -269,6 +401,8 @@ async function getRevisionTimelines({ revisions, currentUserPhid, phab }) {
           ids: chunk.map((revision) => Number(revision.numericId)),
           inlines: false,
         },
+        bypassCache,
+        cacheTtlMs: DASHBOARD_PHABRICATOR_CACHE_TTL_MS,
       });
       const commentsByRevision = response?.result || {};
 
@@ -379,13 +513,15 @@ function partitionReviewQueueRevisions({ currentUserPhid, groups, response }) {
   };
 }
 
-async function getRevisionsByIds({ ids, phab }) {
+async function getRevisionsByIds({ bypassCache = false, ids, phab }) {
   const revisions = new Map();
 
   for (const chunk of chunkValues(getUniqueValues(ids))) {
     const response = await phab({
       route: "differential.query",
       params: { ids: chunk.map(Number) },
+      bypassCache,
+      cacheTtlMs: DASHBOARD_PHABRICATOR_CACHE_TTL_MS,
     });
 
     for (const revision of response?.result || []) {
@@ -400,7 +536,7 @@ async function getRevisionsByIds({ ids, phab }) {
   return revisions;
 }
 
-async function getRevisionAuthorNames({ revisions, phab }) {
+async function getRevisionAuthorNames({ revisions, phab, errors = [] }) {
   const authorsByPhid = new Map();
   const authorPhids = getUniqueValues(
     revisions
@@ -409,10 +545,13 @@ async function getRevisionAuthorNames({ revisions, phab }) {
   );
 
   for (const phids of chunkValues(authorPhids)) {
-    const response = await phab({
-      route: "user.query",
-      params: { phids },
-    });
+    let response;
+    try {
+      response = await phab({ route: "user.query", params: { phids } });
+    } catch (error) {
+      errors.push(`Patch author names could not load: ${error?.message || error}`);
+      break;
+    }
 
     for (const [index, user] of (response?.result || []).entries()) {
       const phid = String(user?.phid || phids[index] || "");
@@ -455,9 +594,25 @@ function hasCheckinNeeded(bug) {
 
 function buildAssignedBugRows({ bugs, attachmentsByBugId, revisionsById }) {
   return bugs.map((bug) => {
-    const patches = getUniqueValues(attachmentsByBugId.get(String(bug.id)) || [])
-      .map((id) => revisionsById.get(`D${id}`))
-      .filter(Boolean);
+    const attachedRevisionIds = getUniqueValues(
+      attachmentsByBugId.get(String(bug.id)) || [],
+    );
+    const patches = attachedRevisionIds.map((id) => {
+      const revision = revisionsById.get(`D${id}`);
+
+      if (revision) {
+        return revision;
+      }
+
+      // The dashboard only loads details for patches in the user's queues.
+      // Keep other active attachments visible without delaying the whole page.
+      return {
+        id: `D${id}`,
+        statusName: "Attached",
+        title: "",
+        url: getPhabUrl(`D${id}`),
+      };
+    });
 
     return {
       id: String(bug.id),
@@ -465,7 +620,7 @@ function buildAssignedBugRows({ bugs, attachmentsByBugId, revisionsById }) {
       summary: bug.summary || "Untitled Bugzilla bug",
       status: bug.status || "Open",
       component: [bug.product, bug.component].filter(Boolean).join(" / "),
-      hasPatch: patches.length > 0,
+      hasPatch: attachedRevisionIds.length > 0,
       patches: patches.map((patch) => ({
         id: patch.id,
         statusName: patch.statusName,
@@ -545,6 +700,10 @@ export function classifyDashboardRevisions({
       return withPatchAge(revision, timeline.latestPatchUpdateAt, now, "Last update");
     })
     .sort((first, second) => second.ageMs - first.ageMs);
+  const ownApproved = mine
+    .filter((revision) => isAccepted(revision) && !isClosed(revision))
+    .map((revision) => withPatchAge(revision, revision.dateModified, now, "Last update"))
+    .sort((first, second) => second.ageMs - first.ageMs);
   const approvedNotMarkedForCheckin = mine
     .filter(isAccepted)
     .filter((revision) => !hasCheckinNeeded(bugsById.get(revision.bugId)))
@@ -552,11 +711,7 @@ export function classifyDashboardRevisions({
   const groupWaitingForFirstReview = groupRevisions
     .filter(isNeedsReview)
     .filter((revision) => revision.authorPHID !== currentUserPhid)
-    .filter((revision) => {
-      const history = timelines.get(revision.id);
-
-      return !history?.error && !history?.timeline?.latestReviewAt;
-    })
+    .filter((revision) => !hasCurrentAcceptance(timelines.get(revision.id)?.timeline))
     .map((revision) => {
       const timeline = timelines.get(revision.id)?.timeline || {};
 
@@ -568,14 +723,8 @@ export function classifyDashboardRevisions({
     .sort((first, second) => second.ageMs - first.ageMs);
   const directlyAssignedWaitingOnReview = directlyAssignedRevisions
     .filter(isNeedsReview)
-    .filter((revision) => {
-      const timeline = timelines.get(revision.id)?.timeline || {};
-
-      return (
-        revision.authorPHID !== currentUserPhid &&
-        timeline.latestYourReviewAt < timeline.latestPatchUpdateAt
-      );
-    })
+    .filter((revision) => revision.authorPHID !== currentUserPhid)
+    .filter((revision) => !hasCurrentAcceptance(timelines.get(revision.id)?.timeline))
     .map((revision) => {
       const timeline = timelines.get(revision.id)?.timeline || {};
 
@@ -589,24 +738,145 @@ export function classifyDashboardRevisions({
   return {
     ownNeedsRevision,
     ownNeedsReview,
+    ownApproved,
     approvedNotMarkedForCheckin,
     groupWaitingForFirstReview,
     directlyAssignedWaitingOnReview,
   };
 }
 
+export async function getDashboardRevisionPanes({
+  currentUser, groups, assignedBugs, getDashboardRevisions,
+  getBugsWithAttachmentsByIds, getBugzillaRevisions, bypassCache, lists: loadedLists,
+  errors = [],
+}) {
+  const lists = loadedLists || await getDashboardRevisions({ currentUser, groups });
+  const rows = new Map([...lists.mine, ...lists.reviewQueue].map((row) => [row.id, row]));
+  const bugIds = getUniqueValues([
+    ...assignedBugs.map((bug) => bug.id),
+    ...[...rows.values()].map((row) => getBugIdFromText(row.title) || ""),
+  ]);
+  const bugs = await readDashboardBugzilla(
+    () => getBugsWithAttachmentsByIds(bugIds), "Patch attachments", errors,
+  );
+  const attachmentsByBugId = new Map(bugs.map((bug) => [String(bug.id), getPhabricatorIdsFromAttachments(bug.attachments)]));
+  const authors = new Map([[currentUser.userName, currentUser.phid]]);
+  for (const name of getUniqueValues([...rows.values()].map((row) => row.authorName))) {
+    if (authors.has(name)) continue;
+    const cached = await findCachedReviewer(name);
+    if (cached?.type === "user") authors.set(name, cached.phid);
+  }
+  // The owned query establishes authorship. Display names need no API lookup.
+  const ownedIds = new Set(lists.mine.map((row) => row.id));
+  const revisions = new Map();
+  const attachmentsByRevisionId = new Map();
+
+  for (const bug of bugs) {
+    for (const attachment of normalizeAttachments(bug.attachments)) {
+      for (const numericId of getPhabricatorIdsFromAttachments([attachment])) {
+        const id = `D${numericId}`;
+
+        if (rows.has(id) && !attachmentsByRevisionId.has(id)) {
+          attachmentsByRevisionId.set(id, attachment);
+        }
+      }
+    }
+  }
+
+  for (const [id, row] of rows) {
+    const attachment = attachmentsByRevisionId.get(id);
+    const statusName = String(row.statusName || "").trim();
+
+    if (!attachment || !statusName) {
+      continue;
+    }
+
+    const modified = getDashboardRowModified({ attachment, row });
+
+    revisions.set(id, normalizeRevision({
+      id,
+      statusName,
+      reviewers: getDashboardRowReviewers({ currentUser, groups, row }),
+      title: row.title,
+      authorName: row.authorName || "",
+      authorPHID: ownedIds.has(id) ? currentUser.phid : authors.get(row.authorName) || "",
+      dateCreated: modified,
+      dateModified: modified,
+    }));
+  }
+
+  const revisionBugs = bugs.flatMap((bug) => {
+    const revisionIds = (attachmentsByBugId.get(String(bug.id)) || [])
+      .filter((id) => rows.has(`D${id}`) && !revisions.has(`D${id}`));
+
+    return revisionIds.length ? [{ bug, revisionIds }] : [];
+  });
+  const revisionPanes = await mapWithConcurrency(
+    revisionBugs,
+    async ({ bug, revisionIds }) => ({
+      bug,
+      revisionIds,
+      // Each eligible bug is queried once. The service shares cached/in-flight data.
+      revisions: await readDashboardBugzilla(
+        () => getBugzillaRevisions(bug.id, { bypassCache }),
+        `Bug ${bug.id} review status`,
+        errors,
+      ),
+    }),
+    DASHBOARD_BUGZILLA_REVISION_CONCURRENCY,
+  );
+
+  for (const { bug, revisionIds, revisions: pane } of revisionPanes) {
+    for (const item of pane) {
+      if (!revisionIds.includes(String(item.id).replace(/^D/, ""))) continue;
+      const row = rows.get(item.id);
+      const reviewers = {};
+      for (const review of item.reviews || []) {
+        const group = groups.find((group) => [group.name, group.slug].includes(review.user));
+        const phid = review.user === currentUser.userName ? currentUser.phid : group?.phid || review.identity?.phid;
+        if (phid) reviewers[phid] = review.status;
+      }
+      const attachment = attachmentsByRevisionId.get(item.id) || normalizeAttachments(bug.attachments)
+        .find((candidate) => String(candidate.file_name).includes(item.id));
+      const modified = getDashboardRowModified({ attachment, row });
+      revisions.set(item.id, normalizeRevision({
+        ...item, statusName: item.long_status, reviewers,
+        authorName: row?.authorName || "", authorPHID: ownedIds.has(item.id) ? currentUser.phid : authors.get(row?.authorName) || "",
+        dateCreated: modified, dateModified: modified,
+      }));
+    }
+  }
+  const select = (list) => list.map((row) => revisions.get(row.id)).filter(Boolean);
+  return { mine: select(lists.mine), reviewQueue: select(lists.reviewQueue), revisions, attachmentsByBugId };
+}
+
+async function readDashboardBugzilla(read, section, errors) {
+  try {
+    return await read();
+  } catch (error) {
+    errors.push(`${section} could not load: ${error?.message || error}`);
+    return [];
+  }
+}
+
 export async function getDashboardData({
   appConfig = defaultConfig,
+  loadDashboardTimelineCache = defaultLoadDashboardTimelineCache,
   loadReviewerGroupCache = defaultLoadReviewerGroupCache,
   getAssignedOpenBugs = defaultGetAssignedOpenBugs,
   getBugsByIds = defaultGetBugsByIds,
   getBugsWithAttachmentsByIds = defaultGetBugsWithAttachmentsByIds,
   getNeedinfoOpenBugs = defaultGetNeedinfoOpenBugs,
+  getDashboardRevisions,
+  getBugzillaRevisions = defaultGetBugzillaRevisions,
   now = Date.now(),
   phab = defaultPhab,
+  bypassCache = false,
+  saveDashboardTimelineCache = defaultSaveDashboardTimelineCache,
   saveReviewerGroupCache = defaultSaveReviewerGroupCache,
 } = {}) {
   const username = String(appConfig?.phabricator?.user || "").trim();
+  const errors = [];
 
   if (!username) {
     throw new Error("Set phabricator.user in ~/.tb.json to load the dashboard.");
@@ -624,53 +894,78 @@ export async function getDashboardData({
     currentUser.phid,
     ...groups.map((group) => group.phid),
   ]);
-  const [mineResponse, assignedBugs, needinfoBugs, reviewQueueResponse] = await Promise.all([
-    phab({
+  const [mineResponse, assignedBugs, needinfoBugs, reviewQueueResponse, browserLists] = await Promise.all([
+    getDashboardRevisions ? null : phab({
       route: "differential.query",
       params: { authors: [currentUser.phid], status: "status-open" },
+      bypassCache,
+      cacheTtlMs: DASHBOARD_PHABRICATOR_CACHE_TTL_MS,
     }),
-    getAssignedOpenBugs({ assignedTo: appConfig?.bugzilla?.user }),
-    getNeedinfoOpenBugs({ requestee: appConfig?.bugzilla?.user }),
-    phab({
+    readDashboardBugzilla(() => getAssignedOpenBugs({ assignedTo: appConfig?.bugzilla?.user }), "Assigned bugs", errors),
+    readDashboardBugzilla(() => getNeedinfoOpenBugs({ requestee: appConfig?.bugzilla?.user }), "Needinfo bugs", errors),
+    getDashboardRevisions ? null : phab({
       route: "differential.query",
       // Reviewer PHIDs form an OR query, so this one request covers both the
       // directly assigned queue and every review group.
       params: { reviewers: reviewerPhids, status: "status-open" },
+      bypassCache,
+      cacheTtlMs: DASHBOARD_PHABRICATOR_CACHE_TTL_MS,
     }),
+    getDashboardRevisions ? getDashboardRevisions({ currentUser, groups }) : null,
   ]);
-  const mine = (mineResponse?.result || [])
+  const panes = browserLists ? await getDashboardRevisionPanes({
+    currentUser, groups, assignedBugs, getBugsWithAttachmentsByIds,
+    getBugzillaRevisions, bypassCache, lists: browserLists, errors,
+  }) : null;
+  const mine = (panes?.mine || mineResponse?.result || [])
     .map(normalizeRevision)
     .filter((revision) => revision.id && !isClosed(revision));
   const { directlyAssignedRevisions, groupRevisions } = partitionReviewQueueRevisions({
     currentUserPhid: currentUser.phid,
     groups,
-    response: reviewQueueResponse,
+    response: panes ? { result: panes.reviewQueue } : reviewQueueResponse,
   });
   const allDashboardRevisions = new Map([
     ...mine.map((revision) => [revision.id, revision]),
     ...groupRevisions.map((revision) => [revision.id, revision]),
     ...directlyAssignedRevisions.map((revision) => [revision.id, revision]),
   ]);
+  const cachedTimelines = await loadDashboardTimelineCache({
+    currentUserPhid: currentUser.phid,
+  });
   const timelines = await getRevisionTimelines({
+    bypassCache,
+    cachedTimelines,
     revisions: Array.from(allDashboardRevisions.values()),
     currentUserPhid: currentUser.phid,
     phab,
+  });
+  await saveDashboardTimelineCache({
+    currentUserPhid: currentUser.phid,
+    entries: getTimelineCacheEntries({
+      revisions: Array.from(allDashboardRevisions.values()),
+      timelines,
+    }),
+    now,
   });
   const approvedBugIds = mine
     .filter(isAccepted)
     .map((revision) => revision.bugId)
     .filter(Boolean);
   const [approvedBugs, attachmentsByBugId] = await Promise.all([
-    getBugsByIds(approvedBugIds),
-    getAssignedBugAttachments({
+    readDashboardBugzilla(() => getBugsByIds(approvedBugIds), "Accepted patch bugs", errors),
+    panes ? panes.attachmentsByBugId : getAssignedBugAttachments({
       bugs: assignedBugs,
-      getBugsWithAttachmentsByIds,
+      getBugsWithAttachmentsByIds: (ids) => readDashboardBugzilla(
+        () => getBugsWithAttachmentsByIds(ids), "Assigned bug attachments", errors,
+      ),
     }),
   ]);
   const assignedRevisionIds = getUniqueValues(
     Array.from(attachmentsByBugId.values()).flat(),
   );
-  const attachedRevisions = await getRevisionsByIds({
+  const attachedRevisions = panes ? panes.revisions : await getRevisionsByIds({
+    bypassCache,
     ids: assignedRevisionIds.filter(
       (id) => !allDashboardRevisions.has(`D${id}`),
     ),
@@ -698,6 +993,7 @@ export async function getDashboardData({
   const authorsByPhid = await getRevisionAuthorNames({
     revisions: reviewQueueRevisions,
     phab,
+    errors,
   });
   const assignedBugRows = buildAssignedBugRows({
     bugs: assignedBugs.filter((bug) => bug.is_open !== false),
@@ -713,7 +1009,7 @@ export async function getDashboardData({
       username: currentUser.userName || username,
     },
     groups,
-    errors: [],
+    errors,
     ...sections,
     directlyAssignedWaitingOnReview: withAuthorNames(
       sections.directlyAssignedWaitingOnReview,

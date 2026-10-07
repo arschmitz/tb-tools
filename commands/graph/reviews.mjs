@@ -51,7 +51,7 @@ async function getReviewerNamesByPhid({ phids, phab }) {
   }
 }
 
-async function getRevisionTransactions({ revision, phab }) {
+export async function getRevisionTransactions({ revision, phab }) {
   const transactions = [];
   let after = null;
   let historyTruncated = false;
@@ -668,6 +668,7 @@ export async function getGraphCommitReview({
   runCommand,
   phab = defaultPhab,
   getWebSuggestions,
+  getWebReview,
 }) {
   if (!graph) {
     const error = new Error("Unknown graph checkout.");
@@ -705,6 +706,9 @@ export async function getGraphCommitReview({
   };
 
   try {
+    if (getWebReview) {
+      return { ...result, ...await getWebReview({ revision }) };
+    }
     const [transactionResult, revisionAuthorPhid] = await Promise.all([
       getRevisionTransactions({ revision, phab }),
       getRevisionAuthorPhid({ revision, phab }),

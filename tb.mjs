@@ -33,6 +33,7 @@ import fs from "fs";
 import path from "path";
 import graphCommand from './commands/graph.mjs';
 import consoleCommand from './commands/console.mjs';
+import desktopCommand from './commands/desktop.mjs';
 import knowledgeCommand from './commands/knowledge.mjs';
 
 
@@ -151,6 +152,17 @@ const commands = {
       await graphCommand(options);
     },
   },
+  desktop: {
+    description: "Starts the Electron desktop app in its own process.",
+    header: "Desktop Options",
+    options: [
+      { name: "comm", type: String, description: "Thunderbird comm checkout. Defaults to the current checkout, saved checkout, or folder picker." },
+      { name: "project", type: String, description: "Commands source directory containing desktop/main.cjs." },
+    ],
+    async run() {
+      await desktopCommand(args(commands.desktop.options, { argv }));
+    },
+  },
   console: {
     description: "Starts the interactive Thunderbird Desktop Console with a Phabricator/Bugzilla dashboard, live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, tracked try runs, update/rebase controls, and build/run output.",
     header: "Console Options",
@@ -161,7 +173,7 @@ const commands = {
       { name: "firefox", description: "Include the Firefox parent checkout tab", defaultValue: "true" },
       { name: "maxDiffBytes", description: "Maximum server-loaded diff bytes per commit", defaultValue: "200000" },
       { name: "pageSize", description: "Commit page size for infinite loading", defaultValue: "80" },
-      { name: "port", description: "Localhost port. Defaults to 4310 and falls back to a random free port when busy. Use 0 for a random free port", defaultValue: "4310" },
+      { name: "port", description: "Localhost port. Defaults to 4310 and closes an earlier console on that port. Uses a random free port if another service owns it. Use 0 for a random free port", defaultValue: "4310" },
     ],
     async run () {
       const options = mapBooleanOptions(args(commands.console.options, { argv }));
@@ -440,7 +452,13 @@ Optionally:
 };
 
 commands.rebase.options = commands.update.options;
-commands.submit.options = [...commands.submit.options, ...commands.test.options, ...commands.try.options];
+commands.submit.options = [
+  ...commands.submit.options,
+  ...commands.test.options,
+  ...commands.try.options.map((option) => (
+    option.name === "artifact" ? { ...option, defaultValue: "false" } : option
+  )),
+];
 
 const optionList = [];
 const subOptions = {};
@@ -463,6 +481,7 @@ function getUsageOptions(options) {
     const usageOption = { ...option };
     delete usageOption.defaultOption;
     delete usageOption.multiple;
+    delete usageOption.type;
     return usageOption;
   });
 }
@@ -485,7 +504,7 @@ Object.entries(commands).forEach(([name, { description, header, options }]) => {
   sections.push({ header, content: getUsageOptions(options) });
 });
 
-if (command && !["help", "readme", "knowledge"].includes(command)) {
+if (command && !["help", "readme", "knowledge", "desktop"].includes(command)) {
   checkDir();
 }
 

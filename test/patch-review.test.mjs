@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { readFile, rm } from "node:fs/promises";
+import path from "node:path";
 import { test } from "node:test";
 import {
   addGraphPatchReviewInline,
@@ -9,10 +12,88 @@ import {
   getGraphPatchReviewCodexThreadName,
   getGraphPatchReviewContext,
   getGraphPatchReviewPrompt,
+  prepareGraphPatchReviewCodexPrompt,
+  refreshGraphPatchReviewContext,
   prepareGraphPatchReviewSession,
+  retryGraphPatchReviewSession,
   steerGraphPatchReviewSession,
   submitGraphPatchReview,
 } from "../commands/graph/patch-review.mjs";
+import { formatGraphPatchUpdateMemory } from "../commands/graph/patch-update-memory.mjs";
+
+test("Review removes repeated history fields while preserving distinct evidence and discussion", () => {
+  const history = formatGraphPatchUpdateMemory({ event: "Assessed", session: {
+    revision: "D123456", currentHash: "abc", status: "review",
+    items: [{ author: "Reviewer", state: "ready", content: "Unique older feedback",
+      validation: "Unique validation evidence", url: "https://example.com/comment" }],
+  } });
+  const comments = Array.from({ length: 120 }, (_, index) => ({
+    id: `comment-${index}`, author: "Reviewer", content: `Distinct comment ${index}: ` + "x".repeat(200),
+  }));
+  const prompt = getGraphPatchReviewPrompt({
+    revision: "D123456", graph: { path: "/review/comm" }, memoryContext: history.repeat(100),
+    reviewDiscussion: { available: true, comments, inlineComments: [] },
+    resumeReviewContext: { issues: [{ id: "old-finding", validation: "Prior experiment" }] },
+  });
+  assert.equal(prompt.split("> Unique older feedback").length - 1, 1);
+  assert.match(prompt, /Unique validation evidence/);
+  assert.match(prompt, /Prior experiment/);
+  assert.ok(comments.every(comment => prompt.includes(comment.content)));
+  assert.doesNotMatch(prompt, /Additional existing discussion omitted/);
+});
+
+test("Review keeps oversized requests intact in a file, including resumed review evidence", async (t) => {
+  const session = {
+    revision: "D123456", graph: { path: "/review/comm" },
+    memoryContext: "Earlier unique evidence\n" + "x".repeat(1100000) + "\nLatest unique evidence",
+    resumeReviewContext: { issues: [{ id: "pending", state: "pending", codeSuggestion: "exact replacement" }] },
+  };
+  const prompt = getGraphPatchReviewPrompt(session);
+  const input = await prepareGraphPatchReviewCodexPrompt({ session, prompt });
+  const filename = JSON.parse(input.match(/saved at ("[^\n]+?")\./)[1]);
+  t.after(() => rm(path.dirname(filename), { recursive: true, force: true }));
+  assert.ok(input.length < 1048576);
+  assert.match(input, /Read that entire file in bounded sections/);
+  assert.match(input, /Do not access the Working checkout/);
+  assert.equal(await readFile(filename, "utf8"), prompt);
+  assert.match(prompt, /exact replacement/);
+  assert.match(prompt, /Earlier unique evidence/);
+  assert.match(prompt, /Latest unique evidence/);
+});
+
+test("Review sends normal requests unchanged", async () => {
+  assert.equal(await prepareGraphPatchReviewCodexPrompt({
+    session: { graph: { path: "/review/comm" } }, prompt: "Review this exact change.",
+  }), "Review this exact change.");
+});
+
+test("Review applies the size guard to follow-ups and live guidance", async (t) => {
+  for (const live of [false, true]) {
+    let sent;
+    const receive = async ({ prompt }) => {
+      sent = prompt;
+      return { turn: { status: "completed" }, message: JSON.stringify({
+        patchContext: { purpose: "Purpose", behaviorContract: "Contract" }, issues: [], coverage: {},
+      }) };
+    };
+    const session = {
+      aiEnabled: true, activity: [], issues: [], workingTreeDiffVersion: 0,
+      graph: { checkout: "review", repository: "comm", path: "/review/comm" },
+      status: live ? "reviewing" : "review", codexTurnId: live ? "active" : "",
+      codexAgent: { threadId: "saved", client: { startTurn: receive, steerTurn: receive } },
+    };
+    const instruction = "Keep every part of this guidance: " + "y".repeat(1100000) + " END";
+    await steerGraphPatchReviewSession({ session, instruction });
+    for (let attempt = 0; !sent && attempt < 100; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.ok(sent);
+    assert.ok(sent.length < 1048576);
+    const filename = JSON.parse(sent.match(/saved at ("[^\n]+?")\./)[1]);
+    t.after(() => rm(path.dirname(filename), { recursive: true, force: true }));
+    assert.ok((await readFile(filename, "utf8")).includes(instruction));
+  }
+});
 
 function getReviewGraphs() {
   return [
@@ -128,6 +209,46 @@ test("patch review pulls an exact raw patch into the configured Review clone whe
       },
     ],
   );
+});
+
+test("patch review selects the requested parent when moz-phab leaves a child at HEAD", async () => {
+  const session = createGraphPatchReviewSession({ graphs: getReviewGraphs(), revision: "D323799", aiEnabled: false });
+  const parent = "a".repeat(40);
+  const child = "b".repeat(40);
+  let head = child;
+  const message = (id) => `Differential Revision: https://phabricator.services.mozilla.com/${id}\n`;
+  await prepareGraphPatchReviewSession({
+    session, getSnapshot: async () => ({}),
+    makeTempDirectory: async () => "/tmp/review-fixture", writeRawPatch: async () => {},
+    runCommand: async ({ cmd, args, cwd }) => {
+      assert.equal(cwd, "/repo/review/comm");
+      if (cmd === "moz-phab" && args.includes("--raw")) return "diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b\n";
+      if (cmd === "git" && args[0] === "rev-parse") return head;
+      if (cmd === "git" && args[0] === "branch") return "phab-D324796_7";
+      if (cmd === "git" && args.includes("--format=%H%x00%B%x00")) return `${child}\0${message("D324796")}\0\n${parent}\0${message("D323799")}\0\n`;
+      if (cmd === "git" && args[0] === "log" && args[1] === "-1") return message(head === child ? "D324796" : "D323799");
+      if (cmd === "git" && args.includes("--detach")) {
+        assert.deepEqual(args, ["switch", "--detach", parent]);
+        head = parent;
+      }
+      return "";
+    },
+  });
+  assert.equal(session.status, "complete", session.error);
+  assert.equal(session.currentHash, parent);
+  assert.equal(session.reviewBranch, "");
+});
+
+test("resuming a review detects patch and discussion changes without discarding saved findings", async () => {
+  const rawPatch = "diff --git a/a b/a\n";
+  const session = { revision: "D123", rawPatchHash: createHash("sha256").update(rawPatch).digest("hex"), issues: [{ id: "keep" }] };
+  let calls = 0;
+  const getRevisionReview = async () => { calls++; return { rawPatch, revision: "D123", comments: [], inlineComments: [] }; };
+  assert.equal(await refreshGraphPatchReviewContext({ session, getRevisionReview }), true);
+  assert.equal(await refreshGraphPatchReviewContext({ session, getRevisionReview }), false);
+  assert.equal(calls, 2);
+  await assert.rejects(refreshGraphPatchReviewContext({ session, getRevisionReview: async () => ({ rawPatch: "changed" }) }), /new patch must be checked out and reviewed/);
+  assert.deepEqual(session.issues, [{ id: "keep" }]);
 });
 
 test("patch review cancels an in-progress Review checkout pull", () => {
@@ -325,7 +446,9 @@ test("patch review adds a selected code suggestion as a pending inline before fi
       filePath: "mail/example.mjs",
       lineNumber: 42,
       lineLength: 1,
-      isNewFile: true,
+      // The review action must normalize this stale old-side marker before it
+      // reaches Phabricator.
+      isNewFile: false,
       suggestedComment: "Please use the shared cleanup helper.",
       codeSuggestion: "cleanup();",
       state: "ready",
@@ -346,6 +469,9 @@ test("patch review adds a selected code suggestion as a pending inline before fi
     lineNumber: 42,
     lineLength: 1,
     content: "Please use the shared cleanup helper.\n\n```suggestion\ncleanup();\n```",
+    hasSuggestion: true,
+    suggestionText: "cleanup();",
+    commentText: "Please use the shared cleanup helper.",
   }]);
   assert.equal(session.issues[0].state, "pending");
   assert.equal(session.issues[0].pendingKind, "suggestion");
@@ -357,6 +483,7 @@ test("patch review adds a selected code suggestion as a pending inline before fi
     codeSuggestion: { content: "cleanup();", url: "" },
     commentId: "pending:correct-cleanup",
     content: "Please use the shared cleanup helper.",
+    contextLineSide: "new",
     dateCreated: session.reviewDiscussion.inlineComments[0].dateCreated,
     filePath: "mail/example.mjs",
     id: "pending:correct-cleanup",
@@ -481,6 +608,35 @@ test("patch review posts Request Changes through Conduit", async () => {
   assert.equal(session.reviewOutcome, "request-changes");
 });
 
+test("web review publication submits pending drafts and the final action in one operation", async () => {
+  for (const outcome of ["accept", "request-changes", "comment"]) {
+    const calls = [];
+    const session = { aiEnabled: true, revision: "D123456", currentIssueIndex: 0,
+      issues: [{ id: "pending", state: "pending" }] };
+    await submitGraphPatchReview({
+      session, outcome, message: "Reviewed.",
+      publishReview: async (details) => calls.push(details),
+      postComment: async () => assert.fail("Do not publish drafts through Conduit"),
+      editRevision: async () => assert.fail("Do not publish the action through Conduit"),
+    });
+    assert.deepEqual(calls, [{ revision: "D123456", action: outcome === "request-changes" ? "reject" : outcome, message: "Reviewed." }]);
+    assert.equal(session.status, "complete");
+    assert.equal(session.issues[0].state, "posted");
+  }
+});
+
+test("failed web publication leaves drafts pending and the review open", async () => {
+  const session = { aiEnabled: true, revision: "D123456", currentIssueIndex: 0,
+    issues: [{ id: "pending", state: "pending" }] };
+  await assert.rejects(submitGraphPatchReview({
+    session, outcome: "accept", message: "Reviewed.",
+    publishReview: async () => { throw new Error("Unconfirmed submission"); },
+    postComment: async () => assert.fail("No API fallback"),
+  }), /Unconfirmed submission/);
+  assert.equal(session.status, "review");
+  assert.equal(session.issues[0].state, "pending");
+});
+
 test("patch review does not duplicate published drafts when the final action is retried", async () => {
   const draftPublications = [];
   const session = {
@@ -579,6 +735,22 @@ test("patch review prompt grants local Review experiments while protecting the w
   assert.match(prompt, /Relevant shared history for Bug 123456/);
   assert.match(prompt, /Please verify the focus contract/);
   assert.match(prompt, /"patchContext"/);
+  assert.match(prompt, /ASD-STE100 Simplified Technical English/);
+  assert.match(prompt, /Reuse the existing hidden page for this revision/);
+  assert.match(prompt, /Never use a visible browser as a fallback/);
+  assert.match(prompt, /Do not open or reload a page just because a new comment or turn started/);
+});
+
+test("Patch Review applies ASD-STE100 rules to every Codex interaction", () => {
+  const source = readFileSync(
+    new URL("../commands/graph/patch-review.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.equal(
+    source.match(/ASD_STE100_SIMPLIFIED_TECHNICAL_ENGLISH/g)?.length,
+    5,
+  );
 });
 
 test("patch review exposes the rendered patch and discussion through its local session context", () => {
@@ -624,6 +796,40 @@ test("patch review serializes a context version so a later discussion response r
   const context = getGraphPatchReviewContext(session);
 
   assert.equal(context.reviewContextVersion, 2);
+});
+
+test("capacity retry sends the full review prompt in the saved conversation", async () => {
+  let received;
+  const session = {
+    activity: [],
+    codexSessionId: "saved-thread",
+    codexAgent: { threadId: "saved-thread", client: { startTurn: async (args) => {
+      received = args;
+      return { turn: { status: "completed" }, message: JSON.stringify({
+        patchContext: { purpose: "Enable the row action.", behaviorContract: "The toggle changes state." },
+        issues: [], coverage: { summary: "No defects found." },
+      }) };
+    } } },
+    commitMessage: "Bug 2061586 - Add a calendar row action.",
+    currentHash: "review-head",
+    graph: { checkout: "review", path: "/repo/review/comm", repository: "comm" },
+    rawPatchPath: "/tmp/D330263.patch",
+    rawPatchHash: "patch-hash",
+    revision: "D330263",
+    reviewDiscussion: { comments: [], inlineComments: [] },
+    status: "error",
+    error: "Selected model is at capacity. Please try a different model.",
+    workingTreeDiffVersion: 0,
+  };
+  retryGraphPatchReviewSession({ session, runCommand: async () => "review-head\n" });
+  assert.equal(session.status, "reviewing");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(received.threadId, "saved-thread");
+  assert.equal(received.task, "review");
+  assert.match(received.prompt, /Perform the full Thunderbird Phabricator patch review for D330263/);
+  assert.equal(session.status, "review");
+  assert.equal(session.error, "");
+  assert.equal(session.workingTreeDiffVersion, 1);
 });
 
 test("patch review feedback continues the persistent Codex session after the initial review", async () => {

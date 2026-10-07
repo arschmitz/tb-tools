@@ -23,11 +23,15 @@ import {
   NOTION_VERSION,
 } from "../lib/notion.mjs";
 import phab, {
+  clearPhabricatorCache,
   clearPhabricatorRequestState,
   comment as postPhabricatorComment,
   createInlineComment,
   editRevision,
+  flushPhabricatorCache,
   flushPhabricatorRequestLog,
+  getPhabricatorCacheStatus,
+  recordPhabricatorBrowserActivity,
 } from "../lib/phab.mjs";
 
 const originalFetch = global.fetch;
@@ -118,7 +122,7 @@ test("dashboard Bugzilla queries limit results to open assigned bugs", async () 
   assert.deepEqual(requestedUrls[2].searchParams.getAll("ids"), ["67890"]);
   assert.equal(
     requestedUrls[3].searchParams.get("include_fields"),
-    "id,attachments.id,attachments.file_name,attachments.content_type,attachments.is_obsolete,attachments.last_change_time,attachments.flags",
+    "id,attachments.id,attachments.file_name,attachments.content_type,attachments.is_patch,attachments.is_obsolete,attachments.last_change_time,attachments.flags",
   );
 });
 
@@ -171,6 +175,94 @@ test("Bugzilla user lookup batches distinct match values", async () => {
     "reviewer",
   ]);
   assert.equal(requestedUrl.searchParams.get("include_fields"), "id,name,real_name,email");
+});
+
+test("Bugzilla batches keep accessible bugs and cache per-bug access failures", async () => {
+  const requests = [];
+  global.fetch = async (url) => {
+    const request = new URL(url);
+    requests.push(request);
+    assert.equal(request.searchParams.get("permissive"), "1");
+    return Response.json({
+      bugs: [{ id: 12345, attachments: [] }],
+      faults: [{ id: 2026587, faultCode: 102, faultString: "You are not authorized to access bug 2026587." }],
+    });
+  };
+  const first = await getBugsWithAttachmentsByIds([12345, 2026587]);
+  assert.deepEqual(first, [{ id: 12345, attachments: [] }]);
+  assert.deepEqual(await getBugsWithAttachmentsByIds([12345, 2026587]), first);
+  assert.deepEqual(await getBugsByIds([2026587]), []);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].pathname, "/rest/bug/");
+  assert.deepEqual(requests[0].searchParams.getAll("ids"), ["12345", "2026587"]);
+
+  clearBugzillaBugCache();
+  await getBugsWithAttachmentsByIds([12345, 2026587]);
+  assert.equal(requests.length, 2);
+});
+
+test("Bugzilla HTTP 401 removes only the denied bug and keeps the remaining attachment batch", async () => {
+  const requests = [];
+  global.fetch = async (url) => {
+    const ids = new URL(url).searchParams.getAll("ids");
+    requests.push(ids);
+    if (ids.includes("2026587")) {
+      return Response.json({ error: true, message: "You are not authorized to access bug 2026587." }, { status: 401 });
+    }
+    return Response.json({ bugs: ids.map((id) => ({ id: Number(id), attachments: [] })) });
+  };
+  const expected = [{ id: 12345, attachments: [] }, { id: 67890, attachments: [] }];
+  assert.deepEqual(await getBugsWithAttachmentsByIds([12345, 2026587, 67890]), expected);
+  assert.deepEqual(await getBugsWithAttachmentsByIds([12345, 2026587, 67890]), expected);
+  assert.deepEqual(await getBugsByIds([2026587]), []);
+  assert.deepEqual(requests, [["12345", "2026587", "67890"], ["12345", "67890"]]);
+});
+
+test("Bugzilla HTTP 401 for the only bug does not retry or hide strict read errors", async () => {
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    return Response.json({ error: true, message: "You are not authorized to access bug 2026587." }, { status: 401 });
+  };
+  assert.deepEqual(await getBugsWithAttachmentsByIds([2026587]), []);
+  assert.deepEqual(await getBugsWithAttachmentsByIds([2026587]), []);
+  assert.equal(calls, 1);
+  await assert.rejects(getBug(2026587), /not authorized to access bug/);
+  assert.equal(calls, 2);
+});
+
+test("Bugzilla batch with no accessible bugs completes without retries", async () => {
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    return Response.json({ bugs: [], faults: [{ id: 2026587, faultCode: 102 }] });
+  };
+  assert.deepEqual(await getBugsByIds([2026587]), []);
+  assert.deepEqual(await getBugsWithAttachmentsByIds([2026587]), []);
+  assert.equal(calls, 1);
+});
+
+test("direct Bugzilla reads keep permission errors after a permissive batch", async () => {
+  global.fetch = async (url) => {
+    if (new URL(url).searchParams.has("permissive")) {
+      return Response.json({ bugs: [], faults: [{ id: 2026587, faultCode: 102 }] });
+    }
+    return Response.json({ error: true, message: "You are not authorized to access bug 2026587." }, { status: 401 });
+  };
+  assert.deepEqual(await getBugsByIds([2026587]), []);
+  await assert.rejects(getBug(2026587), /not authorized to access bug 2026587/);
+});
+
+test("Bugzilla batch does not swallow authentication or server errors", async () => {
+  for (const status of [401, 429, 500]) {
+    let calls = 0;
+    global.fetch = async () => {
+      calls++;
+      return Response.json({ error: true, message: "Request failed" }, { status });
+    };
+    await assert.rejects(getBugsByIds([12345, 2026587]), (error) => error.statusCode === status);
+    assert.equal(calls, 1);
+  }
 });
 
 test("Bugzilla history requests batch distinct bug IDs", async () => {
@@ -442,6 +534,116 @@ test("phab persists a privacy-safe request ledger", async (t) => {
   assert.doesNotMatch(JSON.stringify(entries), /test-token|123456/);
 });
 
+test("phab logs remote 429 evidence separately from the local cooldown", async (t) => {
+  useTestPhabricatorToken();
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-phab-429-log-"));
+  const logPath = path.join(directory, "requests.jsonl");
+  const previousLogPath = process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH;
+
+  process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH = logPath;
+  t.after(async () => {
+    if (previousLogPath === undefined) {
+      delete process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH;
+    } else {
+      process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH = previousLogPath;
+    }
+    await rm(directory, { force: true, recursive: true });
+  });
+  let calls = 0;
+
+  global.fetch = async () => {
+    calls++;
+    return new Response("<h1>Request blocked</h1> test-token", {
+      status: 429,
+      headers: {
+        "retry-after": "3600",
+        "server": "test-gateway",
+        "x-request-id": "test-request",
+        "set-cookie": "private-cookie",
+      },
+    });
+  };
+  await assert.rejects(phab({ route: "differential.query", params: { ids: [1] } }));
+  await assert.rejects(phab({ route: "differential.query", params: { ids: [2] } }));
+  await flushPhabricatorRequestLog();
+  const raw = await readFile(logPath, "utf8");
+  const entries = raw.trim().split("\n").map(JSON.parse);
+  const remote = entries.find((entry) => entry.event === "network-error");
+  const local = entries.find((entry) => entry.event === "local-cooldown");
+
+  assert.equal(calls, 1);
+  assert.equal(remote.statusCode, 429);
+  assert.equal(remote.responseHeaders.server, "test-gateway");
+  assert.equal(remote.responseHeaders["x-request-id"], "test-request");
+  assert.equal(remote.retryAfterMs, 3600000);
+  assert.match(remote.errorDetail, /Request blocked/);
+  assert.equal(remote.pid, process.pid);
+  assert.equal(remote.parentPid, process.ppid);
+  assert.ok(remote.activitySource);
+  assert.equal(local.responseHeaders, undefined);
+  assert.doesNotMatch(raw, /test-token|private-cookie|set-cookie/);
+});
+
+test("phab records console browser operations in the request ledger", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-phab-browser-log-"));
+  const logPath = path.join(directory, "requests.jsonl");
+  const previousLogPath = process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH;
+
+  process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH = logPath;
+  t.after(async () => {
+    if (previousLogPath === undefined) {
+      delete process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH;
+    } else {
+      process.env.TB_TOOLS_PHAB_REQUEST_LOG_PATH = previousLogPath;
+    }
+
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  recordPhabricatorBrowserActivity({
+    event: "browser-navigation-start",
+    operation: "load-suggestions",
+    revision: "D123456",
+  });
+  recordPhabricatorBrowserActivity({
+    durationMs: 42,
+    event: "browser-navigation-error",
+    operation: "load-suggestions",
+    revision: "D123456",
+    statusCode: 429,
+  });
+  await flushPhabricatorRequestLog();
+
+  const entries = (await readFile(logPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+
+  assert.deepEqual(entries.map((entry) => ({
+    cacheNamespace: entry.cacheNamespace,
+    durationMs: entry.durationMs,
+    event: entry.event,
+    route: entry.route,
+    source: entry.source,
+    statusCode: entry.statusCode,
+  })), [{
+    cacheNamespace: "browser-session",
+    durationMs: undefined,
+    event: "browser-navigation-start",
+    route: "browser.load-suggestions",
+    source: "phab-auth",
+    statusCode: undefined,
+  }, {
+    cacheNamespace: "browser-session",
+    durationMs: 42,
+    event: "browser-navigation-error",
+    route: "browser.load-suggestions",
+    source: "phab-auth",
+    statusCode: 429,
+  }]);
+  assert.doesNotMatch(JSON.stringify(entries), /123456/);
+});
+
 test("phab bypassCache refreshes a cached read-only response", async () => {
   useTestPhabricatorToken();
 
@@ -509,6 +711,102 @@ test("phab caches user query reviewer names by PHID", async () => {
     "reviewer-PHID-USER-b",
     "reviewer-PHID-USER-c",
   ]);
+});
+
+test("phab persists read responses and reviewer identities across restarts", async (t) => {
+  useTestPhabricatorToken();
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-phab-cache-"));
+  const cachePath = path.join(directory, "cache.json");
+  const previousCachePath = process.env.TB_TOOLS_PHAB_CACHE_PATH;
+  let calls = 0;
+
+  process.env.TB_TOOLS_PHAB_CACHE_PATH = cachePath;
+  t.after(async () => {
+    if (previousCachePath === undefined) {
+      delete process.env.TB_TOOLS_PHAB_CACHE_PATH;
+    } else {
+      process.env.TB_TOOLS_PHAB_CACHE_PATH = previousCachePath;
+    }
+
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  global.fetch = async (url, options) => {
+    calls++;
+    const params = JSON.parse(options.body.get("params"));
+
+    if (String(url).endsWith("/user.query")) {
+      return new Response(JSON.stringify({
+        result: params.phids.map((phid) => ({
+          phid,
+          realName: "Persistent Reviewer",
+        })),
+      }), { status: 200 });
+    }
+
+    return new Response(JSON.stringify({ result: [{ id: 123 }] }), { status: 200 });
+  };
+
+  await phab({ route: "differential.query", params: { ids: [123] } });
+  await phab({ route: "user.query", params: { phids: ["PHID-USER-cache"] } });
+  await flushPhabricatorCache();
+  clearPhabricatorRequestState();
+
+  global.fetch = async () => {
+    throw new Error("A persisted Phabricator cache should avoid this request.");
+  };
+
+  assert.deepEqual(
+    await phab({ route: "differential.query", params: { ids: [123] } }),
+    { result: [{ id: 123 }] },
+  );
+  assert.deepEqual(
+    await phab({ route: "user.query", params: { phids: ["PHID-USER-cache"] } }),
+    { result: [{ phid: "PHID-USER-cache", realName: "Persistent Reviewer" }] },
+  );
+  assert.equal(calls, 2);
+});
+
+test("phab cache categories clear only their intended durable entries", async (t) => {
+  useTestPhabricatorToken();
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-phab-cache-category-"));
+  const cachePath = path.join(directory, "cache.json");
+  const previousCachePath = process.env.TB_TOOLS_PHAB_CACHE_PATH;
+
+  process.env.TB_TOOLS_PHAB_CACHE_PATH = cachePath;
+  t.after(async () => {
+    if (previousCachePath === undefined) {
+      delete process.env.TB_TOOLS_PHAB_CACHE_PATH;
+    } else {
+      process.env.TB_TOOLS_PHAB_CACHE_PATH = previousCachePath;
+    }
+
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  global.fetch = async (url, options) => {
+    const params = JSON.parse(options.body.get("params"));
+
+    if (String(url).endsWith("/user.query")) {
+      return new Response(JSON.stringify({
+        result: params.phids.map((phid) => ({ phid })),
+      }), { status: 200 });
+    }
+
+    return new Response(JSON.stringify({ result: { diffs: [] } }), { status: 200 });
+  };
+
+  await phab({ route: "user.query", params: { phids: ["PHID-USER-cache"] } });
+  await phab({ route: "differential.getrevision", params: { revision_id: 123 } });
+  const before = await getPhabricatorCacheStatus();
+
+  assert.equal(before.categories.identities.entries, 1);
+  assert.equal(before.categories["revision-history"].entries, 1);
+
+  const after = await clearPhabricatorCache({ category: "revision-history" });
+
+  assert.equal(after.categories.identities.entries, 1);
+  assert.equal(after.categories["revision-history"].entries, 0);
 });
 
 test("phab applies a rate-limit cooldown across every route", async () => {

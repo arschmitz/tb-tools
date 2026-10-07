@@ -1,5 +1,6 @@
+import { getMonitoredTryVerdict, mergeMonitoredTryRuns } from "./try-monitor-store.mjs";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   getTbToolsIdFromCommitMessage,
@@ -179,6 +180,12 @@ export function chooseRewordBranch({
 function getGitLogArgs(limit, offset = 0) {
   const args = [
     "log",
+    // Private AI worktrees retain old revisions for evidence and recovery.
+    // Show shared refs and this checkout, not detached HEADs from other tasks.
+    "--single-worktree",
+    "--exclude=refs/tb-tools/repair-history/*",
+    "--exclude=refs/tb-tools/repair-owners/*",
+    "--exclude=refs/tb-tools/try-validation/*",
     "--all",
     "--topo-order",
     "--decorate=short",
@@ -446,15 +453,26 @@ export async function getGraphCommitTbToolsId({
     return "";
   }
 
-  const commitMessage = typeof message === "string"
-    ? message
-    : await getGraphCommitMessage({
-      graph,
-      hash,
-      runCommand,
-    });
-
-  return getGraphCommitTbToolsIdFromMessage(commitMessage);
+  if (typeof message === "string") {
+    return getGraphCommitTbToolsIdFromMessage(message);
+  }
+  // Only full object IDs are immutable. Branch names and HEAD can move.
+  const cacheable = /^[0-9a-f]{40,64}$/i.test(hash);
+  const cache = graph.tbToolsIdCache ||= new Map();
+  if (cacheable && cache.has(hash)) {
+    return cache.get(hash);
+  }
+  const lookup = getGraphCommitMessage({ graph, hash, runCommand })
+    .then(getGraphCommitTbToolsIdFromMessage);
+  if (cacheable) {
+    cache.set(hash, lookup);
+  }
+  try {
+    return await lookup;
+  } catch (error) {
+    cache.delete(hash);
+    throw error;
+  }
 }
 
 export function isWorkingTreeCommitHash(hash) {
@@ -522,12 +540,18 @@ function filterGraphTryRuns(store, {
   const runs = store?.runs || [];
 
   return sortGraphTryRuns(runs.flatMap((run) => {
+    if (run.monitorId && hash && run.mergedInto === hash) return [run];
+    if (run.monitorId && hash && run.fixupHash === hash) return run.isFixup ? [run] : [];
+    // A patch keeps its Try history across amended and rebased hashes.
+    // Match its stable identity before restricting a run to an old fixup hash.
+    if (run.monitorId && tbToolsId && (run.tbToolsId === tbToolsId || (run.isFixup && run.repairTargetTbToolsId === tbToolsId))) return [run];
+    if (run.monitorId && run.isFixup) return run.testedHash === hash ? [run] : [];
     const subjectMatch = isGraphTryRunSubjectMatch(run, { subject, label });
 
     if (tbToolsId) {
       if (run.tbToolsId) {
         return run.tbToolsId === tbToolsId || subjectMatch
-          ? [{ ...run, hash: hash || run.hash }]
+          ? [{ ...run, hash: run.monitorId ? run.hash : hash || run.hash }]
           : [];
       }
 
@@ -543,7 +567,9 @@ function filterGraphTryRuns(store, {
       (patchId && run.patchId === patchId) ||
       subjectMatch
     ) ? [run] : [];
-  }));
+  })).map(run => run.monitorId && hash && run.hash !== hash
+    ? { ...run, stale: true, summary: "This Try tested an earlier commit. Post a new Try for the current patch. " + (run.summary || "") }
+    : run);
 }
 
 export async function getGraphTryRunsForCommit({
@@ -552,7 +578,8 @@ export async function getGraphTryRunsForCommit({
   store,
   runCommand = run,
 }) {
-  const normalizedStore = store || await readGraphTryStore({ graph, runCommand });
+  let normalizedStore = store || await readGraphTryStore({ graph, runCommand });
+  if (!store && runCommand === run) normalizedStore = mergeMonitoredTryRuns(graph, normalizedStore);
   const hash = String(commit?.hash || "").trim();
   const subject = normalizeGraphTrySubject(commit?.subject);
   const label = graph?.label || "";
@@ -619,20 +646,44 @@ export async function attachGraphTryRunsToCommits({
     return commits;
   }
 
-  if (!store.runs.length) {
-    return commits;
-  }
+  if (runCommand === run) store = mergeMonitoredTryRuns(graph, store);
+  const userEmail = runCommand === run
+    ? (await runCommand({ cmd: "git", args: ["config", "user.email"], cwd: graph.path, capture: true, silent: true }).catch(() => "")).trim().toLowerCase()
+    : "";
+  commits = commits.map(commit => {
+    const monitor = store.monitors?.find(state => state.fixupHash === commit.hash && state.phase !== "squashed");
+    const latest = store.monitors?.filter(state => [state.hash, state.fixupHash].includes(commit.hash))
+      .sort((a, b) => Date.parse(b.attempts[0]?.createdAt) - Date.parse(a.attempts[0]?.createdAt))[0];
+    const attempt = latest && [...latest.attempts].reverse().find(item => (item.hash || latest.sourceHash) === commit.hash);
+    return { ...commit,
+      ...(latest ? { tryMonitor: { status: !attempt && latest.fixupHash === commit.hash ? "submitting" : getMonitoredTryVerdict(latest, attempt),
+      error: latest.error, nextCheckAt: latest.nextCheckAt } } : {}), ...(userEmail && commit.author?.email?.toLowerCase() === userEmail ? { ownPatch: true } : {}),
+      ...(monitor ? { tryFixup: { monitorId: monitor.id, parent: monitor.sourceHash } } : {}) };
+  });
+  if (!store.runs.length) return commits;
 
-  return Promise.all(commits.map(async (commit) => {
-    const tryRuns = await getGraphTryRunsForCommit({
-      graph,
-      commit,
-      store,
-      runCommand,
-    });
-
-    return tryRuns.length ? { ...commit, tryRuns } : commit;
+  const results = new Array(commits.length);
+  let nextIndex = 0;
+  // A loaded tree can contain hundreds of commits. Do not spawn one Git
+  // process per commit at once when refreshing its try results.
+  await Promise.all(Array.from({ length: Math.min(4, commits.length) }, async () => {
+    while (nextIndex < commits.length) {
+      const index = nextIndex++;
+      const commit = commits[index];
+      let tryRuns = await getGraphTryRunsForCommit({
+        graph,
+        commit,
+        store,
+        runCommand,
+      });
+      if (commit.tryFixup) {
+        const monitor = store.monitors.find(state => state.id === commit.tryFixup.monitorId);
+        tryRuns = store.runs.filter(run => run.monitorId === monitor.id || monitor.relatedWorkflowIds?.includes(run.monitorId));
+      }
+      results[index] = tryRuns.length ? { ...commit, tryRuns } : commit;
+    }
   }));
+  return results;
 }
 
 export function isCheckedOutCommit(commit) {
@@ -698,16 +749,10 @@ function parseNullSeparated(output = "") {
 async function getUntrackedDiff({
   cwd,
   fullFile = false,
+  files,
   runCommand = run,
 }) {
-  const output = await runCommand({
-    cmd: "git",
-    args: getGitUntrackedArgs(),
-    cwd,
-    capture: true,
-    silent: true,
-  });
-  const files = parseNullSeparated(output);
+  files ||= await getUntrackedFiles(cwd, runCommand);
   const diffs = [];
 
   for (const file of files) {
@@ -726,6 +771,42 @@ async function getUntrackedDiff({
 
   return diffs.join("\n");
 }
+
+async function getUntrackedFiles(cwd, runCommand) {
+  const output = await runCommand({
+    cmd: "git",
+    args: getGitUntrackedArgs(),
+    cwd,
+    capture: true,
+    silent: true,
+  });
+  return parseNullSeparated(output);
+}
+
+async function getWorkingTreeChangeId(cwd, trackedDiff, files) {
+  const hash = createHash("sha256").update(trackedDiff);
+
+  // A tree snapshot needs a change marker, not a patch for every untracked
+  // file. Review checkouts can leave thousands of files in the parent repo.
+  for (let index = 0; index < files.length; index += 64) {
+    const entries = await Promise.all(files.slice(index, index + 64).map(async (file) => {
+      try {
+        const stat = await lstat(path.join(cwd, file), { bigint: true });
+        return [file, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].join("\0");
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw error;
+        }
+        return `${file}\0missing`;
+      }
+    }));
+    hash.update(entries.join("\0"));
+  }
+
+  return hash.digest("hex");
+}
+
+const MAX_UNTRACKED_FILES_FOR_EXACT_CHANGE_ID = 20;
 
 export async function getRawWorkingTreeDiff({
   cwd,
@@ -764,18 +845,37 @@ export async function getWorkingTreeCommits({
   maxDiffBytes = DEFAULT_MAX_DIFF_BYTES,
   runCommand = run,
 }) {
-  const diff = await getRawWorkingTreeDiff({ cwd, runCommand });
-  const hasChanges = Boolean(diff.trim());
+  const [trackedDiff, files] = await Promise.all([
+    runDiffCommand({
+      cmd: "git",
+      args: getGitWorkingTreeDiffArgs(),
+      cwd,
+      capture: true,
+      silent: true,
+    }, runCommand),
+    getUntrackedFiles(cwd, runCommand),
+  ]);
+  const hasChanges = Boolean(trackedDiff.trim() || files.length);
   const commits = [];
   const commitDiffs = {};
 
   if (hasChanges) {
+    // Keep existing change IDs for ordinary patches and their saved Try runs.
+    // Large untracked trees use file metadata so a snapshot stays quick.
+    let untrackedDiff = files.length <= MAX_UNTRACKED_FILES_FOR_EXACT_CHANGE_ID
+      ? await getUntrackedDiff({ cwd, files, runCommand })
+      : undefined;
+    const exactDiff = [trackedDiff.trimEnd(), untrackedDiff].filter(Boolean).join("\n");
     commits.push(getWorkingTreeCommit({
       parentHash,
-      changeId: getContentHash(diff),
+      changeId: untrackedDiff === undefined
+        ? await getWorkingTreeChangeId(cwd, trackedDiff, files)
+        : getContentHash(exactDiff),
     }));
 
     if (diffs) {
+      untrackedDiff ??= await getUntrackedDiff({ cwd, files, runCommand });
+      const diff = [trackedDiff.trimEnd(), untrackedDiff].filter(Boolean).join("\n");
       commitDiffs[WORKING_TREE_CHANGES_HASH] = truncateDiff(diff, maxDiffBytes);
     }
   }

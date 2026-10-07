@@ -26,9 +26,9 @@ const peopleCount = panel?.querySelector(".sprint-people-count");
 const daysRemaining = panel?.querySelector(".sprint-days-remaining");
 const burnDown = panel?.querySelector(".sprint-burndown");
 const burnDownCaption = panel?.querySelector(".sprint-burndown-caption");
-const people = panel?.querySelector(".sprint-people");
 const overviewStoryPoints = panel?.querySelector(".sprint-overview-story-points");
-const overviewStoryGroups = panel?.querySelector(".sprint-overview-story-groups");
+const overviewBoard = panel?.querySelector(".sprint-overview-board");
+const overviewAssigneeFilter = panel?.querySelector(".sprint-overview-assignee-filter");
 const assigneeFilter = panel?.querySelector(".sprint-assignee-filter");
 const metaFilter = panel?.querySelector(".sprint-meta-filter");
 const createDialog = document.getElementById("sprint-create-dialog");
@@ -189,12 +189,47 @@ function openBug(card) {
   state.openBugDetail(card.id, { boardId: state.boardId, sprintId: state.sprintId });
 }
 
+function isSprintMember(card) {
+  return state.current?.columns?.sprint?.cards.some((item) => item.id === card.id) || false;
+}
+
+async function updateStorySprintMembership(card, member) {
+  if (!state.current || state.pendingStoryIds.has(card.id)) {
+    return;
+  }
+
+  setError("");
+  setStatus(member ? "Adding story to sprint..." : "Removing story from sprint...");
+
+  try {
+    await setSprintStoryMembership({
+      boardId: state.boardId,
+      member,
+      sprintId: state.sprintId,
+      storyId: card.id,
+    });
+    setStatus(member ? "Added story to sprint." : "Removed story from sprint.");
+  } catch (requestError) {
+    setError(requestError?.message || String(requestError));
+  }
+}
+
 function createStoryRow(card) {
   const element = document.createElement("article");
+  const header = document.createElement("div");
+  const points = document.createElement("span");
   const summary = document.createElement("button");
+  const footer = document.createElement("div");
   const meta = document.createElement("div");
+  const membership = document.createElement("button");
+  const member = isSprintMember(card);
 
   element.className = "sprint-story-row";
+  header.className = "sprint-story-header";
+  points.className = "sprint-story-points";
+  points.textContent = formatPoints(card.points);
+  header.append(createSprintBugLink(card), points);
+  footer.className = "sprint-story-footer";
   summary.className = "sprint-story-summary";
   summary.type = "button";
   summary.textContent = card.summary;
@@ -209,7 +244,6 @@ function createStoryRow(card) {
     pending.title = "Saving sprint membership";
     meta.append(pending);
   }
-  meta.append(document.createTextNode(formatPoints(card.points)));
 
   if (card.assignee) {
     const assignee = document.createElement("span");
@@ -217,15 +251,30 @@ function createStoryRow(card) {
       state.assigneeColors.get(card.assignee.email) || ASSIGNEE_COLORS[0],
     );
 
+    element.classList.add("sprint-story-assigned");
     assignee.className = "sprint-story-assignee";
-    assignee.style.setProperty("--sprint-story-assignee-accent", pillStyle.accent);
-    assignee.style.setProperty("--sprint-story-assignee-background", pillStyle.background);
-    assignee.style.setProperty("--sprint-story-assignee-foreground", pillStyle.foreground);
+    element.style.setProperty("--sprint-story-assignee-accent", pillStyle.accent);
+    element.style.setProperty("--sprint-story-assignee-background", pillStyle.background);
+    element.style.setProperty("--sprint-story-assignee-foreground", pillStyle.foreground);
     assignee.textContent = card.assignee.name;
     meta.append(assignee);
   }
 
-  element.append(createSprintBugLink(card), summary, meta);
+  membership.className = "sprint-story-membership";
+  membership.disabled = state.pendingStoryIds.has(card.id);
+  membership.type = "button";
+  membership.textContent = member ? "Remove from Sprint" : "Add to Sprint";
+  membership.setAttribute(
+    "aria-label",
+    `${membership.textContent}: Bug ${card.id}`,
+  );
+  membership.addEventListener("click", (event) => {
+    event.stopPropagation();
+    updateStorySprintMembership(card, !member);
+  });
+
+  footer.append(meta, membership);
+  element.append(header, summary, footer);
   return element;
 }
 
@@ -272,117 +321,123 @@ function setView(view, { updateLocation = true } = {}) {
   }
 }
 
-function renderBurnDown(series = []) {
-  clear(burnDown);
+function renderBurnDowns(sprint) {
+  renderBurnDown(sprint.burnDown);
+  renderBurnDown(sprint.storyBurnDown, panel.querySelector(".sprint-story-burndown"),
+    panel.querySelector(".sprint-story-burndown-caption"), "stories");
+}
+
+function renderBurnDown(series = [], plot = burnDown, caption = burnDownCaption, unit = "points") {
+  clear(plot);
 
   if (!series.length) {
-    burnDownCaption.textContent = "Set an end date to show the burndown.";
+    caption.textContent = "Set an end date to show the burndown.";
     return;
   }
 
-  const values = series.flatMap((item) => [item.ideal, item.actual].filter(Number.isFinite));
-  const maximum = Math.max(1, ...values);
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  const width = 700;
-  const height = 180;
-  const padding = 22;
-  const plotWidth = width - padding * 2;
-  const plotHeight = height - padding * 2;
-  const point = (index, value) => {
-    const x = padding + (series.length === 1 ? plotWidth : (plotWidth * index) / (series.length - 1));
-    const y = height - padding - (plotHeight * value) / maximum;
+  const values = series.flatMap((item) => [item.ideal, item.actual, item.notStarted].filter(Number.isFinite));
+  const maximum = Math.max(1, Math.ceil(Math.max(0, ...values) / 4)) * 4;
+  const width = Math.max(520, plot.clientWidth - 8);
+  const height = 220;
+  const left = 48;
+  const top = 28;
+  const plotWidth = width - left - 24;
+  const plotHeight = height - top - 42;
+  const x = (index) => left + (series.length === 1 ? 0 : plotWidth * index / (series.length - 1));
+  const y = (value) => top + plotHeight * (1 - value / maximum);
+  const node = (tag, attributes = {}, text = "") => {
+    const element = document.createElementNS("http://www.w3.org/2000/svg", tag);
 
-    return `${x},${y}`;
+    Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, value));
+    element.textContent = text;
+    return element;
   };
-  const ideal = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-  const actual = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  const svg = node("svg", { viewBox: `0 0 ${width} ${height}`, class: "sprint-burndown-chart" });
+  const label = (px, py, text, anchor = "start") => node("text", {
+    x: px, y: py, "text-anchor": anchor, class: "sprint-burndown-label",
+  }, text);
   const latest = series.findLast((item) => Number.isFinite(item.actual));
 
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.classList.add("sprint-burndown-chart");
-  ideal.classList.add("sprint-burndown-ideal");
-  ideal.setAttribute("points", series.map((item, index) => point(index, item.ideal)).join(" "));
-  actual.classList.add("sprint-burndown-actual");
-  actual.setAttribute("points", series
-    .map((item, index) => Number.isFinite(item.actual) ? point(index, item.actual) : "")
-    .filter(Boolean)
-    .join(" "));
-  svg.append(ideal, actual);
+  svg.append(label(left, 14, unit === "points" ? "Points remaining" : "Stories remaining"));
+  for (let step = 0; step <= 4; step++) {
+    const value = maximum * step / 4;
 
-  if (latest) {
-    const index = series.indexOf(latest);
-    const marker = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    const [cx, cy] = point(index, latest.actual).split(",");
-
-    marker.classList.add("sprint-burndown-marker");
-    marker.setAttribute("cx", cx);
-    marker.setAttribute("cy", cy);
-    marker.setAttribute("r", "5");
-    svg.append(marker);
+    svg.append(node("line", {
+      x1: left, x2: width - 24, y1: y(value), y2: y(value), class: "sprint-burndown-grid",
+    }), label(left - 8, y(value) + 4, String(Number(value.toFixed(1))), "end"));
   }
+  const tickCount = Math.min(5, series.length);
+  for (let tick = 0; tick < tickCount; tick++) {
+    const index = tickCount === 1 ? 0 : Math.round(tick * (series.length - 1) / (tickCount - 1));
+    const date = new Date(`${series[index].date}T00:00:00Z`).toLocaleDateString(undefined, {
+      month: "short", day: "numeric", timeZone: "UTC",
+    });
 
-  burnDown.append(svg);
-  burnDownCaption.textContent = latest
-    ? `Ideal plan and ${latest.actual} points remaining today.`
-    : "Ideal plan.";
+    svg.append(label(x(index), height - 20, date, "middle"));
+  }
+  svg.append(node("polyline", {
+    class: "sprint-burndown-ideal",
+    points: series.map((item, index) => `${x(index)},${y(item.ideal)}`).join(" "),
+  }));
+  // Draw separate step lines so missing dates do not imply known history.
+  for (const [key, lineClass, description] of [
+    ["actual", "sprint-burndown-actual", "remaining"],
+    ["notStarted", "sprint-burndown-progress", "not started"],
+  ]) {
+    let segment = [];
+    const flush = () => {
+      if (segment.length) svg.append(node("polyline", { class: lineClass, points: segment.join(" ") }));
+      segment = [];
+    };
+    series.forEach((item, index) => {
+      if (!Number.isFinite(item[key])) { flush(); return; }
+      const previous = series[index - 1];
+      if (Number.isFinite(previous?.[key])) segment.push(`${x(index)},${y(previous[key])}`);
+      segment.push(`${x(index)},${y(item[key])}`);
+      const marker = node("circle", {
+        class: `sprint-burndown-marker${key === "notStarted" ? " sprint-burndown-progress-marker" : ""}`,
+        cx: x(index), cy: y(item[key]), r: item === latest ? 4 : 2,
+      });
+      marker.append(node("title", {}, `${item.date}: ${item[key]} ${unit} ${description}`));
+      svg.append(marker);
+    });
+    flush();
+  }
+  plot.append(svg);
+  const summary = latest
+    ? `${latest.date}: ${latest.actual} ${unit} remaining.`
+    : "The sprint has not started.";
+  const progress = series.findLast((item) => Number.isFinite(item.notStarted));
+  const progressSummary = progress ? ` ${progress.notStarted} ${unit} not started.` : "";
+  plot.setAttribute("aria-label", `Sprint ${unit} burndown. ${summary}${progressSummary}`);
+  caption.textContent = `${summary}${progressSummary} Current sprint stories${unit === "points" ? " and point estimates" : ""}. Dates use UTC.${
+    latest?.historyIncomplete ? " Some completion dates are unavailable; historical remaining totals are hidden." : ""
+  }${progress?.progressHistoryIncomplete ? " Some start dates are unavailable; historical not-started totals are hidden." : ""}`;
+
 }
 
-function renderPeople(items = []) {
-  clear(people);
+function renderOverviewBoard() {
+  const selected = overviewAssigneeFilter.value;
+  const sprintCards = getSprintStoryCards().filter((card) =>
+    !selected || (card.assignee?.email || "unassigned") === selected);
 
-  if (!items.length) {
-    const empty = document.createElement("p");
+  overviewStoryPoints.textContent = formatPoints(getCardPoints(sprintCards));
 
-    empty.className = "sprint-empty";
-    empty.textContent = "No sprint stories are assigned yet.";
-    people.append(empty);
-    return;
-  }
+  overviewBoard.querySelectorAll("[data-sprint-status]").forEach((column) => {
+    const cards = sprintCards.filter((card) => card.column === column.dataset.sprintStatus);
+    const container = column.querySelector(".meta-board-cards");
 
-  items.forEach((person) => {
-    const row = document.createElement("div");
-    const name = document.createElement("strong");
-    const totals = document.createElement("span");
+    column.querySelector(".meta-board-column-count").textContent = String(cards.length);
+    column.querySelector(".meta-board-column-points").textContent = formatPoints(getCardPoints(cards));
+    clear(container);
+    cards.forEach((card) => container.append(createStoryRow(card)));
+    if (!cards.length) {
+      const empty = document.createElement("p");
 
-    row.className = "sprint-person";
-    name.textContent = person.name;
-    totals.textContent = `${person.completePoints} complete, ${person.remainingPoints} remaining`;
-    row.append(name, totals);
-    people.append(row);
-  });
-}
-
-function renderOverviewGroups(groups = []) {
-  clear(overviewStoryGroups);
-
-  if (!groups.length) {
-    const empty = document.createElement("p");
-
-    empty.className = "sprint-empty";
-    empty.textContent = "No stories are in this sprint.";
-    overviewStoryGroups.append(empty);
-    return;
-  }
-
-  groups.forEach((group) => {
-    const section = document.createElement("section");
-    const heading = document.createElement("header");
-    const title = document.createElement("h4");
-    const points = document.createElement("span");
-    const cards = document.createElement("div");
-
-    section.className = "sprint-story-group";
-    cards.className = "sprint-story-group-cards";
-    title.textContent = group.name;
-    points.textContent = formatPoints(group.points);
-    heading.append(title, points);
-    group.cards.filter(matchesFilters).forEach((card) => cards.append(createStoryRow(card)));
-    if (!cards.childElementCount) {
-      cards.textContent = "No matching stories";
+      empty.className = "meta-board-column-empty";
+      empty.textContent = "No stories";
+      container.append(empty);
     }
-    section.append(heading, cards);
-    overviewStoryGroups.append(section);
   });
 }
 
@@ -399,7 +454,8 @@ function renderPlanning() {
     const orderedCards = columnId === "sprint" ? cards.sort(compareCardsByAssignee) : cards;
 
     clear(container);
-    headerValue.textContent = formatPoints(getCardPoints(cards));
+    headerValue.hidden = columnId === "backlog";
+    headerValue.textContent = columnId === "backlog" ? "" : formatPoints(getCardPoints(cards));
 
     orderedCards.forEach((card) => {
       container.append(createStoryRow(card));
@@ -444,6 +500,15 @@ function render() {
     ? "Not set"
     : `${sprint.daysRemaining}`;
   overviewStoryPoints.textContent = formatPoints(sprint.stats.totalPoints);
+  const overviewAssignees = new Map(getSprintStoryCards().map((card) => [
+    card.assignee?.email || "unassigned",
+    card.assignee?.name || card.assignee?.email || "Unassigned",
+  ]));
+  populateSelect(overviewAssigneeFilter, [...overviewAssignees].sort((a, b) => a[1].localeCompare(b[1])), {
+    getLabel: ([, name]) => name,
+    getValue: ([email]) => email,
+    initialLabel: "All assignees",
+  });
   populateSelect(assigneeFilter, sprint.assignees || [], {
     getLabel: (assignee) => assignee.name,
     getValue: (assignee) => assignee.email,
@@ -454,9 +519,8 @@ function render() {
     getValue: (meta) => meta.id,
     initialLabel: "All child metas",
   });
-  renderBurnDown(sprint.burnDown);
-  renderPeople(sprint.stats.people);
-  renderOverviewGroups(sprint.groups);
+  renderBurnDowns(sprint);
+  renderOverviewBoard();
   renderPlanning();
   setView(state.view, { updateLocation: false });
 }
@@ -742,8 +806,7 @@ async function submitRollover(event) {
     state.current = result.sprint;
     state.boardId = result.sprint.boardId;
     state.sprintId = result.sprint.id;
-    setView("planning");
-    render();
+    await showSprint({ boardId: state.boardId, sprintId: state.sprintId, sprintView: "planning" });
   } catch (requestError) {
     rolloverError.textContent = requestError?.message || String(requestError);
   } finally {
@@ -842,6 +905,7 @@ export async function showSprint({
   document.body.classList.remove("graph-view-active");
   document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
   document.querySelector(".dashboard-panel")?.setAttribute("hidden", "");
+  document.querySelector(".phabricator-cache-panel")?.setAttribute("hidden", "");
   document.querySelector(".meta-boards-panel")?.setAttribute("hidden", "");
   document.querySelector(".test-output-panel")?.setAttribute("hidden", "");
   panel.hidden = false;
@@ -857,17 +921,19 @@ export function initializeSprints({ openBugDetail } = {}) {
   }
 
   state.openBugDetail = openBugDetail;
+  window.addEventListener("resize", () => {
+    if (!panel.hidden && state.current) renderBurnDowns(state.current);
+  });
   refresh.addEventListener("click", () => loadSprint({ force: true }));
   backToBoard.addEventListener("click", () => {
     setConsoleRoute({ boardId: state.boardId, view: "meta-boards" });
   });
   saveDetails.addEventListener("click", saveSprintDetails);
+  overviewAssigneeFilter.addEventListener("change", renderOverviewBoard);
   assigneeFilter.addEventListener("change", () => {
-    renderOverviewGroups(state.current?.groups);
     renderPlanning();
   });
   metaFilter.addEventListener("change", () => {
-    renderOverviewGroups(state.current?.groups);
     renderPlanning();
   });
   viewTabs.forEach((tab) => tab.addEventListener("click", () => setView(tab.dataset.sprintView)));

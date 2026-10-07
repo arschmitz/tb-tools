@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { getTbToolsCommandEnvironment, run } from "../../lib/utils.mjs";
+import { getConsoleBuildEnvironment } from "./build.mjs";
 import { getTestTargets } from "../test.mjs";
 import {
   DEFAULT_SUBMIT_OUTPUT_LIMIT,
@@ -760,7 +761,7 @@ export function runInteractiveTestCommand({
     const child = spawnCommand(processCommand.cmd, processCommand.args || [], {
       cwd: processCommand.cwd,
       env: {
-        ...getTbToolsCommandEnvironment(),
+        ...getTbToolsCommandEnvironment({ ...process.env, ...command.env }),
         FORCE_COLOR: process.env.FORCE_COLOR || "1",
         MOZ_FORCE_COLOR: process.env.MOZ_FORCE_COLOR || "1",
       },
@@ -827,7 +828,7 @@ export function runInteractiveTestCommand({
   });
 }
 
-function runGraphTestCommand({
+async function runGraphTestCommand({
   graph,
   args,
   session,
@@ -838,6 +839,7 @@ function runGraphTestCommand({
     args,
     cwd: graph.path,
     capture: true,
+    env: await getConsoleBuildEnvironment(graph),
   };
 
   return runCommand === run

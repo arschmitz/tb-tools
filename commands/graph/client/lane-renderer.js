@@ -379,7 +379,9 @@ export function showCommitContextMenu(event, index, commit) {
       graph.repository === sourceGraph?.repository &&
       (graph.checkout || "working") !== (sourceGraph?.checkout || "working")
     ));
-    const hidden = workingTree
+    const hidden = button.dataset.action === "remove-branch"
+      ? workingTree || !branchTarget
+      : workingTree
       ? button.dataset.action !== "prune"
       : button.dataset.action === "copy" && !hasCopyDestination;
 
@@ -460,7 +462,7 @@ export function addLaneCommitRow({ svg, index, row, messageX, width }) {
   const y = getLaneY(rowIndex);
   const branchColor = getLaneColor(index, row.branch, lane);
   const group = createSvgElement("g", {
-    class: "commit-row" + (isWorkingTreeCommit(commit) ? " working-tree" : ""),
+    class: "commit-row" + (isWorkingTreeCommit(commit) || commit.tryFixup ? " working-tree" : ""),
     transform: "translate(0, 0)",
     role: "button",
     tabindex: "0",
@@ -565,6 +567,8 @@ export function decorateCommitRows(index) {
   const width = getCommitRowsWidth(container, svg);
 
   for (const text of container.querySelectorAll("svg text")) {
+    // Lane rows already own their hitbox and event handlers.
+    if (text.closest(".commit-row")) continue;
     const messageGroup = text.parentElement;
     const firstMessageChild = messageGroup && messageGroup.firstElementChild;
 
@@ -576,7 +580,7 @@ export function decorateCommitRows(index) {
     const innerGroup = messageGroup.parentElement;
     const commitGroup = innerGroup && innerGroup.parentElement;
 
-    if (!commit || !commitGroup) {
+    if (!commit || commitGroup?.tagName.toLowerCase() !== "g") {
       continue;
     }
 

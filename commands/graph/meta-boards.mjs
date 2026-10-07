@@ -5,7 +5,7 @@ import {
   getBugsWithAttachmentsByIds as defaultGetBugsWithAttachmentsByIds,
   updateBug as defaultUpdateBug,
 } from "../../lib/bugzilla.mjs";
-import defaultPhab from "../../lib/phab.mjs";
+import { getBugzillaRevisions as defaultGetBugzillaRevisions } from "../../lib/bugzilla-revisions.mjs";
 import { getBugUrl, getPhabUrl } from "../../lib/workflow.mjs";
 import { CHECKIN_NEEDED_KEYWORD } from "./constants.mjs";
 import { isSprintMetaBug, normalizeSprintMeta } from "./sprints.mjs";
@@ -44,7 +44,6 @@ const BOARD_BUG_FIELDS = [
 ].join(",");
 const PHABRICATOR_BATCH_SIZE = 100;
 const MAX_META_BOARD_BUGS = 1500;
-const META_BOARD_PHABRICATOR_CACHE_TTL_MS = 15 * 60 * 1000;
 const DESCRIPTION_COMMENT_PREFIX = "TB-Tools story description:";
 
 function uniqueIds(values = []) {
@@ -156,6 +155,13 @@ function getBoardColumn({ bug, patches, points, assignee }) {
 
   if (patches.some((patch) => patch.waitingForReview)) {
     return "in-review";
+  }
+
+  if (patches.length && patches.every((patch) => (
+    /^(?:status-)?(?:accepted|approved|published|closed)$/i.test(patch.status) ||
+    /^(?:accepted|approved|published|closed)$/i.test(patch.statusName)
+  ))) {
+    return "complete";
   }
 
   if (patches.length) {
@@ -318,7 +324,7 @@ async function getMetaBoardTree({ metaBugId, getBugsByIds, includeFields }) {
   };
 }
 
-async function getStoryPatches({ stories, getBugsWithAttachmentsByIds, phab }) {
+async function getStoryPatches({ stories, getBugsWithAttachmentsByIds, getBugzillaRevisions }) {
   const errors = [];
   const storyIds = stories.map(({ bug }) => String(bug.id));
   const attachmentBugs = await getBugsWithAttachmentsByIds(storyIds);
@@ -332,20 +338,19 @@ async function getStoryPatches({ stories, getBugsWithAttachmentsByIds, phab }) {
     { id, statusName: "Attached" },
   ]));
 
-  for (const ids of chunk(revisionIds)) {
+  for (const [bugId, ids] of revisionIdsByStoryId) {
+    if (!ids.length) continue;
     try {
-      const response = await phab({
-        route: "differential.query",
-        params: { ids: ids.map(Number) },
-        cacheNamespace: "meta-board",
-        cacheTtlMs: META_BOARD_PHABRICATOR_CACHE_TTL_MS,
-      });
+      const revisions = await getBugzillaRevisions(bugId);
 
-      for (const revision of response?.result || []) {
+      for (const revision of revisions) {
         const numericId = String(revision?.id || "").replace(/^D/i, "");
 
-        if (numericId) {
-          revisionsById.set(numericId, revision);
+        if (ids.includes(numericId)) {
+          revisionsById.set(numericId, {
+            ...revision,
+            statusName: revision.long_status || revision.statusName,
+          });
         }
       }
     } catch (error) {
@@ -379,7 +384,7 @@ export async function getMetaBoardData({
   appConfig = defaultConfig,
   getBugsByIds = defaultGetBugsByIds,
   getBugsWithAttachmentsByIds = defaultGetBugsWithAttachmentsByIds,
-  phab = defaultPhab,
+  getBugzillaRevisions = defaultGetBugzillaRevisions,
 } = {}) {
   const storyPointsField = getStoryPointsField(appConfig);
   const includeFields = getBoardBugFields(appConfig);
@@ -387,7 +392,7 @@ export async function getMetaBoardData({
   const patches = await getStoryPatches({
     stories: tree.stories,
     getBugsWithAttachmentsByIds,
-    phab,
+    getBugzillaRevisions,
   });
   const columns = Object.fromEntries(META_BOARD_COLUMNS.map(({ id }) => [id, []]));
   const cards = tree.stories

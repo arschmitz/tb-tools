@@ -1,10 +1,64 @@
 import { access, chmod, mkdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { recordPhabricatorBrowserActivity } from "../../lib/phab.mjs";
+import { markWebInlineDone, publishWebReview, readWebReview, saveWebInline } from "./phab-web-review.mjs";
 
 export const PHABRICATOR_WEB_URL = "https://phabricator.services.mozilla.com/";
 export const PHABRICATOR_LOGIN_URL = `${PHABRICATOR_WEB_URL}auth/login/`;
 export const PHABRICATOR_AUTHENTICATION_CHECK_URL = `${PHABRICATOR_WEB_URL}settings/`;
+
+function getBrowserErrorStatusCode(error) {
+  const directStatus = Number(error?.statusCode || error?.status);
+
+  if (Number.isFinite(directStatus) && directStatus >= 100 && directStatus <= 599) {
+    return directStatus;
+  }
+
+  const match = String(error?.message || "").match(/\b([1-5]\d\d)\b/);
+  const parsedStatus = Number(match?.[1] || 0);
+
+  return parsedStatus >= 100 && parsedStatus <= 599 ? parsedStatus : undefined;
+}
+
+async function navigatePhabricatorPage(page, {
+  operation,
+  revision,
+  url,
+  waitUntil = "domcontentloaded",
+} = {}) {
+  const startedAt = Date.now();
+
+  recordPhabricatorBrowserActivity({
+    event: "browser-navigation-start",
+    operation,
+    revision,
+  });
+
+  try {
+    const response = await page.goto(url, { waitUntil });
+    const statusCode = Number(response?.status?.());
+    const hasErrorStatus = Number.isFinite(statusCode) && statusCode >= 400;
+
+    recordPhabricatorBrowserActivity({
+      durationMs: Date.now() - startedAt,
+      event: hasErrorStatus ? "browser-navigation-error" : "browser-navigation-success",
+      operation,
+      revision,
+      statusCode: Number.isFinite(statusCode) ? statusCode : undefined,
+    });
+    return response;
+  } catch (error) {
+    recordPhabricatorBrowserActivity({
+      durationMs: Date.now() - startedAt,
+      event: "browser-navigation-error",
+      operation,
+      revision,
+      statusCode: getBrowserErrorStatusCode(error),
+    });
+    throw error;
+  }
+}
 
 const DEFAULT_SUGGESTION_CACHE_MS = 10 * 60 * 1000;
 const DEFAULT_STATUS_CACHE_MS = 60 * 1000;
@@ -95,7 +149,28 @@ function normalizeInlineReply({
   return { content, normalizedRevision, parentCommentPHID };
 }
 
+function normalizeInlineCommentReference({ commentPHID, revision } = {}) {
+  const normalizedRevision = normalizeRevision(revision);
+  const parentCommentPHID = String(commentPHID || "").trim();
+
+  if (!normalizedRevision) {
+    throw new Error("A valid Phabricator revision is required to mark an inline comment done.");
+  }
+
+  if (!/^PHID-XCMT-/i.test(parentCommentPHID)) {
+    throw new Error("Phabricator did not provide an inline parent comment for this feedback.");
+  }
+
+  return { normalizedRevision, parentCommentPHID };
+}
+
 async function loadPlaywrightChromium() {
+  if (globalThis.__tbToolsBlockExternalApis || process.env.NODE_TEST_CONTEXT) {
+    throw new Error(
+      "Phabricator browser access is blocked during tests. Inject a test browser instead.",
+    );
+  }
+
   try {
     const playwright = await import("playwright");
 
@@ -262,7 +337,10 @@ export function createPhabricatorWebSession({
 
     try {
       authPage = page;
-      await page.goto(authenticationCheckUrl, { waitUntil: "domcontentloaded" });
+      await navigatePhabricatorPage(page, {
+        operation: "verify-interactive-session",
+        url: authenticationCheckUrl,
+      });
       if (!await pageIsAuthenticated(page)) {
         return false;
       }
@@ -297,7 +375,10 @@ export function createPhabricatorWebSession({
         context = await launchContext({ headless: true });
         const page = await getContextPage(context);
 
-        await page.goto(authenticationCheckUrl, { waitUntil: "domcontentloaded" });
+        await navigatePhabricatorPage(page, {
+          operation: "verify-stored-session",
+          url: authenticationCheckUrl,
+        });
         if (await pageIsAuthenticated(page)) {
           sessionStorageState = await context.storageState();
           state = "connected";
@@ -378,7 +459,10 @@ export function createPhabricatorWebSession({
     authPage = await getContextPage(context);
 
     try {
-      await authPage.goto(loginUrl, { waitUntil: "domcontentloaded" });
+      await navigatePhabricatorPage(authPage, {
+        operation: "start-authentication",
+        url: loginUrl,
+      });
       state = "pending";
       message = "Finish signing in to Phabricator in the browser window.";
       statusCheckedAt = 0;
@@ -419,7 +503,12 @@ export function createPhabricatorWebSession({
       const page = await getContextPage(context);
 
       async function fetchSuggestionPage(pageToUse, url) {
-        await pageToUse.goto(url, { waitUntil: "networkidle" });
+        await navigatePhabricatorPage(pageToUse, {
+          operation: "load-suggestions",
+          revision,
+          url,
+          waitUntil: "networkidle",
+        });
         if (!await pageIsAuthenticated(pageToUse)) {
           state = "disconnected";
           sessionStorageState = undefined;
@@ -490,315 +579,179 @@ export function createPhabricatorWebSession({
     }
   }
 
-  async function postInlineReply({ commentPHID, message: reply, revision } = {}) {
-    const {
-      content,
-      normalizedRevision,
-      parentCommentPHID,
-    } = normalizeInlineReply({
-      commentPHID,
-      message: reply,
-      revision,
-    });
-    const currentStatus = await getStatus();
+  let reviewOperation = Promise.resolve();
+  const reviewInflight = new Map();
 
-    if (currentStatus.state !== "connected") {
-      throw new Error("Sign in to Phabricator before posting an inline reply.");
-    }
-
-    const context = await launchContext({ headless: true });
-
-    try {
-      if (sessionStorageState?.cookies?.length) {
-        await context.addCookies(sessionStorageState.cookies);
-      }
-
-      const page = await getContextPage(context);
-
-      await page.goto(getRevisionUrl(normalizedRevision, webUrl), {
-        waitUntil: "domcontentloaded",
-      });
-      if (!await pageIsAuthenticated(page)) {
-        state = "disconnected";
-        sessionStorageState = undefined;
-        message = "Phabricator sign-in expired. Authenticate again to post inline replies.";
-        throw new Error(message);
-      }
-
-      const result = await page.evaluate(async ({
-        content: inlineContent,
-        parentCommentPHID: parentPHID,
-        revision: revisionId,
-      }) => {
-        const document = globalThis.document;
-        const form = document.querySelector(
-          "form[data-sigil~='transaction-append']",
-        );
-
-        if (!form) {
-          throw new Error("Phabricator did not provide the revision comment form.");
-        }
-
-        const revisionNumber = String(revisionId).replace(/^D/i, "");
-        const csrf = String(new FormData(form).get("__csrf__") || "");
-        const endpoint = new URL(
-          `/differential/comment/inline/edit/${revisionNumber}/`,
-          globalThis.location.origin,
-        ).toString();
-        const baseFields = {
-          hasContentState: "1",
-          hasSuggestion: "0",
-          is_new: "1",
-          length: "1",
-          number: "1",
-          on_right: "1",
-          renderer: "2up",
-          suggestionText: "",
-          text: inlineContent,
-        };
-        const parseAjaxResponse = (text) => {
-          const source = String(text || "").replace(/^for\s*\(;;\);\s*/, "");
-          let response;
-
-          try {
-            response = JSON.parse(source);
-          } catch {
-            throw new Error("Phabricator did not return an inline-reply response.");
-          }
-
-          const error = response?.error || response?.error_info || response?.error_code;
-
-          if (error) {
-            const detail = typeof error === "string"
-              ? error
-              : JSON.stringify(error);
-
-            throw new Error(`Phabricator inline reply failed: ${detail}`);
-          }
-
-          // Aphront Ajax responses wrap controller content in `payload`.
-          // The inline controller puts the saved draft ID inside that payload.
-          return Object.prototype.hasOwnProperty.call(response || {}, "payload")
-            ? response.payload
-            : response;
-        };
-        const requestInlineEdit = async (fields) => {
-          const body = new FormData();
-
-          body.set("__csrf__", csrf);
-          for (const [key, value] of Object.entries(fields)) {
-            body.set(key, String(value));
-          }
-
-          const response = await fetch(endpoint, {
-            body,
-            credentials: "same-origin",
-            headers: {
-              "X-Phabricator-CSRF": csrf,
-              "X-Requested-With": "XMLHttpRequest",
-            },
-            method: "POST",
-          });
-
-          if (!response.ok) {
-            throw new Error(`Phabricator inline reply failed (${response.status}).`);
-          }
-
-          return parseAjaxResponse(await response.text());
-        };
-        const created = await requestInlineEdit({
-          ...baseFields,
-          op: "reply",
-          replyToCommentPHID: parentPHID,
-        });
-        const inlineId = Number(created?.inline?.id);
-
-        if (!Number.isInteger(inlineId) || inlineId < 1) {
-          throw new Error("Phabricator did not create an inline reply draft.");
-        }
-
-        await requestInlineEdit({
-          ...baseFields,
-          id: inlineId,
-          op: "save",
-        });
-
-        return { inlineId };
-      }, {
-        content,
-        parentCommentPHID,
-        revision: normalizedRevision,
-      });
-
-      return {
-        ...result,
-        revision: normalizedRevision,
-        parentCommentPHID,
-      };
-    } catch (error) {
-      if (state !== "disconnected") {
-        state = "error";
-        message = String(error?.message || error);
-      }
-      throw error;
-    } finally {
-      await context.close();
-    }
+  function queueBrowserOperation(callback) {
+    const request = reviewOperation.catch(() => {}).then(callback);
+    reviewOperation = request;
+    return request;
   }
 
-  async function publishRevisionReview({ action = "comment", message: reviewMessage = "", revision } = {}) {
+  function withRevisionPage(revision, operation, callback) {
     const normalizedRevision = normalizeRevision(revision);
-    const normalizedAction = String(action || "comment").trim().toLowerCase();
-    const content = String(reviewMessage || "").trim();
-
     if (!normalizedRevision) {
-      throw new Error("A valid Phabricator revision is required to publish a review.");
+      return Promise.reject(new Error("A valid Phabricator revision is required."));
     }
-
-    if (!new Set(["comment", "accept", "reject"]).has(normalizedAction)) {
-      throw new Error("Choose Comment, Accept, or Request Changes for the final review.");
-    }
-
-    const currentStatus = await getStatus();
-
-    if (currentStatus.state !== "connected") {
-      throw new Error("Sign in to Phabricator before publishing a review with pending inline comments.");
-    }
-
-    const context = await launchContext({ headless: true });
-
-    try {
-      if (sessionStorageState?.cookies?.length) {
-        await context.addCookies(sessionStorageState.cookies);
+    const run = reviewOperation.catch(() => {}).then(async () => {
+      if ((await getStatus()).state !== "connected") {
+        throw new Error("Sign in to Phabricator before opening this review.");
       }
-
-      const page = await getContextPage(context);
-
-      await page.goto(getRevisionUrl(normalizedRevision, webUrl), {
-        waitUntil: "domcontentloaded",
-      });
-      if (!await pageIsAuthenticated(page)) {
-        state = "disconnected";
-        sessionStorageState = undefined;
-        message = "Phabricator sign-in expired. Authenticate again to publish the review.";
-        throw new Error(message);
-      }
-
-      if (normalizedAction !== "comment") {
-        const actionIsAvailable = await page.evaluate((selectedAction) => {
-          const document = globalThis.document;
-          const form = document.querySelector(
-            "form[data-sigil~='transaction-append']",
-          );
-          const actionInput = form?.querySelector(
-            "input[name='editengine.actions']",
-          );
-
-          return Boolean(actionInput) && Array.from(form.querySelectorAll("select"))
-            .some((select) => Array.from(select.options).some(
-              (option) => option.value === selectedAction,
-            ));
-        }, normalizedAction);
-
-        if (!actionIsAvailable) {
-          const actionLabel = normalizedAction === "reject"
-            ? "Request Changes"
-            : "Accept";
-
-          throw new Error(
-            `Phabricator does not offer ${actionLabel} for ${normalizedRevision} in the current review state. ` +
-              "No review comment was posted.",
-          );
+      const context = await launchContext({ headless: true });
+      try {
+        if (sessionStorageState?.cookies?.length) {
+          await context.addCookies(sessionStorageState.cookies);
         }
-      }
-
-      const publication = await page.evaluate(async ({ action: selectedAction, content: message }) => {
-        const document = globalThis.document;
-        const form = document.querySelector(
-          "form[data-sigil~='transaction-append']",
-        );
-        const actionInput = form?.querySelector(
-          "input[name='editengine.actions']",
-        );
-        if (!form || !actionInput) {
-          throw new Error("Phabricator did not provide the revision comment form.");
-        }
-
-        const submission = new FormData(form);
-        const csrf = String(submission.get("__csrf__") || "");
-        const actions = selectedAction === "comment"
-          ? []
-          : [{ type: selectedAction, value: true, initialValue: null }];
-
-        submission.set("comment", message);
-        submission.set(actionInput.name, JSON.stringify(actions));
-        submission.delete("__preview__");
-        const response = await fetch(form.action, {
-          body: submission,
-          credentials: "same-origin",
-          headers: { "X-Phabricator-CSRF": csrf },
-          method: "POST",
+        const page = await getContextPage(context);
+        // Include lazy diff and save requests in the durable request log.
+        page.on("response", (response) => {
+          const request = response.request();
+          if (["xhr", "fetch"].includes(request.resourceType()) &&
+              new URL(response.url()).origin === new URL(webUrl).origin) {
+            recordPhabricatorBrowserActivity({
+              event: "browser-request-response",
+              operation: `${operation}:${request.method()}:${new URL(response.url()).pathname}`,
+              revision: normalizedRevision,
+              statusCode: response.status(),
+            });
+          }
         });
-
-        if (!response.ok) {
-          throw new Error(`Phabricator review publication failed (${response.status}).`);
-        }
-
-        if (new URL(response.url).pathname.includes("/auth/login/")) {
-          throw new Error("Phabricator sign-in expired while publishing the review.");
-        }
-
-        return { responseUrl: response.url };
-      }, { action: normalizedAction, content });
-
-      if (normalizedAction !== "comment") {
-        await page.goto(publication.responseUrl || getRevisionUrl(normalizedRevision, webUrl), {
-          waitUntil: "domcontentloaded",
+        page.on("requestfailed", (request) => {
+          if (["xhr", "fetch"].includes(request.resourceType())) {
+            recordPhabricatorBrowserActivity({
+              event: "browser-request-error", operation, revision: normalizedRevision,
+            });
+          }
+        });
+        await navigatePhabricatorPage(page, {
+          operation, revision: normalizedRevision,
+          url: getRevisionUrl(normalizedRevision, webUrl),
         });
         if (!await pageIsAuthenticated(page)) {
           state = "disconnected";
           sessionStorageState = undefined;
-          message = "Phabricator sign-in expired while confirming the review action.";
-          throw new Error(message);
+          throw new Error("Phabricator sign-in expired. Sign in again.");
         }
+        return await callback(page, normalizedRevision);
+      } catch (error) {
+        recordPhabricatorBrowserActivity({
+          event: "browser-operation-error", operation, revision: normalizedRevision,
+          statusCode: getBrowserErrorStatusCode(error),
+        });
+        throw error;
+      } finally {
+        await context.close();
+      }
+    });
+    reviewOperation = run;
+    return run;
+  }
 
-        const actionIsStillAvailable = await page.evaluate((selectedAction) => {
-          const document = globalThis.document;
-          const form = document.querySelector(
-            "form[data-sigil~='transaction-append']",
-          );
-          const actionInput = form?.querySelector(
-            "input[name='editengine.actions']",
-          );
-
-          return Boolean(actionInput) && Array.from(form.querySelectorAll("select"))
-            .some((select) => Array.from(select.options).some(
-              (option) => option.value === selectedAction,
-            ));
-        }, normalizedAction);
-
-        if (actionIsStillAvailable) {
-          const actionLabel = normalizedAction === "reject"
-            ? "Request Changes"
-            : "Accept";
-
-          throw new Error(
-            `Phabricator accepted the review text but did not record ${actionLabel} for ${normalizedRevision}. ` +
-              "Check the revision before retrying.",
-          );
+  function getReview({ revision }) {
+    const key = normalizeRevision(revision);
+    if (!reviewInflight.has(key)) {
+      const request = withRevisionPage(key, "read-review", async (page, id) => {
+        const review = await readWebReview(page, id);
+        recordPhabricatorBrowserActivity({ event: "browser-download-start", operation: "raw-patch", revision: id });
+        review.rawPatch = await downloadWebPatch(page, review.rawUrl);
+        recordPhabricatorBrowserActivity({ event: "browser-download-success", operation: "raw-patch", revision: id });
+        for (const comment of review.inlineComments) {
+          comment.contextDiff = review.rawPatch;
         }
-      }
-
-      return { action: normalizedAction, revision: normalizedRevision };
-    } catch (error) {
-      if (state !== "disconnected") {
-        state = "error";
-        message = String(error?.message || error);
-      }
-      throw error;
-    } finally {
-      await context.close();
+        return review;
+      }).finally(() => reviewInflight.delete(key));
+      reviewInflight.set(key, request);
     }
+    return reviewInflight.get(key);
+  }
+
+  async function downloadWebPatch(page, rawUrl) {
+    if (!rawUrl || new URL(rawUrl).origin !== new URL(webUrl).origin) {
+      throw new Error("Phabricator did not provide a same-site raw patch link.");
+    }
+    const patch = await new Promise((resolve, reject) => {
+      const finish = (error, value) => {
+        clearTimeout(timer);
+        page.off("download", onDownload);
+        page.off("response", onResponse);
+        error ? reject(error) : resolve(value);
+      };
+      const onResponse = (response) => {
+        if (response.request().isNavigationRequest() && response.status() === 200 &&
+            !response.headers()["content-disposition"]?.includes("attachment") &&
+            response.headers()["content-type"]?.startsWith("text/plain")) {
+          response.text().then((text) => finish(null, text), (error) => finish(error));
+        }
+      };
+      const onDownload = async (download) => {
+        try {
+          const stream = await download.createReadStream();
+          const chunks = [];
+          let size = 0;
+          for await (const chunk of stream) {
+            size += chunk.length;
+            if (size > 64 * 1024 * 1024) {
+              await download.cancel();
+              throw new Error("The raw patch exceeds the 64 MiB review limit.");
+            }
+            chunks.push(chunk);
+          }
+          const failure = await download.failure();
+          if (failure) {
+            throw new Error(`Phabricator raw patch download failed: ${failure}`);
+          }
+          finish(null, Buffer.concat(chunks).toString("utf8"));
+        } catch (error) {
+          finish(error);
+        }
+      };
+      const timer = setTimeout(() => finish(new Error("Phabricator did not return the raw patch within 30 seconds.")), 30000);
+      page.on("response", onResponse);
+      page.on("download", onDownload);
+      page.locator("a[href]").evaluateAll((links, url) => {
+        const link = links.find((candidate) => candidate.href === url);
+        if (!link) {
+          throw new Error("The raw patch download link disappeared.");
+        }
+        link.click();
+      }, rawUrl).catch((error) => finish(error));
+    });
+    if (Buffer.byteLength(patch) > 64 * 1024 * 1024 || !patch.includes("diff --git ")) {
+      throw new Error("Phabricator did not return a supported raw Git patch.");
+    }
+    return patch;
+  }
+
+  function createInlineComment(options) {
+    return withRevisionPage(options.revision, "save-inline-draft", (page, revision) =>
+      saveWebInline(page, { ...options, revision }));
+  }
+
+  function postInlineReply(options) {
+    const normalized = normalizeInlineReply(options);
+    return createInlineComment({
+      revision: normalized.normalizedRevision,
+      content: normalized.content,
+      commentPHID: normalized.parentCommentPHID,
+    });
+  }
+
+  function markInlineCommentDone(options) {
+    const { normalizedRevision, parentCommentPHID } = normalizeInlineCommentReference(options);
+    return withRevisionPage(normalizedRevision, "mark-inline-comment-done", async (page, revision) => {
+      await markWebInlineDone(page, { revision, commentPHID: parentCommentPHID });
+      return { parentCommentPHID, revision };
+    });
+  }
+
+  function publishRevisionReview({ action = "comment", message = "", revision } = {}) {
+    if (!["comment", "accept", "reject"].includes(action)) {
+      return Promise.reject(new Error("Choose Comment, Accept, or Request Changes."));
+    }
+    return withRevisionPage(revision, "publish-review", async (page, id) => {
+      await publishWebReview(page, { action, message: String(message) });
+      return { action, revision: id };
+    });
   }
 
   async function getSuggestions({ revision, inlineComments } = {}) {
@@ -874,11 +827,74 @@ export function createPhabricatorWebSession({
     return request;
   }
 
+  async function getDashboardRevisions({ currentUser, groups = [] }) {
+    if ((await getStatus()).state !== "connected") {
+      throw new Error("Sign in to Phabricator in the console to load the dashboard.");
+    }
+    const context = await launchContext({ headless: true });
+    try {
+      if (sessionStorageState?.cookies?.length) await context.addCookies(sessionStorageState.cookies);
+      const page = await getContextPage(context);
+      const read = async (key, phids) => {
+        let url = new URL("/differential/", webUrl);
+        url.searchParams.append("statuses[]", "open()");
+        for (const phid of phids) url.searchParams.append(`${key}[]`, phid);
+        const rows = new Map();
+        const visited = new Set();
+        while (url) {
+          if (visited.has(url.href) || visited.size >= 20) throw new Error("Dashboard search pagination did not finish. No partial result was saved.");
+          visited.add(url.href);
+          await navigatePhabricatorPage(page, { operation: "dashboard-search", url: url.href });
+          if (!await pageIsAuthenticated(page)) throw new Error("Phabricator sign-in expired.");
+          const data = await page.evaluate(() => {
+            const document = globalThis.document;
+            const items = Array.from(document.querySelectorAll(".phui-oi")).flatMap((item) => {
+              const link = item.querySelector("a.phui-oi-link");
+              const id = link?.getAttribute("href")?.match(/^\/(D\d+)$/)?.[1];
+
+              if (!id) return [];
+
+              const statusIcon = item.querySelector(".phui-oi-status-icon");
+              const statusName = String(
+                globalThis.JX?.Stratcom?.getData?.(statusIcon)?.tip || "",
+              ).trim();
+              const author = item.querySelector(".phui-oi-byline a[href^='/p/']");
+              const reviewers = Array.from(item.querySelectorAll(".phui-oi-attributes a.phui-handle")).map((node) => ({
+                name: node.textContent.trim(),
+                type: node.getAttribute("href").startsWith("/tag/") ? "group" : "user",
+              }));
+              return [{ id, title: link.textContent.trim(), authorName: author?.textContent.trim() || "", reviewers,
+                modifiedText: item.querySelector(".phui-oi-icon-label .print-only")?.textContent || "",
+                statusName }];
+            });
+            const next = Array.from(document.querySelectorAll("a")).find((node) => node.textContent.trim() === "Next" && node.getAttribute("href")?.includes("after="));
+            return { items, next: next?.getAttribute("href") || "", valid: Boolean(document.querySelector(".phui-oi-list-view")) };
+          });
+          if (!data.valid) throw new Error("Phabricator did not return a revision list.");
+          for (const row of data.items) rows.set(row.id, row);
+          const next = data.next ? new URL(data.next, url) : null;
+          if (next && (next.origin !== new URL(webUrl).origin || !next.pathname.startsWith("/differential/"))) throw new Error("Unexpected dashboard pagination URL.");
+          url = next;
+        }
+        return [...rows.values()];
+      };
+      const mine = await read("authorPHIDs", [currentUser.phid]);
+      const reviewQueue = await read("reviewerPHIDs", [currentUser.phid, ...groups.map((group) => group.phid)]);
+      return { mine, reviewQueue };
+    } finally {
+      await context.close();
+    }
+  }
+
   return {
     cancelAuthentication,
+    createInlineComment,
+    getReview,
+    getDashboardRevisions: (options) => queueBrowserOperation(() => getDashboardRevisions(options)),
     close: closeAuthenticationWindow,
     getStatus,
-    getSuggestions,
+    getSuggestions: (options) => queueBrowserOperation(() => getSuggestions(options)),
+    markInlineCommentDone,
     postInlineReply,
     profilePath,
     publishRevisionReview,

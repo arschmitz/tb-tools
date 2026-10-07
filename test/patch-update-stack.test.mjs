@@ -1,0 +1,81 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+import { promisify } from "node:util";
+import { rebaseGraphPatchUpdateSelection } from "../commands/graph/patch-update.mjs";
+import { run } from "../lib/utils.mjs";
+import { amendCurrentCommit } from "../commands/graph/actions.mjs";
+
+const exec = promisify(execFile);
+
+test("detached Patch Update amends preserve branches at the selected patch", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "tb-update-amend-refs-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const git = async (...args) => (await exec("git", args, { cwd: root })).stdout.trim();
+  await git("init", "-b", "main");
+  await git("config", "user.name", "Test");
+  await git("config", "user.email", "test@example.com");
+  await git("config", "commit.gpgsign", "false");
+  await writeFile(path.join(root, "file.txt"), "base\n");
+  await git("add", ".");
+  await git("commit", "-m", "Base");
+  const base = await git("rev-parse", "HEAD");
+  await git("switch", "-c", "selected");
+  await writeFile(path.join(root, "file.txt"), "patch\n");
+  await git("commit", "-am", "Bug 123456 - Patch");
+  const old = await git("rev-parse", "HEAD");
+  await git("branch", "alias");
+  await git("switch", "--detach", "HEAD");
+  await writeFile(path.join(root, "file.txt"), "amended\n");
+  const result = await amendCurrentCommit({ graph: { path: root, label: "comm" },
+    message: "Bug 123456 - Patch", includeChanges: true, runCommand: run });
+  assert.notEqual(result.currentHash, old);
+  assert.equal(await git("rev-parse", "selected"), result.currentHash);
+  assert.equal(await git("rev-parse", "alias"), result.currentHash);
+  assert.equal(await git("rev-parse", "main"), base);
+  assert.equal(await git("status", "--porcelain"), "");
+});
+
+test("Patch Update keeps an up-to-date stack and preserves dependencies when main advances", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "tb-update-stack-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const git = async (...args) => (await exec("git", args, { cwd: root })).stdout.trim();
+  await git("init", "-b", "main");
+  await git("config", "user.name", "Test");
+  await git("config", "user.email", "test@example.com");
+  await git("config", "commit.gpgsign", "false");
+  await writeFile(path.join(root, "base.txt"), "base\n");
+  await git("add", ".");
+  await git("commit", "-m", "Base");
+  await git("update-ref", "refs/remotes/origin/main", "HEAD");
+  await git("switch", "-c", "dependency");
+  await writeFile(path.join(root, "dependency.txt"), "dependency\n");
+  await git("add", ".");
+  await git("commit", "-m", "Dependency");
+  const parent = await git("rev-parse", "HEAD");
+  await git("switch", "-c", "selected");
+  await writeFile(path.join(root, "dependency.txt"), "selected uses dependency\n");
+  await git("commit", "-am", "Selected");
+  const hash = await git("rev-parse", "HEAD");
+  const graph = { path: root, label: "comm", knownHashes: new Set([hash]) };
+  const unchanged = await rebaseGraphPatchUpdateSelection({ graph, hash, runCommand: run });
+  assert.equal(unchanged.currentHash, hash);
+  assert.equal(await git("rev-parse", "HEAD"), hash);
+  assert.equal(await git("rev-parse", "dependency"), parent);
+
+  await git("switch", "main");
+  await writeFile(path.join(root, "upstream.txt"), "new upstream\n");
+  await git("add", ".");
+  await git("commit", "-m", "Upstream");
+  await git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const main = await git("rev-parse", "HEAD");
+  const result = await rebaseGraphPatchUpdateSelection({ graph, hash, runCommand: run });
+  assert.equal(result.rewrittenCommits.length, 2);
+  assert.equal(await git("rev-parse", "selected^^"), main);
+  assert.equal(await git("rev-parse", "selected^"), await git("rev-parse", "dependency"));
+  assert.equal(await readFile(path.join(root, "dependency.txt"), "utf8"), "selected uses dependency\n");
+  assert.equal(await git("status", "--porcelain"), "");
+});

@@ -6,7 +6,7 @@ import { test } from "node:test";
 import {
   loadReviewGroupAssigneeCache,
   loadReviewerGroupCache,
-  REVIEWER_GROUP_CACHE_TTL_MS,
+  clearReviewerGroupCache,
   saveReviewGroupAssigneeCache,
   saveReviewerGroupCache,
 } from "../commands/graph/reviewer-groups-cache.mjs";
@@ -36,7 +36,7 @@ test("reviewer group cache persists a fresh identity and membership list", async
 
   const cached = await loadReviewerGroupCache({
     cachePath,
-    now: now + REVIEWER_GROUP_CACHE_TTL_MS - 1,
+    now: now + 10 * 365 * 24 * 60 * 60 * 1000,
     username: "me",
   });
 
@@ -47,6 +47,8 @@ test("reviewer group cache persists a fresh identity and membership list", async
     phid: "PHID-PROJ-thunderbird-reviewers",
     slug: "thunderbird-reviewers",
   }]);
+  await clearReviewerGroupCache({ cachePath });
+  assert.equal(await loadReviewerGroupCache({ cachePath, username: "me" }), null);
 });
 
 test("reviewer group cache persists resolved board assignees", async (t) => {

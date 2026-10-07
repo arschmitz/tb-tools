@@ -154,7 +154,6 @@ export function createGraphCommand({
         // An OS-opened tab is browser-owned and cannot be closed with
         // window.close(). The launcher creates the actual console tab, which
         // the shutdown callback can close.
-        launcherUrl.searchParams.set("token", token);
         await open(launcherUrl.href);
       }
 

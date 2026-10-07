@@ -110,3 +110,49 @@ test("renderMarkdown renders bare URLs without recursively parsing link labels",
     globalThis.window = originalWindow;
   }
 });
+
+test("renderMarkdown keeps continued lines inside list items", () => {
+  const originalDocument = globalThis.document;
+  const originalWindow = globalThis.window;
+  const root = new FakeElement("div");
+
+  globalThis.window = { location: { origin: "https://console.example" } };
+  globalThis.document = {
+    createElement: (tagName) => new FakeElement(tagName),
+    createTextNode: (value) => new FakeText(value),
+  };
+
+  try {
+    renderMarkdown(root, [
+      "Acceptance criteria:",
+      "",
+      "- Use the loaded data. If",
+      "recurrence-id identifies one occurrence, use its values.",
+      "- Copy dates and times",
+      "  and **timezone** values.",
+      "",
+      "Required implementation details:",
+      "",
+      "3. First numbered item",
+      "with a continued line.",
+      "4. Second numbered item",
+      "## Next section",
+      "Separate paragraph.",
+    ].join("\n"));
+
+    assert.deepEqual(root.children.map((child) => child.tagName), [
+      "p", "ul", "p", "ol", "h2", "p",
+    ]);
+    assert.deepEqual(getElements(root, "li").map((item) => item.textContent), [
+      "Use the loaded data. If recurrence-id identifies one occurrence, use its values.",
+      "Copy dates and times and timezone values.",
+      "First numbered item with a continued line.",
+      "Second numbered item",
+    ]);
+    assert.equal(getElements(root, "strong")[0].textContent, "timezone");
+    assert.equal(getElements(root, "ol")[0].start, 3);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.window = originalWindow;
+  }
+});

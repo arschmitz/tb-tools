@@ -1,4 +1,5 @@
 import { getBugUrl } from "../../lib/workflow.mjs";
+import { getRevisionTransactions } from "./reviews.mjs";
 
 export const SPRINT_WHITEBOARD_TAG = "[tb-desktop-sprint]";
 export const SPRINT_TITLE_PREFIX = "[SPRINT] - ";
@@ -193,7 +194,42 @@ function getSprintMembershipStartDate({ sprint, card, startDate, historyByBugId 
   return memberSince || startDate;
 }
 
-function getStoryCompletionDate({ card, fallbackDate, historyByBugId }) {
+export async function getSprintPatchCompletionDates({ cards, phab, patchProgressDates = new Map() }) {
+  const dates = new Map();
+
+  for (const card of cards.filter(isStarted)) {
+    if (!card.patches?.length) continue;
+    const patchDates = await Promise.all(card.patches.map(async (patch) => {
+      try {
+        const { transactions } = await getRevisionTransactions({ revision: patch.id, phab });
+        const created = transactions.find((transaction) =>
+          ["create", "core:create"].includes(transaction.type) && Number(transaction.dateCreated) > 0);
+        if (created) {
+          const date = getDateOnly(new Date(Number(created.dateCreated) * 1000).toISOString());
+          if (!patchProgressDates.has(card.id) || date < patchProgressDates.get(card.id)) {
+            patchProgressDates.set(card.id, date);
+          }
+        }
+        let completedAt = "";
+        for (const transaction of transactions.sort((a, b) => a.dateCreated - b.dateCreated)) {
+          if (transaction.type !== "status") continue;
+          if (/^(accepted|approved|published|closed)$/.test(transaction.fields?.new)) {
+            completedAt ||= getDateOnly(new Date(Number(transaction.dateCreated) * 1000).toISOString());
+          } else {
+            completedAt = "";
+          }
+        }
+        return completedAt;
+      } catch {
+        return "";
+      }
+    }));
+    if (patchDates.every(Boolean)) dates.set(card.id, patchDates.sort().at(-1));
+  }
+  return dates;
+}
+
+function getStoryCompletionDate({ card, fallbackDate, historyByBugId, patchCompletionDates = new Map() }) {
   let completionDate = "";
 
   for (const entry of getHistoryEntries(getHistoryValue(historyByBugId, card.id))) {
@@ -202,15 +238,15 @@ function getStoryCompletionDate({ card, fallbackDate, historyByBugId }) {
     for (const change of entry.changes || []) {
       if (change.field_name === "status") {
         if (isClosedStatus(change.added)) {
-          completionDate = date || completionDate;
+          completionDate ||= date;
         } else if (isOpenStatus(change.added)) {
           completionDate = "";
         }
       }
 
       if (change.field_name === "resolution") {
-        if (String(change.added || "").trim()) {
-          completionDate = date || completionDate;
+        if (String(change.added || "").trim() && change.added !== "---") {
+          completionDate ||= date;
         } else if (String(change.removed || "").trim()) {
           completionDate = "";
         }
@@ -218,28 +254,36 @@ function getStoryCompletionDate({ card, fallbackDate, historyByBugId }) {
 
       if (change.field_name === "keywords") {
         if (/checkin-needed-tb/i.test(String(change.added || ""))) {
-          completionDate = date || completionDate;
-        } else if (/checkin-needed-tb/i.test(String(change.removed || ""))) {
-          completionDate = "";
+          completionDate ||= date;
         }
+        // Landing removes this keyword. The earlier completion still counts.
       }
     }
   }
 
+  const patchDate = patchCompletionDates.get(card.id);
+  if (patchDate && (!completionDate || patchDate < completionDate)) completionDate = patchDate;
   return isComplete(card) ? completionDate || fallbackDate : "";
+}
+
+function isStarted(card) {
+  return ["in-progress", "in-review", "complete"].includes(card.column);
 }
 
 function getBurnDown({
   cards,
   endDate,
   historyByBugId,
+  patchCompletionDates,
   now,
   sprint,
   startDate,
   totalPoints,
+  patchProgressDates,
+  weight = getPoints,
 }) {
   const start = Date.parse(`${startDate || ""}T00:00:00Z`);
-  const end = Date.parse(`${endDate || ""}T23:59:59Z`);
+  const end = Date.parse(`${endDate || ""}T00:00:00Z`);
   const today = new Date(now).toISOString().slice(0, 10);
   const current = Date.parse(`${today}T00:00:00Z`);
 
@@ -247,13 +291,18 @@ function getBurnDown({
     return [];
   }
 
-  const visibleEnd = Math.min(end, Math.max(start, current));
+  const visibleEnd = Math.max(end, current);
   const duration = Math.max(DAY_MS, end - start);
   const memberships = new Map(cards.map((card) => [card.id, {
+    startedAt: isStarted(card) ? patchProgressDates.get(card.id) || "" : "",
+    completionUndated: isComplete(card) && !getStoryCompletionDate({
+      card, historyByBugId, patchCompletionDates, fallbackDate: "",
+    }),
     completeAt: getStoryCompletionDate({
       card,
       fallbackDate: today,
       historyByBugId,
+      patchCompletionDates,
     }),
     memberSince: getSprintMembershipStartDate({
       card,
@@ -262,6 +311,11 @@ function getBurnDown({
       startDate,
     }),
   }]));
+  const historyIncomplete = cards.some((card) => (
+    weight(card) > 0 && memberships.get(card.id).completionUndated
+  ));
+  const progressHistoryIncomplete = cards.some((card) =>
+    weight(card) > 0 && isStarted(card) && !memberships.get(card.id).startedAt);
   const series = [];
 
   for (let timestamp = start; timestamp <= visibleEnd; timestamp += DAY_MS) {
@@ -275,13 +329,22 @@ function getBurnDown({
         return remaining;
       }
 
-      return remaining + getPoints(card);
+      return remaining + weight(card);
     }, 0);
 
+    const notStarted = cards.reduce((total, card) => {
+      const history = memberships.get(card.id);
+      const started = isStarted(card) &&
+        (timestamp === current || (history.startedAt && history.startedAt <= date));
+      return total + (history.memberSince <= date && !started ? weight(card) : 0);
+    }, 0);
     series.push({
       date,
+      notStarted: timestamp <= current && (!progressHistoryIncomplete || timestamp === current) ? notStarted : null,
+      progressHistoryIncomplete,
       ideal: Math.max(0, totalPoints * (1 - ratio)),
-      actual,
+      actual: timestamp <= current && (!historyIncomplete || timestamp === current) ? actual : null,
+      historyIncomplete,
     });
   }
 
@@ -291,6 +354,8 @@ function getBurnDown({
 export function getSprintData({
   board,
   historyByBugId = new Map(),
+  patchCompletionDates = new Map(),
+  patchProgressDates = new Map(),
   now = new Date(),
   sprintId,
 } = {}) {
@@ -379,6 +444,20 @@ export function getSprintData({
       endDate,
       totalPoints,
       historyByBugId,
+      patchCompletionDates,
+      patchProgressDates,
+      now,
+      sprint,
+    }),
+    storyBurnDown: getBurnDown({
+      cards: memberCards,
+      startDate,
+      endDate,
+      totalPoints: memberCards.length,
+      weight: () => 1,
+      historyByBugId,
+      patchCompletionDates,
+      patchProgressDates,
       now,
       sprint,
     }),
@@ -448,15 +527,14 @@ export async function rolloverSprint({
   const removed = uniqueIds(removeStoryIds).filter((id) => eligible.includes(id));
   const removedSet = new Set(removed);
   const selected = uniqueIds(storyIds).filter((id) => removedSet.has(id));
-  const nextMembers = uniqueIds([...(next.dependsOn || []), ...selected]);
-  const oldMembersAfterRollover = oldMembers.filter((id) => !removedSet.has(id));
 
-  await updateBug(previous.id, {
-    depends_on: { set: oldMembersAfterRollover },
-  });
-  await updateBug(next.id, {
-    depends_on: { set: nextMembers },
-  });
+  // Add first so a failed request cannot leave stories in neither sprint.
+  if (selected.length) {
+    await updateBug(next.id, { depends_on: { add: selected } });
+  }
+  if (removed.length) {
+    await updateBug(previous.id, { depends_on: { remove: removed } });
+  }
   await updateBug(previous.id, {
     resolution: "FIXED",
     status: "RESOLVED",

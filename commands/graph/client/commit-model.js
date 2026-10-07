@@ -15,7 +15,9 @@ export function getCommitSnapshotFingerprint(commit) {
     commit.subject || "",
     commit.workingTree ? "working" : "commit",
     commit.changeId || "",
-    (commit.tryRuns || []).map((run) => run.id || run.url).join(","),
+    (commit.tryRuns || []).map((run) => [run.id || run.url, run.status, run.checkedAt, run.updatedAt, run.activity, run.retryUrl, run.summary, run.error].join(":")).join(","),
+    commit.tryFixup?.monitorId || "",
+    JSON.stringify(commit.tryMonitor || null),
   ].join("\u001f");
 }
 
@@ -82,3 +84,50 @@ export function formatCommitMeta(commit) {
   return commit.author.name + " <" + commit.author.email + ">";
 }
 
+
+export function getTryResultLabel(status) {
+  if (status === "passed") return "Pass";
+  if (["patch-failed", "build-blocked", "failed-unclassified", "submission-failed"].includes(status)) return "Fail";
+  if (["waiting", "analyzing", "repairing", "ready-to-submit", "submitting", "squashing", "needs-evidence"].includes(status)) return "Pending";
+  return "Unknown";
+}
+
+export function getTryPillState(run) {
+  const result = getTryResultLabel(run.status);
+  let status = ({ Pass: "Passed", Fail: "Failed", Pending: "Pending", Unknown: "Not Determined" })[result];
+  // Only legacy runs outside the monitor can be Not Determined.
+  if (run.status === "failed-unclassified" || (result === "Unknown" && run.monitorId && !run.imported)) status = "Pending";
+  let activity = "";
+  if (run.status === "build-blocked") { status = "Failed"; activity = "No successful build"; }
+  else if (result !== "Pass" && run.rustFailure) { status = "Failed"; activity = "Rust update needed"; }
+  else if (result !== "Pass" && run.failureCategory === "comm-central") { status = "Failed"; activity = "Comm-Central Broken"; }
+  else if (result !== "Pass" && run.phase === "paused") { activity = "Paused"; }
+  else if (result !== "Pass" && run.workerRunning === false && ["analyzing", "needs-evidence", "repairing"].includes(run.phase)) {
+    activity = run.error ? "Waiting to retry" : "Queued";
+  }
+  else if (status === "Pending" && run.phase !== "superseded" && /Fetching CI evidence/i.test(run.activity || "")) {
+    activity = run.activity.replace(/Fetching CI evidence/i, "Collecting CI evidence");
+  }
+  else if (status === "Pending" && run.aiRunning === false && ["analyzing", "needs-evidence"].includes(run.phase)) {
+    activity = "Preparing analysis";
+  }
+  else if (run.phase === "waiting-new-try") { activity = "Waiting for new run"; }
+  else if (status === "Pending" && !run.imported && run.phase !== "superseded") {
+    activity = run.statusComplete || ["analyzing", "needs-evidence", "failed-unclassified"].includes(run.status)
+      ? "Analyzing Results" : "Waiting For Results";
+  } else if (status === "Failed" && run.phase !== "superseded") {
+    activity = run.status === "submission-failed" || ["ready-to-submit", "submitting"].includes(run.phase) || /Posting another Try/.test(run.activity || "")
+      ? "Waiting for new run"
+      : run.activity === "Running tests" ? "Running tests" : "Determining Fixes";
+  }
+  return { status, activity, color: ({ Passed: "pass", Failed: "fail", Pending: "pending", "Not Determined": "unknown" })[status],
+    icon: ({ Passed: "✓", Failed: "✕", Pending: "◷", "Not Determined": "?" })[status] };
+}
+
+export function getTryStatusLabel(status) {
+  return ({ passed: "Passed", waiting: "Waiting", analyzing: "Checking failures",
+    repairing: "Fixing failures", "ready-to-submit": "Ready for Try", submitting: "Submitting",
+    "failed-unclassified": "Run failed; cause not established", "build-blocked": "No successful build; patch not validated", "needs-evidence": "Needs investigation", "patch-failed": "Patch failures",
+    "waiting-new-try": "Waiting for new run", "rust-blocked": "Failed due to Rust; waiting for origin update", "needs-rebase": "Needs a compatible current base", "submission-failed": "Push failed", squashing: "Amending", stale: "Earlier patch",
+    superseded: "Superseded", paused: "Paused" })[status] || "Recorded";
+}

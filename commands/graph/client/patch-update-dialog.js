@@ -1,14 +1,49 @@
-import { GRAPHS, INTERACTIVE, graphStates } from "./config.js";
+import { setLiveText, replaceChangedChildren, hasSelectedText } from "./live-text.js";
+import { createActivityEntry as createSharedActivityEntry, bindAiFeedbackForm } from "./ai-dialog-controls.js";
+import { registerAiTaskDialog, enableTaskNotifications } from "./ai-task-tray.js";
+import { showSystemConfirmation } from "./system-dialog.js";
+import { createReviewAttentionScroller } from "./review-attention.js";
+import { GRAPHS, INTERACTIVE, graphStates, BUGZILLA_BUG_URL, PHABRICATOR_REVISION_URL } from "./config.js";
 import {
   applyGraphSnapshot,
   getLoadedGitCommitLimit,
 } from "./command-sessions.js";
 import { openSubmitDialog } from "./commit-actions.js";
-import { appendInlineReviewComment } from "./review-viewer.js";
+import { appendInlineReviewComment, findReviewLine } from "./review-viewer.js";
+import { startOrResumePatchSession } from "./patch-session-resume.js";
+import { createCodexRunStatus } from "./codex-run-status.js";
 
 const dialog = document.getElementById("patch-update-dialog");
+const runStatus = createCodexRunStatus(dialog);
+const taskView = registerAiTaskDialog({ kind: "update", dialog, title: value => `${value.revision} ${value.mode === "verify" ? "Verify" : value.mode === "freeform" ? "Update" : "Review Update"}`,
+  restore: restorePatchUpdateTask, onUpdate: renderSession,
+  recover: task => openPatchUpdateDialog({ patch: { id: task.revision }, graphIndex: task.graphIndex, mode: task.mode }),
+});
+let viewGeneration = 0;
 const title = dialog?.querySelector(".patch-update-title");
+const phabLink = dialog?.querySelector(".patch-update-phab-link");
+const bugLink = dialog?.querySelector(".patch-update-bug-link");
+
+function setPatchLinks(revision, bugId) {
+  const revisionId = String(revision || "").match(/^D?(\d+)$/)?.[1];
+  phabLink.hidden = !revisionId;
+  if (revisionId) {
+    phabLink.href = `${PHABRICATOR_REVISION_URL}${revisionId}`;
+  }
+  if (bugId !== undefined) {
+    const id = String(bugId || "").match(/^\d+$/)?.[0];
+    bugLink.hidden = !id;
+    if (id) {
+      bugLink.href = `${BUGZILLA_BUG_URL}${id}`;
+      bugLink.textContent = `Bug ${id}`;
+    }
+  }
+}
 const status = dialog?.querySelector(".patch-update-status");
+const retry = dialog?.querySelector(".patch-update-retry");
+const rollback = dialog?.querySelector(".patch-update-rollback");
+const chat = dialog?.querySelector(".patch-update-chat");
+let renderedChat = "";
 const activityProgress = dialog?.querySelector(".patch-update-progress");
 const patchContext = dialog?.querySelector(".patch-update-context");
 const patchContextToggle = dialog?.querySelector(".patch-update-context-toggle");
@@ -21,47 +56,21 @@ const patchContextEvidence = dialog?.querySelector(".patch-update-context-eviden
 const patchContextEvidenceText = dialog?.querySelector(".patch-update-context-evidence-text");
 const patchContextValidation = dialog?.querySelector(".patch-update-context-validation");
 const patchContextValidationText = dialog?.querySelector(".patch-update-context-validation-text");
-const reviewColumn = dialog?.querySelector(".patch-update-review-column");
 const output = dialog?.querySelector(".patch-update-output");
 const outputToggle = dialog?.querySelector(".patch-update-output-toggle");
 const activity = dialog?.querySelector(".patch-update-activity");
 const activityLatest = dialog?.querySelector(".patch-update-activity-latest");
 const activityFilters = dialog?.querySelectorAll("[data-activity-filter]");
 const activityList = dialog?.querySelector(".patch-update-activity-list");
+const results = dialog?.querySelector(".patch-update-results");
+const resultItems = dialog?.querySelector(".patch-update-results-items");
+const followUpAnswer = dialog?.querySelector(".patch-update-follow-up-answer");
 const steer = dialog?.querySelector(".patch-update-steer");
 const steerLabel = dialog?.querySelector(".patch-update-steer-label");
 const steerInput = dialog?.querySelector(".patch-update-steer-input");
 const steerSubmit = dialog?.querySelector(".patch-update-steer-submit");
-const comment = dialog?.querySelector(".patch-update-comment");
-const commentAuthor = dialog?.querySelector(".patch-update-comment-author");
-const commentKind = dialog?.querySelector(".patch-update-comment-kind");
-const commentLink = dialog?.querySelector(".patch-update-comment-link");
-const commentLocation = dialog?.querySelector(".patch-update-comment-location");
-const feedbackHeading = dialog?.querySelector(".patch-update-feedback-heading");
-const commentContent = dialog?.querySelector(".patch-update-comment-content");
-const suggestion = dialog?.querySelector(".patch-update-suggestion");
-const codeSuggestion = dialog?.querySelector(".patch-update-code-suggestion");
-const commentContext = dialog?.querySelector(".patch-update-comment-context");
-const commentContextLocation = dialog?.querySelector(".patch-update-comment-context-location");
-const commentContextDiff = dialog?.querySelector(".patch-update-comment-context-diff");
-const analysis = dialog?.querySelector(".patch-update-analysis");
-const analysisHeading = analysis?.querySelector("h3");
-const recommendation = dialog?.querySelector(".patch-update-recommendation");
-const assessment = dialog?.querySelector(".patch-update-assessment");
-const rationale = dialog?.querySelector(".patch-update-rationale");
-const rationaleText = dialog?.querySelector(".patch-update-rationale-text");
-const validation = dialog?.querySelector(".patch-update-validation");
-const validationText = dialog?.querySelector(".patch-update-validation-text");
-const changePlan = dialog?.querySelector(".patch-update-change-plan");
-const changeSummary = dialog?.querySelector(".patch-update-change-summary");
-const proposedDiff = dialog?.querySelector(".patch-update-proposed-diff");
-const proposedDiffContent = dialog?.querySelector(".patch-update-proposed-diff-content");
-const replyLabel = dialog?.querySelector(".patch-update-reply-label");
-const reply = dialog?.querySelector(".patch-update-reply");
-const keep = dialog?.querySelector(".patch-update-keep");
-const revert = dialog?.querySelector(".patch-update-revert");
-const post = dialog?.querySelector(".patch-update-post");
-const handled = dialog?.querySelector(".patch-update-handled");
+const patchDiff = dialog?.querySelector(".patch-update-context-diff");
+const patchDiffContent = dialog?.querySelector(".patch-update-context-diff-content");
 const amend = dialog?.querySelector(".patch-update-amend");
 const submit = dialog?.querySelector(".patch-update-submit");
 
@@ -82,8 +91,32 @@ let workingTreeDiff = {
   text: "",
 };
 let workingTreeDiffRequest = "";
+let workingTreeDiffAbortController = null;
 let activeWorkingTreeDiffItemKey = "";
+let patchDiffState = {
+  error: "",
+  html: "",
+  key: "",
+  loading: false,
+  text: "",
+};
+let patchDiffRequest = "";
+let renderedPatchDiffKey = "";
+const scrollToAttention = createReviewAttentionScroller();
 const expandedActivityCommandIds = new Set();
+
+function getWorkingTreeDiffTimeoutMs() {
+  const testTimeout = Number(globalThis.__TB_TOOLS_TEST_WORKING_TREE_DIFF_TIMEOUT_MS__);
+
+  return Number.isFinite(testTimeout) && testTimeout > 0
+    ? testTimeout
+    : 5_000;
+}
+
+function cancelWorkingTreeDiffRequest() {
+  workingTreeDiffAbortController?.abort("The active comment changed.");
+  workingTreeDiffAbortController = null;
+}
 
 function isBusy(currentSession = session) {
   return ["preparing", "reviewing", "applying", "amending"].includes(currentSession?.status);
@@ -95,7 +128,7 @@ function getCurrentItem(currentSession = session) {
   }
 
   return currentSession.items.slice(currentSession.currentItemIndex || 0)
-    .find((item) => item.state !== "handled") || null;
+    .find((item) => item.state !== "handled" && item.state !== "skipped") || null;
 }
 
 function setButton(button, { hidden, disabled = false, text } = {}) {
@@ -114,10 +147,6 @@ function setButton(button, { hidden, disabled = false, text } = {}) {
 function setPageScrollLocked(isLocked) {
   document.documentElement.classList.toggle("patch-update-open", isLocked);
   document.body.classList.toggle("patch-update-open", isLocked);
-}
-
-function isCommandActivity(entry) {
-  return /\bcommand\b/i.test(String(entry?.title || ""));
 }
 
 function isCodexNoteActivity(entry) {
@@ -157,59 +186,6 @@ function setActivityFilter(filter) {
   renderActivity(session?.activity || []);
 }
 
-function createCommandActivityDisclosure(entry) {
-  const details = document.createElement("details");
-  const summary = document.createElement("summary");
-  const title = document.createElement("strong");
-  const preview = document.createElement("span");
-  const detail = document.createElement("code");
-
-  details.className = "patch-update-activity-command-disclosure";
-  details.open = expandedActivityCommandIds.has(entry.id);
-  summary.className = "patch-update-activity-command-summary";
-  title.textContent = entry.title || "Command";
-  preview.className = "patch-update-activity-command-preview";
-  preview.textContent = getActivityCommandPreview(entry.detail);
-  detail.textContent = entry.detail;
-  summary.append(title, preview);
-  details.append(summary, detail);
-  details.addEventListener("toggle", () => {
-    if (details.open) {
-      expandedActivityCommandIds.add(entry.id);
-    } else {
-      expandedActivityCommandIds.delete(entry.id);
-    }
-  });
-
-  return details;
-}
-
-function createActivityEntry(entry) {
-  const row = document.createElement("li");
-  const title = document.createElement("strong");
-  const command = isCommandActivity(entry);
-
-  row.className = `patch-update-activity-entry patch-update-activity-${entry.kind || "status"}` +
-    (command ? " patch-update-activity-command-row" : "");
-
-  if (command && entry.detail) {
-    row.append(createCommandActivityDisclosure(entry));
-    return row;
-  }
-
-  title.textContent = entry.title || "Codex activity";
-  row.append(title);
-
-  if (entry.detail) {
-    const detail = document.createElement("code");
-
-    detail.textContent = entry.detail;
-    row.append(detail);
-  }
-
-  return row;
-}
-
 function createActivityPlaceholder(text) {
   const placeholder = document.createElement("li");
 
@@ -232,13 +208,13 @@ function renderActivity(entries = []) {
 
   activity.hidden = false;
   if (activityLatest) {
-    activityLatest.textContent = items.length
+    setLiveText(activityLatest, items.length
       ? getActivitySummary(items[items.length - 1])
-      : "Waiting for Codex activity...";
+      : "Waiting for Codex activity...");
   }
-  activityList.replaceChildren(...(
+  const activityChanged = replaceChangedChildren(activityList, ...(
     visibleEntries.length
-      ? visibleEntries.map(createActivityEntry)
+      ? visibleEntries.map(entry => createSharedActivityEntry(entry, expandedActivityCommandIds))
       : [createActivityPlaceholder(
         items.length && activityFilter === "notes"
           ? "No Codex notes yet. Select All to include other activity."
@@ -246,9 +222,9 @@ function renderActivity(entries = []) {
       )]
   ));
 
-  if (followOutput) {
+  if (activityChanged && followOutput && !hasSelectedText(activityList)) {
     window.requestAnimationFrame(() => {
-      activityList.scrollTop = activityList.scrollHeight;
+      if (!hasSelectedText(activityList)) activityList.scrollTop = activityList.scrollHeight;
     });
   }
 }
@@ -341,65 +317,71 @@ function setPatchContext(context) {
   setPatchContextExpanded(hasContext && patchContextExpanded);
 }
 
-function updateReviewColumnVisibility() {
-  if (reviewColumn) {
-    reviewColumn.hidden = Boolean(patchContext?.hidden && comment?.hidden);
+function getPatchDiffKey(value = session) {
+  if (!value?.id || value.graphIndex === undefined || !value.currentHash) {
+    return "";
   }
+
+  return [value.id, value.graphIndex, value.currentHash].join(":");
 }
 
-function getCommentContextRows(item) {
-  if (!commentContextDiff) {
-    return [];
-  }
+function loadPatchDiff() {
+  const key = getPatchDiffKey();
 
-  const lineStart = Number(item?.lineNumber);
-  const lineLength = Math.max(1, Number(item?.lineLength) || 1);
-  const side = item?.contextLineSide === "old" ? "old" : "new";
-
-  if (!Number.isInteger(lineStart) || lineStart < 1) {
-    return [];
-  }
-
-  const rows = [];
-
-  for (let line = lineStart; line < lineStart + lineLength; line++) {
-    for (const row of commentContextDiff.querySelectorAll(
-      `.diff-line[data-${side}-line="${line}"]`,
-    )) {
-      row.classList.add("comment-context-line");
-      rows.push(row);
-    }
-  }
-
-  return rows;
-}
-
-function setCommentContext(item) {
-  if (!commentContext || !commentContextLocation || !commentContextDiff) {
+  if (!key || patchDiffRequest === key || patchDiffState.key === key) {
     return;
   }
 
-  const html = String(item?.contextDiffHtml || "");
+  patchDiffRequest = key;
+  patchDiffState = {
+    error: "",
+    html: "",
+    key,
+    loading: true,
+    text: "",
+  };
+  void fetch(
+    `/api/graph/${encodeURIComponent(session.graphIndex)}/diff/${encodeURIComponent(session.currentHash)}?token=${encodeURIComponent(INTERACTIVE.token)}`,
+    { cache: "no-store" },
+  ).then(async (response) => {
+    const result = await response.json();
 
-  commentContext.hidden = !html;
-  commentContextLocation.textContent = item?.filePath
-    ? `${item.filePath}${item.lineNumber ? `:${item.lineNumber}` : ""}`
-    : "";
-  commentContextDiff.innerHTML = html;
-  const [anchor] = getCommentContextRows(item);
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || "Could not load the patch diff.");
+    }
 
-  if (anchor && item?.type === "inline") {
-    appendInlineReviewComment(anchor, {
-      action: "comment",
-      author: item.author,
-      codeSuggestion: item.codeSuggestion ? {
-        content: item.codeSuggestion,
-        url: item.url,
-      } : null,
-      content: item.content,
-      dateCreated: item.dateCreated,
-    });
-  }
+    return result;
+  }).then((result) => {
+    if (patchDiffRequest !== key) {
+      return;
+    }
+
+    patchDiffState = {
+      error: "",
+      html: String(result.html || ""),
+      key,
+      loading: false,
+      text: String(result.text || ""),
+    };
+  }).catch((error) => {
+    if (patchDiffRequest !== key) {
+      return;
+    }
+
+    patchDiffState = {
+      error: error?.message || String(error),
+      html: "",
+      key,
+      loading: false,
+      text: "",
+    };
+  }).finally(() => {
+    if (patchDiffRequest === key) {
+      patchDiffRequest = "";
+      renderedPatchDiffKey = "";
+      renderSession(session);
+    }
+  });
 }
 
 function getWorkingTreeDiffKey(item) {
@@ -428,6 +410,7 @@ function resetWorkingTreeDiffForActiveComment(item) {
     return;
   }
 
+  cancelWorkingTreeDiffRequest();
   activeWorkingTreeDiffItemKey = itemKey;
   // A review item change can mean that Codex changed the checkout for the
   // preceding item. Do not reuse its diff for the next review item.
@@ -449,6 +432,13 @@ function loadWorkingTreeDiff(item) {
   }
 
   workingTreeDiffRequest = key;
+  const controller = new AbortController();
+  const timeoutMs = getWorkingTreeDiffTimeoutMs();
+  const timeout = window.setTimeout(() => {
+    controller.abort(`The local working-tree diff did not finish within ${timeoutMs / 1_000} seconds.`);
+  }, timeoutMs);
+
+  workingTreeDiffAbortController = controller;
   workingTreeDiff = {
     error: "",
     html: "",
@@ -459,7 +449,7 @@ function loadWorkingTreeDiff(item) {
   void fetch(
     "/api/graph/" + encodeURIComponent(session.graphIndex) +
       "/diff/uncommitted-changes?token=" + encodeURIComponent(INTERACTIVE.token),
-    { cache: "no-store" },
+    { cache: "no-store", signal: controller.signal },
   ).then(async (response) => {
     const result = await response.json();
 
@@ -486,21 +476,28 @@ function loadWorkingTreeDiff(item) {
     }
 
     workingTreeDiff = {
-      error: error?.message || String(error),
+      error: controller.signal.aborted
+        ? String(controller.signal.reason || "The local working-tree diff request was canceled.")
+        : error?.message || String(error),
       html: "",
       key,
       loading: false,
       text: "",
     };
   }).finally(() => {
+    window.clearTimeout(timeout);
+    if (workingTreeDiffAbortController === controller) {
+      workingTreeDiffAbortController = null;
+    }
     if (workingTreeDiffRequest === key) {
       workingTreeDiffRequest = "";
+      renderedPatchDiffKey = "";
       renderSession(session);
     }
   });
 }
 
-function setWorkingTreeDiff(item) {
+function getWorkingTreeDiffState(item) {
   resetWorkingTreeDiffForActiveComment(item);
   const key = getWorkingTreeDiffKey(item);
   const currentDiff = workingTreeDiff.key === key ? workingTreeDiff : null;
@@ -513,168 +510,428 @@ function setWorkingTreeDiff(item) {
     item?.changeReverted ||
     hasWorkingDiff,
   );
-  const hasPatchUpdateSession = Boolean(session?.id);
   const shouldLoadWorkingTreeDiff = Boolean(
     key && !hasWorkingDiff && !currentDiff?.loading && !currentDiff?.error,
   );
-
-  // The working-tree diff is the source of truth. It must remain available
-  // while this Patch Update session exists, even between review comments.
-  proposedDiff.hidden = !hasPatchUpdateSession;
-  if (!hasPatchUpdateSession) {
-    proposedDiffContent.replaceChildren();
-  } else if (hasWorkingDiff) {
-    if (workingDiffHtml) {
-      proposedDiffContent.innerHTML = workingDiffHtml;
-    } else {
-      // Rendering must never hide a real source change. Keep the unified diff
-      // available even if the enhanced renderer cannot recognize its format.
-      const rawDiff = document.createElement("pre");
-
-      rawDiff.className = "patch-update-proposed-diff-raw";
-      rawDiff.textContent = workingDiff;
-      proposedDiffContent.replaceChildren(rawDiff);
-    }
-  } else if (currentDiff?.loading || shouldLoadWorkingTreeDiff) {
-    const loadingDiff = document.createElement("p");
-
-    loadingDiff.className = "patch-update-proposed-diff-loading";
-    loadingDiff.textContent = "Loading the actual uncommitted diff from the current checkout...";
-    proposedDiffContent.replaceChildren(loadingDiff);
-  } else if (currentDiff?.error) {
-    const failedDiff = document.createElement("p");
-
-    failedDiff.className = "patch-update-proposed-diff-missing";
-    failedDiff.textContent = `Could not load the actual uncommitted diff: ${currentDiff.error}`;
-    proposedDiffContent.replaceChildren(failedDiff);
-  } else {
-    const missingDiff = document.createElement("p");
-
-    missingDiff.className = "patch-update-proposed-diff-missing";
-    missingDiff.textContent = item?.changeReverted
-      ? "The candidate was reverted, so there is no remaining working-tree diff for this comment."
-      : "There are no uncommitted changes in the current checkout.";
-    proposedDiffContent.replaceChildren(missingDiff);
-  }
 
   if (shouldLoadWorkingTreeDiff) {
     loadWorkingTreeDiff(item);
   }
 
-  return { needsChange };
-}
-
-function setComment(item) {
-  if (!comment) {
-    return;
-  }
-
-  const { needsChange } = setWorkingTreeDiff(item);
-
-  comment.hidden = !item;
-
-  if (!item) {
-    setCommentContext(null);
-    // The diff lives inside the analysis column, so do not hide its parent
-    // when the active item advances or all comments have been handled.
-    analysis.hidden = !session?.id;
-    analysisHeading.hidden = true;
-    recommendation.hidden = true;
-    recommendation.textContent = "";
-    assessment.hidden = true;
-    assessment.textContent = "";
-    rationale.hidden = true;
-    rationaleText.textContent = "";
-    validation.hidden = true;
-    validationText.textContent = "";
-    if (changePlan) {
-      changePlan.hidden = true;
-    }
-    if (changeSummary) {
-      changeSummary.textContent = "";
-    }
-    if (replyLabel) {
-      replyLabel.hidden = true;
-    }
-    updateReviewColumnVisibility();
-    return;
-  }
-
-  commentAuthor.textContent = item.author;
-  commentKind.textContent = item.feedbackType;
-  const isInlineInContext = item.type === "inline" && Boolean(item.contextDiffHtml);
-
-  feedbackHeading.hidden = !item.content || isInlineInContext;
-  commentContent.hidden = !item.content || isInlineInContext;
-  commentContent.textContent = item.content;
-  commentLocation.hidden = !item.filePath || isInlineInContext;
-  commentLocation.textContent = item.filePath
-    ? `${item.filePath}${item.lineNumber ? `:${item.lineNumber}` : ""}`
-    : "";
-  suggestion.hidden = !item.codeSuggestion || isInlineInContext;
-  codeSuggestion.textContent = item.codeSuggestion || "";
-  setCommentContext(item);
-  commentLink.hidden = !item.url;
-  commentLink.href = item.url || "";
-  const hasAnalysis = Boolean(
-    item.assessment ||
-    item.rationale ||
-    item.validation ||
+  return {
+    currentDiff,
+    hasWorkingDiff,
     needsChange,
-  );
-
-  analysis.hidden = !hasAnalysis;
-  analysisHeading.hidden = false;
-  recommendation.hidden = false;
-  recommendation.textContent = getRecommendationLabel(item);
-  assessment.hidden = false;
-  assessment.textContent = item.assessment || (
-    needsChange
-      ? "Codex recommended a source change. The actual working-tree diff is shown below when one is prepared."
-      : ""
-  );
-  rationale.hidden = !item.rationale;
-  rationaleText.textContent = item.rationale || "";
-  validation.hidden = !item.validation;
-  validationText.textContent = item.validation || "";
-
-  if (changePlan) {
-    changePlan.hidden = !needsChange;
-  }
-  if (changeSummary) {
-    changeSummary.textContent = item.changeApplied
-      ? item.changeAccepted
-        ? "This working-tree change is kept and will be included when you amend the patch."
-        : "Codex changed the working checkout. Review the actual uncommitted diff below, then keep or revert this candidate."
-      : item.changeReverted
-        ? "This candidate change was reverted."
-        : item.state === "applying"
-          ? "Codex is applying the recommended source change in the working checkout."
-          : item.changeSummary || "Codex did not prepare a source change for this comment.";
-  }
-
-  if (reply && document.activeElement !== reply) {
-    reply.value = item.suggestedReply || "";
-  }
-  if (replyLabel) {
-    replyLabel.hidden = false;
-  }
-  updateReviewColumnVisibility();
+    shouldLoadWorkingTreeDiff,
+  };
 }
 
 function getRecommendationLabel(item) {
   const labels = {
-    change: "Make the planned source change",
-    reply: "Reply without changing source",
-    "no-action": "No additional action is recommended",
-    discussion: "Discuss this before changing source",
+    change: "Suggested action: Update the source.",
+    reply: "Suggested action: Send a reply. Do not change the source.",
+    "no-action": "Suggested action: Do not change the source.",
+    discussion: "Suggested action: Discuss this before you change the source.",
   };
 
-  return labels[item.recommendation] || "Codex completed its review";
+  return labels[item.recommendation] || "Codex completed the review.";
+}
+
+function hasGraphChangeRecommendation(item) {
+  return item?.recommendation === "change" &&
+    Boolean(String(item?.assessment || "").trim()) &&
+    Boolean(String(item?.changeSummary || "").trim());
+}
+
+function getChangeSummary(item) {
+  if (item.changesAmended) {
+    return "The source update was amended into the current patch.";
+  }
+  if (item.changeApplied) {
+    return "Codex changed the source. Review the working-tree diff, then amend or revert it.";
+  }
+
+
+  if (item.changeReverted) {
+    return "Codex reverted this source update.";
+  }
+
+  if (item.state === "applying") {
+    return "Codex is preparing the source update.";
+  }
+
+  return item.changeSummary || "No source update is suggested for this comment.";
+}
+
+function createInlineAction(action, text) {
+  const button = document.createElement("button");
+
+  button.dataset.updateInlineAction = action;
+  button.type = "button";
+  button.textContent = text;
+  return button;
+}
+
+function getInlineFinding(item) {
+  return Array.from(patchDiffContent?.querySelectorAll(".patch-update-inline-finding") || [])
+    .find((finding) => finding.dataset.itemId === item?.id) || null;
+}
+
+function setInlineFindingButton(finding, action, options) {
+  setButton(
+    finding?.querySelector(`[data-update-inline-action="${action}"]`),
+    options,
+  );
+}
+
+function updateInlineFindingActions(item) {
+  const finding = getInlineFinding(item);
+
+  if (!finding || !item) {
+    return;
+  }
+
+  // Assessments can arrive after the diff. Refresh the text with the actions.
+  const textFields = {
+    ".patch-update-comment-author": session?.mode === "freeform" ? "Your update" : session?.mode === "verify" ? "Verify finding" : `Comment from ${item.author || "Unknown reviewer"}`,
+    ".patch-update-inline-assessment": item.assessment || "Codex has not completed an assessment for this comment yet.",
+    ".patch-update-inline-rationale": item.rationale ? `Reason: ${item.rationale}` : "",
+    ".patch-update-inline-validation": item.validation ? `Checks: ${item.validation}` : "",
+    ".patch-update-inline-change-summary": getChangeSummary(item),
+    ".patch-update-inline-recommendation": getRecommendationLabel(item),
+  };
+  for (const [selector, text] of Object.entries(textFields)) {
+    const element = finding.querySelector(selector);
+    if (element) {
+      element.textContent = text;
+      element.hidden = !text;
+    }
+  }
+
+  const replyInput = finding.querySelector(".patch-update-inline-reply");
+  const canUseAi = session?.aiEnabled && !isBusy() && session.status !== "error";
+  const actionPending = Boolean(pendingAction);
+  const hasPreparedChange = Boolean(item.changeApplied && !item.changeReverted && !item.changesAmended);
+  const replyValue = replyInput?.value || "";
+  const canSaveInlineReply = session?.mode !== "verify" && item.type === "inline" && Boolean(item.parentCommentPHID);
+  for (const element of finding.querySelectorAll(".patch-update-inline-reply-label, .patch-update-unanchored-reply-note")) {
+    if (session?.mode === "verify") element.hidden = true;
+  }
+  const complete = item.state === "handled" || item.state === "skipped";
+  const canMakeChange = hasGraphChangeRecommendation(item) &&
+    !item.changeApplied && !item.changesAmended;
+
+  if (replyInput) {
+    replyInput.readOnly = complete;
+  }
+
+  setInlineFindingButton(finding, "apply", {
+    disabled: actionPending,
+    hidden: complete || !canMakeChange || !canUseAi,
+    text: pendingAction === "apply" ? "Preparing..." : "Make Change",
+  });
+  setInlineFindingButton(finding, "keep", {
+    disabled: actionPending,
+    hidden: complete || !hasPreparedChange || !canUseAi,
+    text: pendingAction === "keep" ? "Amending..." : "Amend Change",
+  });
+  setInlineFindingButton(finding, "revert", {
+    disabled: actionPending,
+    hidden: complete || !hasPreparedChange || !canUseAi,
+    text: pendingAction === "revert" ? "Reverting..." : "Revert Change",
+  });
+  setInlineFindingButton(finding, "comment", {
+    disabled: actionPending || hasPreparedChange ||
+      !replyValue.trim() || (item.draftReply === replyValue && item.draftSaved),
+    hidden: complete || !item.assessment || !canUseAi || !canSaveInlineReply,
+    text: pendingAction === "comment"
+      ? "Posting..."
+      : item.draftReply === replyValue && item.draftSaved
+        ? "Comment Posted"
+        : "Comment",
+  });
+  setInlineFindingButton(finding, "handled", {
+    disabled: actionPending || hasPreparedChange,
+    hidden: complete || !canUseAi || isBusy(),
+    text: pendingAction === "handled" ? "Marking..." : "Mark Done",
+  });
+  setInlineFindingButton(finding, "skip", {
+    disabled: actionPending || hasPreparedChange,
+    hidden: complete || !canUseAi || isBusy(),
+    text: pendingAction === "skip" ? "Skipping..." : "Skip",
+  });
+}
+
+function createCommentAuthor(item) {
+  const author = document.createElement("p");
+  author.className = "patch-update-comment-author";
+  author.textContent = session?.mode === "freeform" ? "Your update" : session?.mode === "verify" ? "Verify finding" : `Comment from ${item.author || "Unknown reviewer"}`;
+  return author;
+}
+
+function appendUpdateFinding(row, item) {
+  const reviewerComment = appendInlineReviewComment(row, {
+    action: "comment",
+    author: item.author,
+    codeSuggestion: item.codeSuggestion || item.isDeletion ? {
+      content: item.codeSuggestion,
+      isDeletion: item.isDeletion === true,
+      url: item.url,
+    } : null,
+    content: item.content,
+    dateCreated: item.dateCreated,
+  });
+  const finding = document.createElement("article");
+  const header = document.createElement("header");
+  const heading = document.createElement("h3");
+  const recommendation = document.createElement("p");
+  const assessment = document.createElement("p");
+  const rationale = document.createElement("p");
+  const validation = document.createElement("p");
+  const changeSummary = document.createElement("p");
+  const replyLabel = document.createElement("label");
+  const replyInput = document.createElement("textarea");
+  const actions = document.createElement("div");
+
+  reviewerComment.classList.add("patch-update-reviewer-comment");
+  finding.className = "patch-update-inline-finding";
+  finding.dataset.itemId = item.id;
+  heading.textContent = "Codex analysis";
+  recommendation.className = "patch-update-inline-recommendation";
+  recommendation.textContent = getRecommendationLabel(item);
+  header.append(createCommentAuthor(item), heading, recommendation);
+  assessment.className = "patch-update-inline-assessment";
+  assessment.textContent = item.assessment || "Codex has not completed an assessment for this comment yet.";
+  rationale.className = "patch-update-inline-rationale";
+  rationale.textContent = item.rationale ? `Reason: ${item.rationale}` : "";
+  validation.className = "patch-update-inline-validation";
+  validation.textContent = item.validation ? `Checks: ${item.validation}` : "";
+  changeSummary.className = "patch-update-inline-change-summary";
+  changeSummary.textContent = getChangeSummary(item);
+  replyLabel.className = "patch-update-inline-reply-label";
+  replyLabel.append(item.type === "inline" ? "Suggested inline reply" : "Suggested overall reply");
+  replyInput.className = "patch-update-inline-reply";
+  replyInput.rows = 4;
+  replyInput.value = item.suggestedReply || "";
+  replyLabel.append(replyInput);
+  actions.className = "patch-update-inline-actions";
+  actions.append(
+    createInlineAction("apply", "Make Change"),
+    createInlineAction("keep", "Amend Change"),
+    createInlineAction("revert", "Revert Change"),
+    ...(session?.mode === "verify" ? [] : [createInlineAction("comment", "Comment")]),
+    createInlineAction("handled", "Mark Done"),
+    createInlineAction("skip", "Skip"),
+  );
+  finding.append(header, assessment);
+  finding.append(rationale, validation);
+  finding.append(changeSummary);
+  if (session?.mode !== "verify") finding.append(replyLabel);
+  finding.append(actions);
+  reviewerComment.parentElement?.append(finding);
+  updateInlineFindingActions(item);
+  return finding;
+}
+
+function appendUnanchoredFinding(item) {
+  const finding = document.createElement("article");
+  const header = document.createElement("header");
+  const heading = document.createElement("h3");
+  const location = document.createElement("p");
+  const reviewerFeedback = document.createElement("p");
+  const assessment = document.createElement("p");
+  const rationale = document.createElement("p");
+  const validation = document.createElement("p");
+  const changeSummary = document.createElement("p");
+  const replyLabel = document.createElement("label");
+  const replyInput = document.createElement("textarea");
+  const replyNote = document.createElement("p");
+  const actions = document.createElement("div");
+
+  finding.className = "patch-update-unanchored-finding patch-update-inline-finding";
+  finding.dataset.itemId = item.id;
+  heading.textContent = session?.mode === "freeform" ? "Your update" : session?.mode === "verify" ? "Verify finding" : item.type === "inline"
+    ? "Inline comment location was not found"
+    : "Reviewer feedback";
+  location.textContent = item.filePath
+    ? `${item.filePath}${item.lineNumber ? `:${item.lineNumber}` : ""}`
+    : "This comment is not attached to a source line.";
+  reviewerFeedback.className = "patch-update-unanchored-feedback";
+  reviewerFeedback.textContent = item.content || "No prose feedback was supplied.";
+  assessment.className = "patch-update-inline-assessment";
+  assessment.textContent = item.assessment || "Codex has not completed an assessment for this comment yet.";
+  rationale.className = "patch-update-inline-rationale";
+  rationale.textContent = item.rationale ? `Reason: ${item.rationale}` : "";
+  validation.className = "patch-update-inline-validation";
+  validation.textContent = item.validation ? `Checks: ${item.validation}` : "";
+  changeSummary.className = "patch-update-inline-change-summary";
+  changeSummary.textContent = getChangeSummary(item);
+  replyLabel.className = "patch-update-inline-reply-label";
+  replyLabel.append(item.type === "inline" ? "Suggested inline reply" : "Suggested update reply");
+  replyInput.className = "patch-update-inline-reply";
+  replyInput.rows = 4;
+  replyInput.value = item.suggestedReply || "";
+  replyLabel.append(replyInput);
+  replyNote.className = "patch-update-unanchored-reply-note";
+  replyNote.hidden = item.type === "inline" && Boolean(item.parentCommentPHID);
+  replyNote.textContent = "This revision-level feedback has no inline thread. Include this response in the patch update summary, then mark the feedback handled.";
+  actions.className = "patch-update-inline-actions";
+  actions.append(
+    createInlineAction("apply", "Make Change"),
+    createInlineAction("keep", "Amend Change"),
+    createInlineAction("revert", "Revert Change"),
+    ...(session?.mode === "verify" ? [] : [createInlineAction("comment", "Comment")]),
+    createInlineAction("handled", "Mark Done"),
+    createInlineAction("skip", "Skip"),
+  );
+  header.append(createCommentAuthor(item), heading, location);
+  finding.append(header, reviewerFeedback, assessment);
+  finding.append(rationale, validation);
+  finding.append(changeSummary);
+  if (session?.mode !== "verify") finding.append(replyLabel, replyNote);
+  finding.append(actions);
+  patchDiffContent.prepend(finding);
+  updateInlineFindingActions(item);
+  return finding;
+}
+
+function appendWorkingTreeCandidate(item) {
+  const finding = document.createElement("article");
+  const heading = document.createElement("h3");
+  const assessment = document.createElement("p");
+  const summary = document.createElement("p");
+  const actions = document.createElement("div");
+
+  finding.className = "patch-update-inline-finding patch-update-working-tree-candidate";
+  finding.dataset.itemId = item.id;
+  heading.textContent = "Codex source update";
+  assessment.className = "patch-update-inline-assessment";
+  assessment.textContent = item.assessment || "Codex prepared this source update for the reviewer comment.";
+  summary.className = "patch-update-inline-change-summary";
+  summary.textContent = getChangeSummary(item);
+  actions.className = "patch-update-inline-actions";
+  actions.append(
+    createInlineAction("keep", "Amend Change"),
+    createInlineAction("revert", "Revert Change"),
+  );
+  finding.append(createCommentAuthor(item), heading, assessment, summary, actions);
+  patchDiffContent.append(finding);
+  updateInlineFindingActions(item);
+  return finding;
+}
+
+function appendWorkingTreeDiff(item) {
+  const { currentDiff, hasWorkingDiff, shouldLoadWorkingTreeDiff } = getWorkingTreeDiffState(item);
+  const section = document.createElement("section");
+  const header = document.createElement("header");
+  const heading = document.createElement("h3");
+  const content = document.createElement("div");
+
+  section.className = "patch-update-working-diff";
+  heading.textContent = "Working tree changes";
+  content.className = "patch-update-working-diff-content";
+  header.append(heading);
+  if (hasWorkingDiff && currentDiff?.html) {
+    content.innerHTML = currentDiff.html;
+  } else if (hasWorkingDiff) {
+    const rawDiff = document.createElement("pre");
+
+    rawDiff.className = "patch-update-proposed-diff-raw";
+    rawDiff.textContent = currentDiff.text;
+    content.append(rawDiff);
+  } else {
+    const notice = document.createElement("p");
+
+    notice.className = currentDiff?.error
+      ? "patch-update-diff-notice error"
+      : "patch-update-diff-notice";
+    notice.textContent = currentDiff?.error
+      ? `Could not load the actual uncommitted diff: ${currentDiff.error}`
+      : currentDiff?.loading || shouldLoadWorkingTreeDiff
+        ? "Loading the actual uncommitted diff from the current checkout..."
+        : item?.changeReverted
+          ? "The candidate was reverted, so no working-tree diff remains for this comment."
+          : "There are no uncommitted changes in the current checkout.";
+    content.append(notice);
+  }
+  section.append(header, content);
+  patchDiffContent.append(section);
+}
+
+function setPatchDiff(item) {
+  if (!patchDiff || !patchDiffContent) {
+    return;
+  }
+
+  const key = getPatchDiffKey();
+  const currentDiff = patchDiffState.key === key ? patchDiffState : null;
+  const hasPatchDiff = Boolean(currentDiff?.html || currentDiff?.text);
+  const renderKey = [key, item?.id || "no-comment", currentDiff?.loading || false,
+    currentDiff?.error || "", getWorkingTreeDiffKey(item), item?.changeApplied || false,
+    item?.changesAmended || false, item?.changeReverted || false, item?.state || ""].join(":");
+
+  if (renderedPatchDiffKey === renderKey) {
+    updateInlineFindingActions(item);
+    return;
+  }
+
+  renderedPatchDiffKey = renderKey;
+  patchDiffContent.replaceChildren();
+  const showWorkingTreeCandidate = Boolean(
+    item && !item.changesAmended && (item.changeApplied || item.state === "applying") && !item.changeReverted,
+  );
+  patchDiffContent.classList.toggle("showing-working-tree", showWorkingTreeCandidate);
+
+  if (showWorkingTreeCandidate) {
+    appendWorkingTreeCandidate(item);
+    appendWorkingTreeDiff(item);
+    return;
+  }
+
+  if (hasPatchDiff && currentDiff?.html) {
+    patchDiffContent.innerHTML = currentDiff.html;
+  } else if (hasPatchDiff) {
+    const raw = document.createElement("pre");
+
+    raw.className = "patch-update-proposed-diff-raw";
+    raw.textContent = currentDiff.text;
+    patchDiffContent.append(raw);
+  } else if (item?.contextDiffHtml) {
+    patchDiffContent.innerHTML = item.contextDiffHtml;
+  } else {
+    const notice = document.createElement("p");
+
+    notice.className = currentDiff?.error
+      ? "patch-update-diff-notice error"
+      : "patch-update-diff-notice";
+    notice.textContent = currentDiff?.error
+      ? `Could not load the patch diff: ${currentDiff.error}`
+      : "Loading the current patch diff...";
+    patchDiffContent.append(notice);
+  }
+
+  if (item) {
+    const anchor = ["inline", "finding"].includes(item.type) ? findReviewLine(patchDiffContent, item) : null;
+
+    if (anchor) {
+      anchor.classList.add("patch-update-context-line");
+      appendUpdateFinding(anchor, item);
+    } else {
+      appendUnanchoredFinding(item);
+    }
+  }
+
+  if (!hasPatchDiff && !currentDiff?.loading && !currentDiff?.error) {
+    loadPatchDiff();
+  }
 }
 
 function resetPatchUpdateDialog(patch) {
+  viewGeneration++;
   session = undefined;
+  renderedChat = "";
+  chat?.replaceChildren();
+  setButton(rollback, { hidden: true });
   pendingAction = "";
   outputVisible = false;
   activityFilter = "notes";
@@ -682,6 +939,7 @@ function resetPatchUpdateDialog(patch) {
   appliedSnapshotKey = "";
   patchContextExpanded = false;
   patchContextKey = "";
+  cancelWorkingTreeDiffRequest();
   workingTreeDiff = {
     error: "",
     html: "",
@@ -691,9 +949,20 @@ function resetPatchUpdateDialog(patch) {
   };
   workingTreeDiffRequest = "";
   activeWorkingTreeDiffItemKey = "";
+  patchDiffState = {
+    error: "",
+    html: "",
+    key: "",
+    loading: false,
+    text: "",
+  };
+  patchDiffRequest = "";
+  renderedPatchDiffKey = "";
+  scrollToAttention("", null);
   expandedActivityCommandIds.clear();
   window.clearTimeout(pollTimer);
-  title.textContent = `${patch.id} update`;
+  title.textContent = `${patch.id} Review Update`;
+  setPatchLinks(patch.id, patch.bugId || patch.title?.match(/\bBug\s+(\d+)/i)?.[1] || "");
   status.classList.remove("error");
   status.textContent = "Preparing update...";
   if (activityProgress) {
@@ -716,84 +985,38 @@ function resetPatchUpdateDialog(patch) {
   }
   renderActivityFilter();
   renderActivity([]);
-  setComment(null);
-
-  if (commentAuthor) {
-    commentAuthor.textContent = "";
-  }
-  if (commentKind) {
-    commentKind.textContent = "";
-  }
-  if (commentLink) {
-    commentLink.hidden = true;
-    commentLink.href = "";
-  }
-  if (commentLocation) {
-    commentLocation.hidden = true;
-    commentLocation.textContent = "";
-  }
-  if (feedbackHeading) {
-    feedbackHeading.hidden = true;
-  }
-  if (commentContent) {
-    commentContent.textContent = "";
-  }
-  if (suggestion) {
-    suggestion.hidden = true;
-  }
-  if (codeSuggestion) {
-    codeSuggestion.textContent = "";
-  }
-  setCommentContext(null);
-  if (analysis) {
-    analysis.hidden = true;
-  }
-  if (recommendation) {
-    recommendation.textContent = "";
-  }
-  if (assessment) {
-    assessment.textContent = "";
-  }
-  if (rationale) {
-    rationale.hidden = true;
-  }
-  if (rationaleText) {
-    rationaleText.textContent = "";
-  }
-  if (validation) {
-    validation.hidden = true;
-  }
-  if (validationText) {
-    validationText.textContent = "";
-  }
-  if (changePlan) {
-    changePlan.hidden = true;
-  }
-  if (changeSummary) {
-    changeSummary.textContent = "";
-  }
-  if (proposedDiff) {
-    proposedDiff.hidden = true;
-  }
-  if (proposedDiffContent) {
-    proposedDiffContent.replaceChildren();
-  }
-  if (reply) {
-    reply.value = "";
-  }
-  if (replyLabel) {
-    replyLabel.hidden = true;
-  }
-  setButton(keep, { hidden: true, text: "Keep and Amend" });
-  setButton(revert, { hidden: true, text: "Revert Change" });
-  setButton(post, { hidden: true, text: "Save Reply Draft" });
-  setButton(handled, { hidden: true, text: "Mark Handled" });
+  patchDiffContent?.replaceChildren();
   setButton(amend, { hidden: true, text: "Amend Patch" });
   setButton(submit, { hidden: true, text: "Submit Patch" });
 }
 
 function renderSession(currentSession) {
   session = currentSession;
+  taskView.update(session, isBusy(session) || Boolean(pendingAction));
+  dialog.classList.toggle("patch-verify", session.mode === "verify");
+  const freeform = session.mode === "freeform";
+  dialog.classList.toggle("patch-freeform", freeform);
+  chat.hidden = !freeform;
+  if (freeform) {
+    const key = JSON.stringify(session.chat || []);
+    if (key !== renderedChat) {
+      const follow = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 60;
+      renderedChat = key;
+      replaceChangedChildren(chat, ...(session.chat || []).map(message => {
+        const entry = document.createElement("section");
+        const heading = document.createElement("strong");
+        const text = document.createElement("p");
+        heading.textContent = message.role === "user" ? "You" : "Codex";
+        text.textContent = message.text;
+        entry.append(heading, text);
+        return entry;
+      }));
+      if (follow) window.requestAnimationFrame(() => {
+        if (!hasSelectedText(chat)) chat.scrollTop = chat.scrollHeight;
+      });
+    }
+  }
+  runStatus.update(session, isBusy() || Boolean(pendingAction));
   const busy = isBusy();
   const actionPending = Boolean(pendingAction);
   const item = getCurrentItem();
@@ -813,90 +1036,96 @@ function renderSession(currentSession) {
     }
   }
 
-  title.textContent = `${session.revision} update`;
-  status.textContent = session.message || session.error || "";
+  title.textContent = `${session.revision} ${session.mode === "verify" ? "Verify" : session.mode === "freeform" ? "Update" : "Review Update"}`;
+  setPatchLinks(session.revision, session.bugId || undefined);
+  setLiveText(status, session.message || session.error || "");
   status.classList.toggle("error", session.status === "error" || Boolean(item?.error));
-  output.textContent = visibleOutput;
+  setLiveText(output, visibleOutput);
   output.hidden = !outputVisible || !hasOutput;
-  outputToggle.hidden = !hasOutput;
+  outputToggle.hidden = freeform || !hasOutput;
   outputToggle.textContent = outputVisible ? "Back to Review" : "Output";
   dialog.classList.toggle("output-expanded", outputVisible && hasOutput);
   renderActivity(session.activity);
   setPatchContext(session.patchContext);
-  setComment(busy ? null : item);
+  setPatchDiff(freeform && !item?.changeApplied ? null : item);
   const canGuideCurrentComment = session.aiEnabled && !busy &&
-    session.status !== "error" && Boolean(item) && !item.changeApplied;
+    session.status !== "error" && Boolean(item);
+  const canAskAboutUpdate = session.aiEnabled && !busy && ["review", "complete"].includes(session.status);
+  if (results) {
+    results.hidden = freeform || Boolean(item) || !session.aiEnabled;
+    replaceChangedChildren(resultItems, ...(session.items || []).map((entry) => {
+      const detail = document.createElement("details");
+      detail.open = true;
+      const heading = document.createElement("summary");
+      heading.textContent = `${entry.filePath || entry.id}: ${entry.state}`;
+      const evidence = document.createElement("p");
+      evidence.style.whiteSpace = "pre-wrap";
+      evidence.textContent = [
+        `Change: ${entry.appliedSummary || "No source change recorded."}`,
+        `Validation: ${entry.validation || "No validation recorded."}`,
+      ].join("\n\n");
+      detail.append(heading, evidence);
+      return detail;
+    }));
+    setLiveText(followUpAnswer, session.followUpAnswer || "Ask Codex below to verify the final patch or explain a result.");
+  }
+  setButton(retry, { hidden: !session.canRetryAssessment, disabled: actionPending || busy });
   const canSteer = session.aiEnabled && (
+    session.canRetryAssessment ||
     (session.status === "reviewing" && Boolean(session.codexTurnId)) ||
-    canGuideCurrentComment
+    canAskAboutUpdate
   );
 
   if (steer) {
-    steer.hidden = !canSteer;
+    steer.hidden = freeform ? false : !canSteer;
   }
   if (steerLabel) {
-    steerLabel.textContent = canGuideCurrentComment
-      ? "Guide Codex on this comment"
-      : "Guide Codex";
+    steerLabel.textContent = session.canRetryAssessment ? "Guide Codex and retry the assessment" : freeform ? "Ask Codex for an update" : canGuideCurrentComment
+      ? item.changeApplied && !item.changesAmended
+        ? "Guide Codex on this change"
+        : session.mode === "verify" ? "Guide Codex on this finding" : "Guide Codex on this comment"
+      : canAskAboutUpdate ? `Ask Codex about ${session.mode === "verify" ? "Verify" : session.mode === "freeform" ? "Update" : "Review Update"}` : "Guide Codex";
   }
   if (steerInput && document.activeElement !== steerInput) {
-    steerInput.placeholder = canGuideCurrentComment
-      ? "Ask Codex to reconsider, explain, or revise this assessment."
-      : "Add context, question an assumption, or change direction.";
+    steerInput.placeholder = freeform ? "Ask a question or describe the changes you want." : canGuideCurrentComment
+      ? item.changeApplied && !item.changesAmended
+        ? "Ask Codex to revise the working-tree change."
+        : "Ask Codex to reconsider, explain, or revise this assessment."
+      : canAskAboutUpdate ? "Ask a question, request checks, or tell Codex what to change." : "Add context, question an assumption, or change direction.";
   }
   if (steerSubmit) {
-    steerSubmit.disabled = actionPending || !steerInput?.value.trim();
-    steerSubmit.textContent = pendingAction === "steer" || pendingAction === "feedback"
+    steerSubmit.disabled = actionPending || (freeform && busy) || !steerInput?.value.trim();
+    steerSubmit.textContent = pendingAction === "steer" || pendingAction === "feedback" || pendingAction === "revise"
       ? "Sending..."
       : "Send";
   }
-  const replyValue = reply?.value || "";
-
-  const canUseAi = session.aiEnabled && !busy && session.status !== "error";
-  const hasPreparedChange = Boolean(item?.changeApplied && !item?.changeReverted);
-  setButton(keep, {
-    hidden: !hasPreparedChange || item?.changeAccepted || !canUseAi,
-    disabled: actionPending,
-    text: pendingAction === "keep" ? "Amending..." : "Keep and Amend",
-  });
-  setButton(revert, {
-    hidden: !hasPreparedChange || !canUseAi,
-    disabled: actionPending,
-    text: pendingAction === "revert" ? "Reverting..." : "Revert Change",
-  });
-  setButton(post, {
-    hidden: !item?.assessment || !canUseAi || item.state === "handled",
-    disabled: actionPending || (item?.changeApplied && !item?.changeAccepted) || !replyValue.trim() || (
-      item?.draftReply === replyValue && item?.draftSaved
-    ),
-    text: pendingAction === "comment"
-      ? "Saving Reply..."
-      : item?.draftReply === replyValue && item?.draftSaved
-      ? "Reply Draft Saved"
-      : "Save Reply Draft",
-  });
-  setButton(handled, {
-    hidden: !item || !canUseAi || busy,
-    disabled: actionPending || (item?.changeApplied && !item?.changeAccepted),
-    text: pendingAction === "handled" ? "Marking..." : "Mark Handled",
-  });
+  updateInlineFindingActions(item);
   setButton(amend, {
-    hidden: !session.aiEnabled || !needsAmend,
+    hidden: true,
     disabled: actionPending || busy || !allHandled,
     text: pendingAction === "amend" || session.status === "amending"
       ? "Amending..."
       : "Amend Patch",
   });
   setButton(submit, {
-    hidden: !session.aiEnabled || busy || session.status === "error" || (!allHandled && session.items?.length),
-    disabled: actionPending || !session.currentHash || needsAmend,
-    text: needsAmend ? "Amend changes before submitting" : "Submit Patch",
+    hidden: !freeform && (!session.aiEnabled || busy || session.status === "error" || (!allHandled && session.items?.length)),
+    disabled: actionPending || busy || !session.currentHash || (!freeform && needsAmend),
+    text: !freeform && needsAmend ? "Amend changes before submitting" : "Submit Patch",
   });
+  setButton(rollback, { hidden: !freeform, disabled: busy || actionPending || !session.canRollback,
+    text: pendingAction === "rollback" ? "Rolling Back..." : "Roll Back" });
+  const finding = getInlineFinding(item);
+  const attention = item ? finding?.querySelector(".patch-update-inline-actions") : submit;
+  scrollToAttention(
+    `${session.id}:${item?.id || "submit"}:${item?.state}:${item?.changeApplied}:${item?.changesAmended}:${item?.assessment}:${item?.error || session.error || ""}`,
+    attention,
+    !busy && !actionPending && !outputVisible && dialog.open,
+  );
 }
 
 function schedulePoll() {
   window.clearTimeout(pollTimer);
-  pollTimer = window.setTimeout(loadSession, 500);
+  if (dialog.open) pollTimer = window.setTimeout(loadSession, 500);
 }
 
 async function loadSession() {
@@ -904,6 +1133,7 @@ async function loadSession() {
     return;
   }
 
+  const requestedId = session.id;
   try {
     const response = await fetch(
       `/api/patch-update/${encodeURIComponent(session.id)}?token=${encodeURIComponent(INTERACTIVE.token)}`,
@@ -915,6 +1145,7 @@ async function loadSession() {
       throw new Error(result.error || "Could not load patch update status.");
     }
 
+    if (session?.id !== requestedId) { taskView.background(result); return result; }
     renderSession(result);
 
     if (isBusy(result)) {
@@ -923,6 +1154,8 @@ async function loadSession() {
 
     return result;
   } catch (error) {
+    if (session?.id !== requestedId) return null;
+    runStatus.disconnected();
     status.classList.add("error");
     status.textContent = error?.message || String(error);
     return null;
@@ -934,6 +1167,7 @@ async function runAction(action, body = {}) {
     return null;
   }
 
+  const requestedId = session.id;
   pendingAction = action;
   renderSession(session);
 
@@ -952,6 +1186,7 @@ async function runAction(action, body = {}) {
       throw new Error(result.error || `Could not ${action} this comment.`);
     }
 
+    if (session?.id !== requestedId) { taskView.background(result); return null; }
     pendingAction = "";
     renderSession(result);
 
@@ -960,6 +1195,7 @@ async function runAction(action, body = {}) {
     }
     return result;
   } catch (error) {
+    if (session?.id !== requestedId) return null;
     pendingAction = "";
     renderSession(session);
     status.classList.add("error");
@@ -968,35 +1204,47 @@ async function runAction(action, body = {}) {
   }
 }
 
-export async function openPatchUpdateDialog({ patch, graphIndex }) {
+
+function restorePatchUpdateTask(value) {
+  if (session?.id !== value.id) resetPatchUpdateDialog({ id: value.revision });
+  renderSession(value);
+  title.textContent = `${value.revision} ${value.mode === "verify" ? "Verify" : value.mode === "freeform" ? "Update" : "Review Update"}`;
+  setPageScrollLocked(true);
+  if (!dialog.open) dialog.showModal();
+  schedulePoll();
+}
+export async function openPatchUpdateDialog({ patch, graphIndex, mode = "update" }) {
   if (!dialog || !patch?.id) {
     return;
   }
 
+  void enableTaskNotifications();
+  if (dialog.open || session) taskView.minimize();
   resetPatchUpdateDialog(patch);
+  const generation = viewGeneration;
   setPageScrollLocked(true);
   dialog.showModal();
+  title.textContent = `${patch.id} ${mode === "verify" ? "Verify" : mode === "freeform" ? "Update" : "Review Update"}`;
+  status.textContent = mode === "verify" ? "Preparing verification..." : "Preparing review update...";
 
   try {
-    const response = await fetch("/api/patch-update", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const result = await startOrResumePatchSession("/api/patch-update", {
         token: INTERACTIVE.token,
         graphIndex,
         revision: patch.id,
+        mode,
         snapshotLimit: getLoadedGitCommitLimit(graphStates[graphIndex]),
-      }),
     });
-    const result = await response.json();
-
-    if (!response.ok || !result.ok) {
-      throw new Error(result.error || "Could not start patch update.");
+    if (generation !== viewGeneration) { if (result) taskView.background(result); return; }
+    if (!result) {
+      dialog.close();
+      return;
     }
 
     renderSession(result);
     schedulePoll();
   } catch (error) {
+    if (generation !== viewGeneration) return;
     status.classList.add("error");
     status.textContent = error?.message || String(error);
   }
@@ -1009,10 +1257,13 @@ export function initializePatchUpdateDialog() {
 
   dialog.querySelector(".patch-update-close").addEventListener("click", () => {
     window.clearTimeout(pollTimer);
-    dialog.close();
+    taskView.minimize();
   });
   dialog.addEventListener("close", () => {
-    setPageScrollLocked(false);
+    if (!dialog.open) setPageScrollLocked(false);
+  });
+  retry?.addEventListener("click", () => {
+    void runAction("steer", { instruction: "Return the complete assessment for every supplied Comment ID. Reuse the saved research." });
   });
   outputToggle?.addEventListener("click", () => {
     outputVisible = !outputVisible;
@@ -1029,56 +1280,59 @@ export function initializePatchUpdateDialog() {
       setPatchContextExpanded(!patchContextExpanded);
     }
   });
-  steer?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const value = steerInput?.value.trim();
+  bindAiFeedbackForm(steer, {
+    onInput: () => { if (session) renderSession(session); },
+    onSend: async value => {
+      const item = getCurrentItem();
+      const isCommentFeedback = session?.mode !== "freeform" && session?.aiEnabled && !isBusy() &&
+        session.status !== "error" && Boolean(item);
+      const action = isCommentFeedback && item.changeApplied && !item.changesAmended
+        ? "revise"
+        : isCommentFeedback
+          ? "feedback"
+          : "steer";
+      const result = await runAction(
+        action,
+        isCommentFeedback
+          ? { itemId: item.id, instruction: value }
+          : { instruction: value },
+      );
 
-    if (!value) {
+      return Boolean(result);
+    },
+  });
+  patchDiffContent?.addEventListener("input", (event) => {
+    const target = event.target;
+
+    if (!(target instanceof HTMLTextAreaElement) || !target.classList.contains("patch-update-inline-reply")) {
       return;
     }
 
     const item = getCurrentItem();
-    const isCommentFeedback = session?.aiEnabled && !isBusy() &&
-      session.status !== "error" && Boolean(item);
-    const result = await runAction(
-      isCommentFeedback ? "feedback" : "steer",
-      isCommentFeedback
-        ? { itemId: item.id, instruction: value }
-        : { instruction: value },
-    );
 
-    if (result) {
-      steerInput.value = "";
-      renderSession(session);
+    if (!item || target.closest(".patch-update-inline-finding")?.dataset.itemId !== item.id) {
+      return;
     }
+
+    item.suggestedReply = target.value;
+    updateInlineFindingActions(item);
   });
-  steerInput?.addEventListener("input", () => renderSession(session));
-  keep?.addEventListener("click", () => {
+  patchDiffContent?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-update-inline-action]");
     const item = getCurrentItem();
 
-    if (item) {
-      runAction("keep", { itemId: item.id });
+    if (!button || !item || button.closest(".patch-update-inline-finding")?.dataset.itemId !== item.id) {
+      return;
     }
-  });
-  revert?.addEventListener("click", () => {
-    const item = getCurrentItem();
 
-    if (item) {
-      runAction("revert", { itemId: item.id });
-    }
-  });
-  post?.addEventListener("click", () => {
-    const item = getCurrentItem();
+    const action = button.dataset.updateInlineAction;
+    const replyInput = button.closest(".patch-update-inline-finding")
+      ?.querySelector(".patch-update-inline-reply");
 
-    if (item) {
-      runAction("comment", { itemId: item.id, message: reply?.value || "" });
-    }
-  });
-  handled?.addEventListener("click", () => {
-    const item = getCurrentItem();
-
-    if (item) {
-      runAction("handled", { itemId: item.id });
+    if (action === "comment") {
+      void runAction(action, { itemId: item.id, message: replyInput?.value || "" });
+    } else {
+      void runAction(action, { itemId: item.id });
     }
   });
   amend?.addEventListener("click", () => {
@@ -1086,25 +1340,35 @@ export function initializePatchUpdateDialog() {
       snapshotLimit: getLoadedGitCommitLimit(graphStates[session.graphIndex]),
     });
   });
-  reply?.addEventListener("input", () => {
-    const item = getCurrentItem();
-
-    if (item) {
-      item.suggestedReply = reply.value;
+  rollback?.addEventListener("click", async () => {
+    if (await showSystemConfirmation({ title: "Roll back this Update?",
+      message: "Restore the patch contents from when this Update session started, including amended changes. This changes only the local patch.",
+      confirmLabel: "Roll Back", danger: true })) {
+      await runAction("rollback");
     }
-
-    renderSession(session);
   });
-  submit?.addEventListener("click", () => {
+  submit?.addEventListener("click", async () => {
     if (!session?.currentHash) {
       return;
     }
 
+    if (session.mode === "freeform") {
+      const candidate = session.items.find(item => item.changeApplied && !item.changesAmended);
+      if (candidate) {
+        if (!await showSystemConfirmation({ title: "Amend before submitting?",
+          message: "Amend the displayed working-tree changes into this patch, then open Submit.",
+          confirmLabel: "Amend and Continue" })) return;
+        if (!await runAction("keep", { itemId: candidate.id })) return;
+      }
+    }
     const button = document.createElement("button");
 
     button.dataset.graphIndex = String(session.graphIndex);
     button.dataset.hash = session.currentHash;
     button.dataset.label = GRAPHS[session.graphIndex]?.label || "comm";
-    openSubmitDialog(button, { patchUpdateSessionId: session.id });
+    const id = session.id;
+    openSubmitDialog(button, { patchUpdateSessionId: id,
+      onStarted: () => { if (session?.id === id) taskView.minimize(); },
+    });
   });
 }

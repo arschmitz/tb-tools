@@ -3,11 +3,24 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import config from "../lib/config.mjs";
 import {
   formatGraphPatchUpdateMemory,
+  compactGraphPatchUpdateHistory,
   getGraphPatchUpdateMemoryPath,
   saveGraphPatchUpdateMemory,
 } from "../commands/graph/patch-update-memory.mjs";
+
+test("default patch history writes to the configured standalone store", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-patch-store-"));
+  const original = config.ai;
+  config.ai = { ...original, knowledge: { directory } };
+  try {
+    const file = await saveGraphPatchUpdateMemory({ event: "reviewed", session: makeSession() });
+    assert.equal(file, path.join(directory, "private/patch-history/tb-tools-patch-d123456.md"));
+    assert.match(await readFile(file, "utf8"), /Please use the shared helper/);
+  } finally { config.ai = original; await rm(directory, { recursive: true, force: true }); }
+});
 
 function makeSession() {
   return {
@@ -35,6 +48,47 @@ function makeSession() {
     status: "review",
   };
 }
+
+test("history compaction keeps distinct evidence and reversals in event order", () => {
+  const session = makeSession();
+  session.items[0].validation = "Focused test failed: expected 2, got 1.";
+  const record = (event) => formatGraphPatchUpdateMemory({
+    event, session, now: new Date("2026-09-03T12:00:00.000Z"),
+  });
+  const first = record("First assessment");
+  const duplicate = record("Repeated assessment");
+  session.currentHash = "new-commit";
+  session.items[0].validation = "Focused test passed.";
+  session.items[0].state = "ready";
+  const changed = record("Retested");
+  session.items[0].validation = "Focused test failed: expected 2, got 1.";
+  const reversal = record("Failure returned");
+  delete session.items[0].draftReply;
+  const cleared = record("Reply cleared");
+  const result = compactGraphPatchUpdateHistory(first + duplicate + changed + reversal + cleared);
+  assert.equal(result.split("> Please use the shared helper.").length - 1, 1);
+  assert.equal(result.split("> Focused test failed: expected 2, got 1.").length - 1, 2);
+  assert.match(result, /Focused test passed/);
+  assert.match(result, /new-commit/);
+  assert.match(result, /State: ready/);
+  assert.match(result, /\*\*Draft reply\*\*\n\n> \(cleared in this record\)/);
+  for (const event of ["First assessment", "Repeated assessment", "Retested", "Failure returned", "Reply cleared"]) {
+    assert.ok(result.includes(event));
+  }
+  const values = [...(first + changed + reversal).matchAll(/^> .+$/gm)].map(([value]) => value);
+  assert.ok(values.every((value) => result.includes(value)));
+});
+
+test("history compaction preserves unknown text and separate comment identities", () => {
+  const session = makeSession();
+  session.items.push({ ...session.items[0], url: "https://example.com/other-comment" });
+  const history = formatGraphPatchUpdateMemory({ event: "Review", session });
+  const context = "Project summary\n\n---\n\n" + history +
+    "\n\n---\n\nRelevant index\n### Unrelated section\nUnique older evidence";
+  assert.equal(compactGraphPatchUpdateHistory(context), context);
+  const unknown = history + "### Unknown record\n- State: ready\n\n**Custom field**\n\nUnquoted text\n";
+  assert.equal(compactGraphPatchUpdateHistory(unknown), unknown);
+});
 
 test("patch update memory records concise append-only review history", async (t) => {
   const memoryDirectory = await mkdtemp(

@@ -8,12 +8,12 @@ export const DEFAULT_CLIENT_DISCONNECT_GRACE_MS = 4000;
 export const DEFAULT_BROWSER_SHUTDOWN_GRACE_MS = 750;
 export const DEFAULT_SUBMIT_OUTPUT_LIMIT = 160000;
 export const DEFAULT_ORIGIN_MAIN_STATUS_CACHE_MS = 15 * 1000;
-export const DEFAULT_DASHBOARD_CACHE_MS = 5 * 60 * 1000;
+export const DEFAULT_DASHBOARD_CACHE_MS = 15 * 60 * 1000;
 export const DEFAULT_META_BOARD_CACHE_MS = 2 * 60 * 1000;
 // Integration data is loaded from a user-selected commit and is shared by all
 // console tabs through the server. Keep it warm long enough that tab changes
 // cannot turn into repeated remote API traffic.
-export const DEFAULT_GRAPH_INTEGRATION_CACHE_MS = 5 * 60 * 1000;
+export const DEFAULT_GRAPH_INTEGRATION_CACHE_MS = 15 * 60 * 1000;
 export const DEFAULT_GRAPH_REVIEW_CACHE_MS = 2 * 60 * 1000;
 export const DEFAULT_CONSOLE_PORT = 4310;
 export const CHECKIN_NEEDED_KEYWORD = "checkin-needed-tb";
@@ -23,7 +23,7 @@ export const GRAPH_UPDATE_MODES = new Set([
   GRAPH_UPDATE_MODE_UPDATE,
   GRAPH_UPDATE_MODE_REBASE,
 ]);
-export const GRAPH_UPDATE_DIRTY_ACTIONS = new Set(["amend", "shelf"]);
+export const GRAPH_UPDATE_DIRTY_ACTIONS = new Set(["amend", "discard", "shelf"]);
 export const GRAPH_SHELF_MESSAGE_PREFIX = "tb-tools graph update";
 export const GRAPH_MACH_ACTION_BUILD = "build";
 export const GRAPH_MACH_ACTION_RUN = "run";
@@ -35,8 +35,17 @@ export const GRAPH_CLIENT_STYLESHEETS = [
   { output: "graph-client/style.css", source: "style.css" },
 ];
 export const GRAPH_CLIENT_SCRIPTS = [
+  { output: "graph-client/live-text.js", source: "live-text.js" },
+  { output: "graph-client/settings.js", source: "settings.js" },
+  { output: "graph-client/review-handled.js", source: "review-handled.js" },
+  { output: "graph-client/ai-dialog-controls.js", source: "ai-dialog-controls.js" },
+  { output: "graph-client/review-attention.js", source: "review-attention.js" },
   { output: "graph-client/config.js", source: "config.js" },
   { output: "graph-client/system-dialog.js", source: "system-dialog.js" },
+  { output: "graph-client/patch-session-resume.js", source: "patch-session-resume.js" },
+  { output: "graph-client/codex-run-status.js", source: "codex-run-status.js" },
+  { output: "graph-client/background-jobs.js", source: "background-jobs.js" },
+  { output: "graph-client/ai-task-tray.js", source: "ai-task-tray.js" },
   { output: "graph-client/commit-model.js", source: "commit-model.js" },
   { output: "graph-client/dom.js", source: "dom.js" },
   { output: "graph-client/pane-resizer.js", source: "pane-resizer.js" },
@@ -53,9 +62,11 @@ export const GRAPH_CLIENT_SCRIPTS = [
   { output: "graph-client/checkout-transfer-dialog.js", source: "checkout-transfer-dialog.js" },
   { output: "graph-client/review-sync-dialog.js", source: "review-sync-dialog.js" },
   { output: "graph-client/view-router.js", source: "view-router.js" },
+  { output: "graph-client/phabricator-cache.js", source: "phabricator-cache.js" },
   { output: "graph-client/patch-update-dialog.js", source: "patch-update-dialog.js" },
   { output: "graph-client/patch-review-dialog.js", source: "patch-review-dialog.js" },
   { output: "graph-client/dashboard.js", source: "dashboard.js" },
+  { output: "graph-client/implement.js", source: "implement.js" },
   { output: "graph-client/meta-board-colors.js", source: "meta-board-colors.js" },
   { output: "graph-client/markdown.js", source: "markdown.js" },
   { output: "graph-client/meta-boards.js", source: "meta-boards.js" },
@@ -79,7 +90,7 @@ export const GRAPH_MACH_TERMINAL_STATUSES = new Set([
 ]);
 export const WORKING_TREE_CHANGES_HASH = "uncommitted-changes";
 export const GRAPH_SUBMIT_OPTIONS = {
-  artifact: true,
+  artifact: false,
   flavor: "all",
   selector: "auto",
 };

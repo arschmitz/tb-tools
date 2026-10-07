@@ -1,3 +1,4 @@
+import { setLiveText, hasSelectedText } from "./live-text.js";
 import {
   INTERACTIVE,
   graphStates,
@@ -28,6 +29,7 @@ import {
   showSystemConfirmation,
   showSystemNotice,
 } from "./system-dialog.js";
+import { openRebaseFailureDialog } from "./rebase-dialog.js";
 
 export function getLoadedGitCommitLimit(state) {
   const loadedGitCommits = state.commits.filter((commit) => !isWorkingTreeCommit(commit)).length;
@@ -134,8 +136,7 @@ export function hasActiveLandSession() {
 }
 
 export function hasActiveCommandSession() {
-  return hasActiveMachSession() ||
-    hasActiveLintSession() ||
+  return hasActiveLintSession() ||
     hasActiveTestSession() ||
     hasActiveNewPatchSession() ||
     hasActivePatchSession() ||
@@ -185,10 +186,10 @@ export function setMachOutputPanel(session = uiState.lastMachSession) {
   }
 
   if (output) {
-    output.textContent = text;
+    setLiveText(output, text);
 
     if (hasOutput && uiState.machOutputVisible) {
-      output.scrollTop = output.scrollHeight;
+      if (!hasSelectedText(output)) output.scrollTop = output.scrollHeight;
     }
   }
 }
@@ -556,20 +557,33 @@ export function getMachSessionStatusText(session) {
   return getMachActionLabel(session.action) + (session.status === "running" ? " running..." : "");
 }
 
-export function renderGraphMachSession(session) {
-  uiState.activeMachSession = session;
-  uiState.lastMachSession = session;
-  setMachCancelButton(session);
-  setMachOutputPanel(session);
-  setUpdateStatus(getMachSessionStatusText(session), {
-    error: session.status === "error",
-    busy: session.status === "running",
-  });
-
-  if (session.status !== "running") {
-    uiState.activeMachSession = null;
-    setMachCancelButton(null);
+function renderMachStatus(session) {
+  let panel = document.querySelector(".build-status");
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.className = "build-status";
+    panel.setAttribute("aria-label", "Build and run status");
+    panel.innerHTML = `<span class="build-status-message" role="status"></span>
+      <button class="build-cancel" type="button">Cancel Build</button>
+      <button class="build-dismiss" type="button" hidden>Dismiss</button>
+      <details><summary>Build output</summary><pre class="build-output"></pre></details>`;
+    document.querySelector(".command-status-bar")?.before(panel);
+    panel.querySelector(".build-cancel").addEventListener("click", () => void cancelGraphMachAction());
+    panel.querySelector(".build-dismiss").addEventListener("click", () => { panel.hidden = true; });
   }
+  panel.hidden = false;
+  panel.querySelector(".build-status-message").textContent = session.message || "";
+  const cancel = panel.querySelector(".build-cancel");
+  cancel.hidden = !session.canCancel;
+  cancel.disabled = false;
+  cancel.textContent = getMachCancelLabel(session);
+  panel.querySelector(".build-dismiss").hidden = session.status === "running";
+  panel.querySelector(".build-output").textContent = session.output || "";
+}
+
+export function renderGraphMachSession(session) {
+  uiState.activeMachSession = session.status === "running" ? session : null;
+  renderMachStatus(session);
 }
 
 export async function pollGraphMachSession() {
@@ -595,16 +609,14 @@ export async function pollGraphMachSession() {
     }
   } catch (error) {
     uiState.activeMachSession = null;
-    setMachCancelButton(null);
-    setMachOutputPanel();
-    setUpdateStatus(error && error.message ? error.message : String(error), { error: true });
+    renderMachStatus({ status: "error", message: error && error.message ? error.message : String(error) });
   }
 }
 
 export async function startGraphMachAction(action) {
-  if (hasActiveCommandSession()) {
+  if (hasActiveMachSession()) {
     await showSystemNotice({
-      title: "Command already active",
+      title: "Build or run already active",
       message: "Wait for the current command to finish or cancel it before starting another one.",
     });
     return;
@@ -615,10 +627,7 @@ export async function startGraphMachAction(action) {
     uiState.machPollTimer = null;
   }
 
-  uiState.lastMachSession = null;
-  uiState.machOutputVisible = false;
-  setMachOutputPanel(null);
-  setUpdateStatus(getMachActionLabel(action) + " starting...", { busy: true });
+  renderMachStatus({ message: getMachActionLabel(action) + " starting...", status: "running" });
 
   try {
     const response = await fetch("/api/mach-action", {
@@ -643,13 +652,7 @@ export async function startGraphMachAction(action) {
     }
   } catch (error) {
     uiState.activeMachSession = null;
-    setMachCancelButton(null);
-    setMachOutputPanel();
-    setUpdateStatus(error && error.message ? error.message : String(error), { error: true });
-  } finally {
-    if (!hasActiveMachSession()) {
-      setUpdateBusy(false);
-    }
+    renderMachStatus({ ...uiState.activeMachSession, status: "error", message: error && error.message ? error.message : String(error) });
   }
 }
 
@@ -659,13 +662,13 @@ export async function cancelGraphMachAction() {
   }
 
   const sessionId = uiState.activeMachSession.id;
-  const cancelButton = document.querySelector(".mach-cancel");
+  const cancelButton = document.querySelector(".build-cancel");
 
   if (cancelButton) {
     cancelButton.disabled = true;
   }
 
-  setUpdateStatus(isMachRunSession(uiState.activeMachSession) ? "Closing run..." : "Canceling build...", { busy: true });
+  renderMachStatus({ ...uiState.activeMachSession, canCancel: false, message: isMachRunSession(uiState.activeMachSession) ? "Closing run..." : "Canceling build..." });
 
   try {
     const response = await fetch("/api/mach-action/" + encodeURIComponent(sessionId) + "/cancel", {
@@ -685,11 +688,7 @@ export async function cancelGraphMachAction() {
       uiState.machPollTimer = window.setTimeout(pollGraphMachSession, 500);
     }
   } catch (error) {
-    setUpdateStatus(error && error.message ? error.message : String(error), { error: true });
-  } finally {
-    if (!hasActiveMachSession()) {
-      setUpdateBusy(false);
-    }
+    renderMachStatus({ ...uiState.activeMachSession, status: "error", message: error && error.message ? error.message : String(error) });
   }
 }
 
@@ -967,7 +966,7 @@ export async function submitTryDialog(event) {
 }
 
 export async function promptForPostUpdateMachAction() {
-  if (hasActiveCommandSession()) {
+  if (hasActiveMachSession() || hasActiveCommandSession()) {
     return;
   }
 
@@ -1057,6 +1056,11 @@ export async function promptForDirtyUpdateAction(dirty) {
         label: "Amend current commit",
         description: "Include changes in the checked-out commit before updating.",
       },
+      {
+        value: "discard",
+        label: "Discard working changes",
+        description: "Hard reset to HEAD and remove untracked files. This cannot be undone.",
+      },
     ],
     cancelLabel: "Cancel update",
   });
@@ -1106,6 +1110,48 @@ export async function unshelfGraphUpdateChanges(shelves) {
   }
 }
 
+export async function readGraphUpdateResponse(response) {
+  if (!response.headers.get("content-type")?.includes("application/x-ndjson")) {
+    return response.json();
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  let result;
+  const readEvent = (line) => {
+    if (!line.trim()) {
+      return;
+    }
+    const event = JSON.parse(line);
+    if (event.type === "output") {
+      setCommandStatusOutputFromResult(event);
+    } else if (event.type === "status") {
+      setUpdateStatus(event.message, { busy: true });
+    } else if (event.type === "result") {
+      result = event;
+    }
+  };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      pending += decoder.decode(value, { stream: !done });
+      const lines = pending.split("\n");
+      pending = lines.pop();
+      lines.forEach(readEvent);
+      if (done) {
+        readEvent(pending);
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (!result) {
+    throw new Error("The connection closed before the update finished.");
+  }
+  return result;
+}
+
 export async function runGraphUpdate(
   mode,
   dirtyAction = "",
@@ -1121,6 +1167,7 @@ export async function runGraphUpdate(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         token: INTERACTIVE.token,
+        stream: true,
         mode,
         dirtyAction,
         scope,
@@ -1128,11 +1175,19 @@ export async function runGraphUpdate(
         snapshotLimits: getSnapshotLimits(),
       }),
     });
-    const result = await response.json();
+    const result = await readGraphUpdateResponse(response);
 
     setCommandStatusOutputFromResult(result);
 
-    if (!response.ok) {
+    if (!response.ok || result.ok === false) {
+      if (result.rebaseConflict) {
+        openRebaseFailureDialog(result.rebaseConflict, {
+          fallbackMessage: result.error || response.statusText,
+        });
+        setUpdateStatus("Rebase paused for conflicts.", { error: true });
+        return;
+      }
+
       if (!dirtyAction && Array.isArray(result.dirty) && result.dirty.length) {
         const nextDirtyAction = await promptForDirtyUpdateAction(result.dirty);
 
@@ -1148,8 +1203,8 @@ export async function runGraphUpdate(
     }
 
     applyGraphSnapshots(result.snapshots);
-    await refreshOriginMainStatus({ force: true });
     setUpdateStatus(result.message || getUpdateActionLabel(mode) + " complete.");
+    void refreshOriginMainStatus({ force: true });
 
     if (Array.isArray(result.shelves) && result.shelves.length) {
       const shouldUnshelf = await showSystemConfirmation({
@@ -1168,9 +1223,7 @@ export async function runGraphUpdate(
   } catch (error) {
     setUpdateStatus(error && error.message ? error.message : String(error), { error: true });
   } finally {
-    if (!hasActiveMachSession()) {
-      setUpdateBusy(false);
-    }
+    setUpdateBusy(false);
   }
 }
 
@@ -1215,6 +1268,9 @@ export function applyGraphSnapshot(index, snapshot, { force = false } = {}) {
 
   if (!selectedCommit) {
     clearDiffSelection(index, "Graph updated. The selected commit is no longer loaded.");
+  } else if (selectedCommit.tryRuns?.some(run => run.monitorId)) {
+    const container = document.getElementById("diff-" + index)?.querySelector(".integration-status");
+    if (container) void loadSelectedCommitIntegrationStatus(index, selectedCommit, container);
   }
 
   return true;
