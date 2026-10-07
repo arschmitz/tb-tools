@@ -41,7 +41,8 @@ test("monitor authenticates, scopes saved jobs, and shows live state without sta
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage(); await page.goto(server.url);
   await page.evaluate(async () => (await import("/assets/graph-client/background-jobs.js")).initializeBackgroundJobs());
-  await page.getByRole("button", { name: "Background jobs", exact: true }).click();
+  await page.evaluate(() => { globalThis.document.querySelector(".graph-options-menu").hidden = false; });
+  await page.getByRole("menuitem", { name: "Background jobs", exact: true }).click();
   await page.getByRole("heading", { name: "Waiting for CI", exact: true }).waitFor();
   await page.evaluate(async () => {
     const { showConnectionLost } = await import("/assets/graph-client/background-jobs.js");
@@ -62,7 +63,7 @@ test("monitor authenticates, scopes saved jobs, and shows live state without sta
   await page.waitForFunction(() => globalThis.document.querySelector('.jobs-summary').textContent.includes('0 waiting'));
   await page.getByRole("button", { name: "Close", exact: true }).click();
   assert.equal(await page.locator(".background-jobs-dialog").evaluate(dialog => dialog.open), false);
-  assert.equal(await page.locator(".background-jobs-open").evaluate(button => button === globalThis.document.activeElement), true);
+  await page.waitForFunction(() => globalThis.document.querySelector(".graph-menu-button") === globalThis.document.activeElement);
 });
 
 test("completed unrelated assessment cannot leave a waiting repair card", () => {

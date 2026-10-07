@@ -1,3 +1,4 @@
+import { initializeDesktopBrowserTabs } from "./desktop-browser-tabs.js";
 import { openConsoleSettings } from "./settings.js";
 import { initializeBackgroundJobs, showConnectionLost, clearConnectionLost } from "./background-jobs.js";
 import {
@@ -1002,3 +1003,4 @@ restoreGraphPaneWidth(0);
 renderGraph(0);
 
 initializeBackgroundJobs();
+initializeDesktopBrowserTabs();

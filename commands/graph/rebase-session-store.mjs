@@ -8,11 +8,11 @@ export function createRebaseSessionStore({ directory } = {}) {
   const previous = new Map();
   return {
     save(session) {
-      if (!root || !session.graph?.taskWorktree) return;
+      if (!root || !session.graph) return;
       const { graph } = session;
       const state = Object.fromEntries(Object.entries(session).filter(([key]) => !["graph", "resolutionBusy", "continueBusy"].includes(key)));
       const content = JSON.stringify({ state, graph: { path: graph.path, label: graph.label,
-        checkout: graph.checkout, repository: graph.repository, taskWorktree: true,
+        checkout: graph.checkout, repository: graph.repository, taskWorktree: Boolean(graph.taskWorktree),
         branchNamespace: graph.branchNamespace, repositoryPath: graph.repositoryPath,
         taskId: graph.taskId } }, (_key, value) => value instanceof Map ? { savedMapEntries: [...value] } : value);
       if (previous.get(session.id) === content) return;
@@ -29,7 +29,7 @@ export function createRebaseSessionStore({ directory } = {}) {
       return files.filter(file => /^[a-f0-9-]+\.json$/.test(file)).flatMap(file => {
         const saved = JSON.parse(readFileSync(path.join(root, file), "utf8"), (_key, value) =>
           value && Object.keys(value).length === 1 && Array.isArray(value.savedMapEntries) ? new Map(value.savedMapEntries) : value);
-        const source = graphs.find(graph => graph.path === saved.graph.repositoryPath);
+        const source = graphs.find(graph => graph.path === (saved.graph.repositoryPath || saved.graph.path));
         if (!source) return [];
         return [{ ...saved.state, graph: { ...source, ...saved.graph, knownHashes: new Set() },
           resolutionBusy: false, continueBusy: false }];

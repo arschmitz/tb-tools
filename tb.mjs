@@ -33,6 +33,7 @@ import fs from "fs";
 import path from "path";
 import graphCommand from './commands/graph.mjs';
 import consoleCommand from './commands/console.mjs';
+import desktopCommand from './commands/desktop.mjs';
 import knowledgeCommand from './commands/knowledge.mjs';
 
 
@@ -149,6 +150,17 @@ const commands = {
     async run () {
       const options = mapBooleanOptions(args(commands.graph.options, { argv }));
       await graphCommand(options);
+    },
+  },
+  desktop: {
+    description: "Starts the Electron desktop app in its own process.",
+    header: "Desktop Options",
+    options: [
+      { name: "comm", type: String, description: "Thunderbird comm checkout. Defaults to the current checkout, saved checkout, or folder picker." },
+      { name: "project", type: String, description: "Commands source directory containing desktop/main.cjs." },
+    ],
+    async run() {
+      await desktopCommand(args(commands.desktop.options, { argv }));
     },
   },
   console: {
@@ -469,6 +481,7 @@ function getUsageOptions(options) {
     const usageOption = { ...option };
     delete usageOption.defaultOption;
     delete usageOption.multiple;
+    delete usageOption.type;
     return usageOption;
   });
 }
@@ -491,7 +504,7 @@ Object.entries(commands).forEach(([name, { description, header, options }]) => {
   sections.push({ header, content: getUsageOptions(options) });
 });
 
-if (command && !["help", "readme", "knowledge"].includes(command)) {
+if (command && !["help", "readme", "knowledge", "desktop"].includes(command)) {
   checkDir();
 }
 

@@ -1,18 +1,24 @@
 # Desktop host
 
+Run `tb desktop` from comm, or `tb desktop --comm=/path/to/firefox/comm`.
+The app starts in its own process and returns the terminal prompt.
+
 `main.cjs` starts the existing console server on loopback and keeps it alive when
 its window closes. The console shows one comm repository and its Firefox parent.
-External links open as tabs inside the main window. A fixed header keeps Back,
-Forward, Reload, and the tab list visible while a page is open. Native window
+External links open as tabs inside the main window. Browser tabs sit beside Tree, Dashboard, and Meta Boards. Back, Forward, and
+Reload appear below these tabs while a page is open. Native window
 controls close, minimize, or maximize the window. Each external tab has a close
 button. Right-click any tab for Open in Browser.
-The console stays in its own tab. Pages run in sandboxed `WebContentsView`
+Select Tree, Dashboard, or Meta Boards to return to the console. Pages run in sandboxed `WebContentsView`
 instances that share a browser session for sign-in. Normal clicks reuse the most
 recently used tab for the same service. A service is one URL origin: its scheme,
 host, and port. Right-click any web link in the console or a page to open a new
 tab or use the system browser. The Pages menu also controls the active page.
 Reload and Cmd/Ctrl+R reload the selected tab, including Console. The console
 server and background tasks keep running during a page reload.
+Select Commands > Restart, or Restart in the tray menu, to restart the app
+and load code changes. Restart uses the normal shutdown and keeps the same
+checkout and launch arguments.
 The Edit menu supplies the normal copy, paste, cut, undo, and select-all shortcuts.
 Right-click selected text to copy it. Right-click a text field to use its editing
 commands. These commands work in Console and external pages.

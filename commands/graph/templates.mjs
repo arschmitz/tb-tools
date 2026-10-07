@@ -118,7 +118,6 @@ export function buildGraphHtml({
         ${dashboardTab}
         ${metaBoardsTab}
         ${testOutputTab}
-        <button class="tab background-jobs-open" type="button">Background jobs</button>
       </nav>`
     : "";
   const originMainStatus = interactive.enabled
@@ -135,6 +134,7 @@ export function buildGraphHtml({
     ? `<div class="graph-options">
         <button class="graph-menu-button" type="button" aria-label="More actions" aria-haspopup="true" aria-expanded="false" aria-controls="graph-options-menu"><span aria-hidden="true">&#9776;</span></button>
         <div class="graph-options-menu" id="graph-options-menu" role="menu" aria-label="More actions" hidden>
+          <button class="graph-menu-command background-jobs-open" type="button" role="menuitem" data-menu-action="background-jobs">Background jobs</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="settings">Settings...</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="build">Build</button>
           <button class="graph-menu-command" type="button" role="menuitem" data-menu-action="commit">Commit</button>
@@ -896,6 +896,7 @@ export function buildGraphHtml({
     <button type="button" role="menuitem" data-action="branch">Branch</button>
     <button type="button" role="menuitem" data-action="copy">Copy to other checkout...</button>
     <button type="button" role="menuitem" data-action="prune">Prune</button>
+    <button type="button" role="menuitem" data-action="remove-branch">Remove Branch Ref</button>
   </div>
   <dialog class="checkout-transfer-dialog" id="checkout-transfer-dialog">
     <form class="checkout-transfer-form">

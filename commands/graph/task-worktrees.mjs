@@ -62,6 +62,8 @@ export function createTaskWorktreeManager({ graphs, runCommand, directory = getW
     const revision = await git(comm.path, ["rev-parse", "HEAD"]);
     const geckoRevision = await git(gecko.path, ["rev-parse", "HEAD"]);
     await prepare(session, { geckoRevision, commRevision: revision, cloneBranches: true, cloneRevision });
+    // Rebases apply committed patches. Keep unfinished source work in its checkout.
+    if (kind === "rebase" || kind === "interactive-rebase") return session;
     for (const [source, destination] of [[gecko.path, path.dirname(session.graph.path)], [comm.path, session.graph.path]]) {
       const patch = await rawGit(source, ["diff", "--binary", "HEAD", "--"]);
       if (patch) {

@@ -8,6 +8,18 @@ Simplify tasks related to developing thunderbird.
 Right now these are only things that I have personally used and found useful but happy to add more.
 ## Installation
 `npm install -g https://github.com/arschmitz/tb-tools`
+## Desktop app
+
+Run `tb desktop` from a Thunderbird comm checkout to start the Electron app.
+The terminal returns after the app starts. Outside a comm checkout, the app uses
+its saved checkout or asks you to choose one.
+
+Use `tb desktop --comm=/path/to/firefox/comm` to choose a checkout.
+Use `--project=/path/to/commands` if the desktop source is in another directory.
+Set `desktop.projectDirectory` in `~/.tb.json` to save that source directory.
+Run `npm install` in the desktop source directory to install Electron.
+`tb console` continues to start the web console.
+
 ## Configuration
 TB Tools uses a configuration `.tb.json` file in your user's home directory to enable some features.
 This file currently contains credentials for phabricator, bugzilla, and optional Notion story lookups, plus optional defaults for Lando. The Lando CLI itself reads credentials from `~/.mozbuild/lando.toml` or its documented environment variables.

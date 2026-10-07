@@ -35,6 +35,7 @@ export const GRAPH_CLIENT_STYLESHEETS = [
   { output: "graph-client/style.css", source: "style.css" },
 ];
 export const GRAPH_CLIENT_SCRIPTS = [
+  { output: "graph-client/desktop-browser-tabs.js", source: "desktop-browser-tabs.js" },
   { output: "graph-client/live-text.js", source: "live-text.js" },
   { output: "graph-client/settings.js", source: "settings.js" },
   { output: "graph-client/review-handled.js", source: "review-handled.js" },

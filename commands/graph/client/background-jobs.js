@@ -76,7 +76,7 @@ export function initializeBackgroundJobs() {
   dialog.querySelector(".jobs-close").addEventListener("click", () => dialog.close());
   dialog.querySelector(".jobs-refresh").addEventListener("click", () => void refresh());
   dialog.querySelector(".jobs-finished").addEventListener("change", render);
-  dialog.addEventListener("close", () => { clearTimeout(timer); trigger.focus(); });
+  dialog.addEventListener("close", () => { clearTimeout(timer); (document.querySelector(".graph-menu-button") || trigger).focus(); });
 }
 
 // Keep open forms intact when the server connection fails.

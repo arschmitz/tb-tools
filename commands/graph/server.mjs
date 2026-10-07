@@ -2958,10 +2958,6 @@ export async function startInteractiveGraphServer({
         const body = await readRequestJson(request);
         validateToken(body.token, token);
         const actionGraphs = [...serverGraphs];
-        if (taskManager && body.action === "rebase") {
-          const workspace = await taskManager.prepareCurrent("rebase", body.hash);
-          actionGraphs[Number(body.graphIndex)] = workspace.graph;
-        }
         const result = await runGraphCommitAction({
           graphs: actionGraphs,
           graphIndex: body.graphIndex,
@@ -3068,7 +3064,7 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
         const graphIndex = Number(body.graphIndex);
-        let graph = serverGraphs[graphIndex];
+        const graph = serverGraphs[graphIndex];
 
         if (!graph) {
           sendJson(response, 404, {
@@ -3078,7 +3074,6 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        if (taskManager) graph = (await taskManager.prepareCurrent("interactive-rebase", body.hash)).graph;
         const result = await startInteractiveRebase({
           graph,
           graphIndex,

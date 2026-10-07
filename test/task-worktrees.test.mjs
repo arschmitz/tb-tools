@@ -205,6 +205,22 @@ test("Review imports and restarts use only task branches", async t => {
 });
 
 
+test("rebase tasks leave unfinished edits and old review directories in the source checkout", async t => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.comm, "patch.js"), "unfinished edit\n");
+  const oldReview = path.join(f.gecko, ".tb-review-old");
+  await mkdir(oldReview);
+  await writeFile(path.join(oldReview, "large-output"), "old build\n");
+  const status = git(f.comm, "status", "--porcelain");
+  for (const kind of ["rebase", "interactive-rebase"]) {
+    const task = await f.manager.prepareCurrent(kind, f.hash);
+    assert.equal(await readFile(path.join(task.graph.path, "patch.js"), "utf8"), "patch\n");
+    await assert.rejects(readFile(path.join(path.dirname(task.graph.path), ".tb-review-old", "large-output")), { code: "ENOENT" });
+  }
+  assert.equal(git(f.comm, "status", "--porcelain"), status);
+  assert.equal(await readFile(path.join(oldReview, "large-output"), "utf8"), "old build\n");
+});
+
 test("build and test tasks capture current edits without changing the source or another task", async t => {
   const f = await fixture(t);
   await writeFile(path.join(f.comm, "patch.js"), "unsaved working edit\n");
@@ -249,7 +265,7 @@ test("cancelling an implementation stops its local build and never starts AI", a
 });
 
 
-test("an isolated rebase survives a server restart and continues without moving source branches", async t => {
+test("a graph rebase reports conflicts without creating worktrees and survives a server restart", async t => {
   const f = await fixture(t);
   await writeFile(path.join(f.comm, "source.js"), "patch side\n");
   git(f.comm, "commit", "-am", "Patch side");
@@ -260,7 +276,10 @@ test("an isolated rebase survives a server restart and continues without moving 
   const sourceHead = git(f.comm, "rev-parse", "HEAD");
   git(f.comm, "fetch", "origin", "main");
   const options = { graphs: f.graphs, html: "", token: "test", appConfig: { taskWorktrees: true },
-    runCommand: run, prepareTaskBuild: false, patchSessionDirectory: path.join(f.root, "sessions"),
+    runCommand: async command => {
+      assert.ok(!command.args?.includes("worktree"), "A graph rebase must not create a worktree");
+      return run(command);
+    }, prepareTaskBuild: false, patchSessionDirectory: path.join(f.root, "sessions"),
     taskWorktreeDirectory: name => path.join(f.root, name) };
   const first = await startInteractiveGraphServer(options);
   t.after(() => first.server.listening ? new Promise(resolve => first.server.close(resolve)) : undefined);
@@ -269,7 +288,7 @@ test("an isolated rebase survives a server restart and continues without moving 
   const payload = await response.json();
   const conflict = payload.rebaseConflict;
   assert.ok(conflict?.id, JSON.stringify(payload));
-  assert.notEqual(conflict.path, f.comm);
+  assert.equal(conflict.path, f.comm);
   await new Promise(resolve => first.server.close(resolve));
   const second = await startInteractiveGraphServer(options);
   t.after(() => new Promise(resolve => second.server.close(resolve)));
@@ -280,9 +299,9 @@ test("an isolated rebase survives a server restart and continues without moving 
   const continued = await (await fetch(new URL(`/api/rebase/${conflict.id}/continue`, second.url), { method: "POST",
     headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "test" }) })).json();
   assert.equal(continued.ok, true, continued.error);
-  assert.equal(git(f.comm, "rev-parse", "HEAD"), sourceHead);
-  assert.equal(git(f.comm, "rev-parse", "Bug123"), patchHash);
-  assert.equal(await readFile(path.join(f.comm, "source.js"), "utf8"), "main side\n");
+  assert.notEqual(git(f.comm, "rev-parse", "HEAD"), sourceHead);
+  assert.notEqual(git(f.comm, "rev-parse", "Bug123"), patchHash);
+  assert.equal(await readFile(path.join(f.comm, "source.js"), "utf8"), "resolved sides\n");
 });
 
 

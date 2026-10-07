@@ -319,7 +319,7 @@ export function getCommitActionDetails(
   action,
   label,
   hash,
-  { rebaseMode = "", workingTree = false } = {},
+  { rebaseMode = "", workingTree = false, preferredBranch = "" } = {},
 ) {
   const shortHash = hash.substring(0, 12);
 
@@ -353,6 +353,13 @@ export function getCommitActionDetails(
     };
   }
 
+  if (action === "remove-branch") {
+    return {
+      confirm: "Remove local branch ref " + preferredBranch + " in " + label + "? This keeps the commit and does not change commit history. Branches checked out in a worktree cannot be removed.",
+      progress: "Removing branch ref...",
+    };
+  }
+
   if (action === "branch") {
     return {
       confirm: "Create a Bug branch at " + shortHash + " in " + label + "?",
@@ -380,6 +387,7 @@ export async function runCommitAction(
   const details = getCommitActionDetails(action, label, hash, {
     rebaseMode,
     workingTree,
+    preferredBranch,
   });
   const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
 
@@ -387,7 +395,7 @@ export async function runCommitAction(
     title: "Confirm " + details.progress.replace(/\.\.\.$/, ""),
     message: details.confirm,
     confirmLabel: details.progress.replace(/\.\.\.$/, ""),
-    danger: action === "prune",
+    danger: action === "prune" || action === "remove-branch",
   })) {
     return;
   }

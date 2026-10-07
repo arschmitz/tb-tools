@@ -6,7 +6,9 @@ contextBridge.exposeInMainWorld("commandsBrowser", {
       ipcRenderer.send("commands-browser-action", { action, tabId });
     }
   },
+  layout(height) { ipcRenderer.send("commands-browser-layout", height); },
   onState(callback) {
     ipcRenderer.on("commands-browser-state", (_event, state) => callback(state));
+    ipcRenderer.send("commands-browser-ready");
   },
 });

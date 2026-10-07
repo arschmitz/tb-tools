@@ -21,8 +21,9 @@ let remoteAccess;
 let dailyBuild;
 let tray;
 let quitting = false;
+let restarting = false;
 const browserTabs = new Map();
-const browserHeaderHeight = 86;
+let browserHeaderHeight = 200;
 
 if (process.env.TB_DESKTOP_TEST === "1" && process.env.TB_DESKTOP_TEST_USER_DATA) {
   app.setPath("userData", process.env.TB_DESKTOP_TEST_USER_DATA);
@@ -133,21 +134,22 @@ function browserState() {
     canGoBack: index > 0,
     canGoForward: Boolean(history && index < history.length() - 1),
     canReload: Boolean(activeView && !activeView.webContents.isDestroyed()),
-    tabs: [{ id: "console", title: "Console", url: "" },
-      ...[...browserTabs.values()].map(tab => ({ id: tab.id,
-        title: tab.title || webAddress(tab.url)?.hostname || "Page", url: tab.url }))],
+    tabs: [...browserTabs.values()].map(tab => ({ id: tab.id,
+        title: tab.title || webAddress(tab.url)?.hostname || "Page", url: tab.url })),
   };
 }
 
 function sendBrowserState() {
   if (consoleWindow && !consoleWindow.isDestroyed() && !consoleWindow.webContents.isDestroyed()) {
-    consoleWindow.webContents.send("commands-browser-state", browserState());
+    consoleView?.webContents.send("commands-browser-state", browserState());
   }
 }
 
 function layoutBrowser() {
   if (!consoleWindow || consoleWindow.isDestroyed()) return;
   const [width, height] = consoleWindow.getContentSize();
+  consoleView?.setBounds({ x: 0, y: 0, width, height });
+  if (activeView === consoleView) return;
   activeView?.setBounds({ x: 0, y: browserHeaderHeight, width,
     height: Math.max(0, height - browserHeaderHeight) });
 }
@@ -162,8 +164,8 @@ function activateTab(id) {
   const next = id === "console" ? consoleView : browserTabs.get(id)?.view;
   if (!next) return;
   if (activeView !== next) {
-    if (activeView) consoleWindow.contentView.removeChildView(activeView);
-    consoleWindow.contentView.addChildView(next);
+    if (activeView && activeView !== consoleView) consoleWindow.contentView.removeChildView(activeView);
+    if (next !== consoleView) consoleWindow.contentView.addChildView(next);
     activeView = next;
   }
   activeTabId = id;
@@ -204,7 +206,7 @@ function showTabMenu(id) {
 }
 
 function handleBrowserAction(event, { action, tabId } = {}) {
-  if (event.sender !== consoleWindow?.webContents) return;
+  if (event.sender !== consoleView?.webContents) return;
   if (action === "tab-menu") { showTabMenu(tabId); return; }
   if (action === "select") { activateTab(tabId); return; }
   if (action === "close") { closeTab(tabId || activeTabId); return; }
@@ -219,6 +221,14 @@ function handleBrowserAction(event, { action, tabId } = {}) {
 }
 
 ipcMain.on("commands-browser-action", handleBrowserAction);
+ipcMain.on("commands-browser-ready", event => {
+  if (event.sender === consoleView?.webContents) sendBrowserState();
+});
+ipcMain.on("commands-browser-layout", (event, height) => {
+  if (event.sender !== consoleView?.webContents || !Number.isFinite(height)) return;
+  browserHeaderHeight = Math.max(0, Math.round(height));
+  layoutBrowser();
+});
 
 function showConsole() {
   if (!consoleServer) return;
@@ -245,7 +255,7 @@ function showConsole() {
       consoleWindow = undefined;
     });
     consoleView = new WebContentsView({ webPreferences: {
-      contextIsolation: true, nodeIntegration: false, sandbox: true } });
+      preload: path.join(__dirname, "browser-preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true } });
     consoleView.webContents.setWindowOpenHandler(({ url }) => {
       openManagedPage(url);
       return { action: "deny" };
@@ -257,11 +267,13 @@ function showConsole() {
       }
     });
     installPageCommands(consoleView.webContents);
+    consoleWindow.contentView.addChildView(consoleView);
+    consoleView.webContents.on("did-finish-load", sendBrowserState);
     activateTab("console");
     if (process.env.TB_DESKTOP_TEST !== "1") {
       consoleWindow.once("ready-to-show", () => { consoleWindow.show(); focusActivePage(); });
     }
-    void consoleWindow.loadFile(path.join(__dirname, "browser-shell.html"));
+    void consoleWindow.loadURL("about:blank");
     void consoleView.webContents.loadURL(consoleServer.url);
   } else {
     consoleWindow.show();
@@ -347,6 +359,13 @@ async function pairPhone() {
   if (result.response === 0) clipboard.writeText(address);
 }
 
+function restartApp() {
+  if (restarting || quitting) return;
+  restarting = true;
+  app.relaunch();
+  app.quit();
+}
+
 function installMenu() {
   const selectedPage = () => browserTabs.get(activeTabId);
   const menu = Menu.buildFromTemplate([
@@ -357,6 +376,7 @@ function installMenu() {
         void dialog.showMessageBox({ type: "error", message: "Could not disable phone access", detail: error.message });
       }); } },
       { label: "Revoke Paired Phones", click: () => { void mobileGateway.revokeAll(); } },
+      { label: "Restart", click: restartApp },
       { role: "quit" },
     ] },
     { role: "editMenu" },
@@ -387,6 +407,7 @@ function installMenu() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Show Console", click: showConsole },
     { label: "Pair Phone", click: () => { void pairPhone(); } },
+    { label: "Restart", click: restartApp },
     { role: "quit" },
   ]));
   tray.on("double-click", showConsole);

@@ -6325,6 +6325,38 @@ export async function checkoutGraphCommit({
   });
 }
 
+export async function removeGraphBranchRef({ graph, hash, preferredBranch, runCommand = run }) {
+  await ensureGraphCommit(graph, hash, runCommand);
+  const branch = String(preferredBranch || "");
+  const refs = await runCommand({
+    cmd: "git",
+    args: ["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"],
+    cwd: graph.path,
+    capture: true,
+    silent: true,
+  });
+  const ref = "refs/heads/" + branch;
+  if (!branch || !refs.split(/\r?\n/).some((line) => line === ref + " " + hash)) {
+    const error = new Error("The selected local branch no longer points to this commit. Refresh the graph and try again.");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  // Git refuses to remove a branch checked out in any worktree.
+  await runCommand({
+    cmd: "git",
+    args: ["branch", "-D", "--", branch],
+    cwd: graph.path,
+    silent: true,
+  });
+  return {
+    action: "remove-branch",
+    hash,
+    removedBranch: branch,
+    message: `${graph.label} removed branch ref ${branch}. The commit history was not changed.`,
+  };
+}
+
 export async function runGraphCommitAction({
   graphs,
   graphIndex,
@@ -6337,6 +6369,8 @@ export async function runGraphCommitAction({
   const graph = graphs[Number(graphIndex)];
 
   switch (action) {
+    case "remove-branch":
+      return removeGraphBranchRef({ graph, hash, preferredBranch, runCommand });
     case "checkout":
       return checkoutCommit({ graph, hash, runCommand });
     case "rebase":

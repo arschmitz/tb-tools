@@ -379,7 +379,9 @@ export function showCommitContextMenu(event, index, commit) {
       graph.repository === sourceGraph?.repository &&
       (graph.checkout || "working") !== (sourceGraph?.checkout || "working")
     ));
-    const hidden = workingTree
+    const hidden = button.dataset.action === "remove-branch"
+      ? workingTree || !branchTarget
+      : workingTree
       ? button.dataset.action !== "prune"
       : button.dataset.action === "copy" && !hasCopyDestination;
 
