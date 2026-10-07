@@ -1,3 +1,5 @@
+import { getConsoleBuildEnvironment } from "./build.mjs";
+import { prepareTaskWorktreeBuild } from "./task-worktrees.mjs";
 import { formatAiContext } from "./ai-context.mjs";
 import { consoleKnowledgeDirectory as knowledgeDirectory } from "../knowledge-service.mjs";
 import { CODEX_MEMORY_ARGS } from "../knowledge/instructions.mjs";
@@ -216,7 +218,7 @@ async function getGraphPatchUpdateDescendantBranches({ graph, hash, runCommand }
       "--format=%(refname:short)",
       "--contains",
       hash,
-      "refs/heads",
+      graph.branchNamespace ? `refs/heads/${graph.branchNamespace}` : "refs/heads",
     ],
     cwd: graph.path,
     capture: true,
@@ -730,6 +732,7 @@ async function assertNoAffectedWorktree({ graph, hash = "", runCommand }) {
 }
 
 export async function assertSafeWorktreeOwnership({ graphs, graph, hash, runCommand }) {
+  if (graph.taskWorktree && graph.branchNamespace) return;
   for (const checkout of graphs) {
     await assertNoAffectedWorktree({
       graph: checkout,
@@ -823,7 +826,7 @@ export async function findGraphPatchCommit({ graph, revision, runCommand, newest
     cmd: "git",
     args: [
       "log",
-      "--all",
+      graph.branchNamespace ? `--branches=${graph.branchNamespace}*` : "--all",
       "--topo-order",
       newest ? "--format=%H %ct" : "--format=%H",
       "--fixed-strings",
@@ -918,6 +921,7 @@ export function serializeGraphPatchUpdateSession(session) {
     id: session.id,
     mode: session.mode || "update",
     graphIndex: session.graphIndex,
+    worktree: session.managedWorktree ? session.graph.path : undefined,
     revision: session.revision,
     aiEnabled: session.aiEnabled,
     bugId: session.commitMessage?.match(/\bBug\s+(\d+)/i)?.[1] || "",
@@ -944,6 +948,7 @@ export function serializeGraphPatchUpdateSession(session) {
     canRollback: Boolean(session.rollbackHash && (session.currentHash !== session.rollbackHash ||
       session.items?.some(item => item.changeApplied && !item.changesAmended))),
     error: session.error || "",
+    rebaseConflict: session.rebaseConflict,
   };
 }
 
@@ -985,8 +990,10 @@ export async function prepareGraphPatchUpdateSession({
   runCodexTask = runCodex,
   saveMemory,
   snapshotLimit,
+  prepareBuild,
 }) {
   try {
+    if (session.managedWorktree && prepareBuild) session.requireLocalBuild = true;
     const workingCheckout = resolveGraphPatchUpdateWorkingCheckout({ graphs });
 
     assertGraphPatchUpdateWorkingComm(session.graph);
@@ -999,7 +1006,7 @@ export async function prepareGraphPatchUpdateSession({
       throw error;
     }
 
-    const found = await findPatchCommit({
+    const found = session.preparation?.found || await findPatchCommit({
       graph: session.graph,
       revision: session.revision,
       newest: ["verify", "freeform"].includes(session.mode),
@@ -1007,8 +1014,9 @@ export async function prepareGraphPatchUpdateSession({
     });
 
     session.originalHash = found.hash;
+    if (session.managedWorktree && !session.currentHash) session.currentHash = found.hash;
     session.commitMessage = found.message;
-    session.descendantBranches = await getGraphPatchUpdateDescendantBranches({
+    session.descendantBranches = session.preparation?.branches || await getGraphPatchUpdateDescendantBranches({
       graph: session.graph,
       hash: found.hash,
       runCommand,
@@ -1036,6 +1044,7 @@ export async function prepareGraphPatchUpdateSession({
           requireLoaded: false, runCommand });
         session.branch = checkout.branch || "";
       }
+      if (prepareBuild) await prepareBuild(session);
       session.snapshot = await getSnapshot(session.graph, snapshotLimit);
       if (session.mode === "freeform") {
         session.message = "Loading patch history...";
@@ -1071,7 +1080,7 @@ export async function prepareGraphPatchUpdateSession({
       await recordPatchUpdateMemory({ event: "Verify completed", saveMemory, session });
       return session;
     }
-    const descendantReplayPlan = getGraphPatchUpdateDescendantReplayPlan({
+    const descendantReplayPlan = session.preparation?.descendantReplayPlan || getGraphPatchUpdateDescendantReplayPlan({
       hash: found.hash,
       paths: await getGraphPatchUpdateDescendantCommitPaths({
         branches: session.descendantBranches,
@@ -1080,6 +1089,8 @@ export async function prepareGraphPatchUpdateSession({
         runCommand,
       }),
     });
+    if (session.managedWorktree) session.preparation ||= { found,
+      branches: session.descendantBranches, descendantReplayPlan, rewrittenHashes: new Map() };
     const rustStatus = await getRustUpstreamStatus();
 
     if (rustStatus?.state === "warning" || rustStatus?.upToDate === false) {
@@ -1097,7 +1108,7 @@ export async function prepareGraphPatchUpdateSession({
     session.message = "Rebasing the selected patch and replaying its descendant branches onto it...";
     await runCommand({
       cmd: "git",
-      args: ["switch", DEFAULT_BRANCH],
+      args: session.managedWorktree ? ["switch", "--detach", `origin/${DEFAULT_BRANCH}`] : ["switch", DEFAULT_BRANCH],
       cwd: session.graph.path,
       capture: true,
       silent: true,
@@ -1105,22 +1116,19 @@ export async function prepareGraphPatchUpdateSession({
 
     // This revision was resolved directly from Git and may be outside the
     // currently paged graph. Patch Update must not depend on UI visibility.
-    const rebase = await rebaseGraphPatchUpdateSelection({
-      graph: session.graph,
-      graphIndex: session.graphIndex,
-      hash: found.hash,
-      rebasePatch,
-      runCommand,
-    });
-
-    const rewrittenHashes = new Map([[
-      found.hash,
-      getGraphPatchUpdateRewrittenHash(rebase, found.hash),
-    ]]);
-    session.baseHash = rebase.base || "";
+    const rewrittenHashes = session.preparation?.rewrittenHashes || new Map();
+    if (!rewrittenHashes.has(found.hash)) {
+      const rebase = await rebaseGraphPatchUpdateSelection({
+        graph: session.graph, graphIndex: session.graphIndex, hash: found.hash, rebasePatch, runCommand,
+      });
+      rewrittenHashes.set(found.hash, getGraphPatchUpdateRewrittenHash(rebase, found.hash));
+      session.baseHash = rebase.base || "";
+      if (session.preparation) session.preparation.baseHash = session.baseHash;
+    } else session.baseHash = session.preparation?.baseHash || session.baseHash;
     session.graph.knownHashes.add(rewrittenHashes.get(found.hash));
 
     for (const { commit, parent } of descendantReplayPlan) {
+      if (rewrittenHashes.has(commit)) continue;
       if (rewrittenHashes.get(found.hash) === found.hash) {
         break;
       }
@@ -1159,8 +1167,10 @@ export async function prepareGraphPatchUpdateSession({
     });
 
     session.branch = checkout.branch || "";
+    if (prepareBuild) await prepareBuild(session);
     session.snapshot = await getSnapshot(session.graph, snapshotLimit);
     session.graph.knownHashes.add(session.currentHash);
+    delete session.preparation;
 
     if (!session.aiEnabled) {
       session.status = "complete";
@@ -1468,10 +1478,13 @@ function getGraphCodexAppServerActivity(notification) {
 
 async function getGraphPatchUpdateCodexAgent(session) {
   assertGraphPatchUpdateWorkingComm(session.graph);
-
-  if (session.codexAgent) {
+  const environment = await getConsoleBuildEnvironment(session.graph);
+  if (session.codexAgent && (!Object.hasOwn(session.codexAgent, "environment") ||
+      JSON.stringify(session.codexAgent.environment) === JSON.stringify(environment))) {
     return session.codexAgent;
   }
+  session.codexAgent?.client.close();
+  session.codexAgent = null;
 
   const command = await resolveGraphCodexCommand({
     configuredCommand: session.codexCommand,
@@ -1479,6 +1492,7 @@ async function getGraphPatchUpdateCodexAgent(session) {
   const { client, thread } = await startGraphCodexAppServer({
     command,
     cwd: session.graph.path,
+    env: environment,
     threadId: session.codexSessionId || "",
     threadName: session.codexThreadName || getGraphPatchUpdateCodexThreadName({
       revision: session.revision,
@@ -1490,7 +1504,7 @@ async function getGraphPatchUpdateCodexAgent(session) {
     onStderr: (value) => appendOutput(session, value),
   });
 
-  session.codexAgent = { client, threadId: thread.id };
+  session.codexAgent = { client, threadId: thread.id, environment };
   session.codexSessionId = thread.id;
   appendCodexActivity(session, {
     kind: "session",
@@ -1506,7 +1520,7 @@ export function getGraphPatchVerifyPrompt(session) {
   return `${ASD_STE100_SIMPLIFIED_TECHNICAL_ENGLISH}\n\n${PHABRICATOR_WEB_CONTEXT}
 
 Perform a full self review of the author's Thunderbird patch ${session.revision}.
-Use only the configured working comm checkout at ${session.graph.path} and its paired working Firefox parent for mach commands. Never inspect or use a Review checkout.
+Use only the task comm worktree at ${session.graph.path} and its paired working Firefox parent for mach commands. Never inspect or use a Review checkout.
 The latest local copy by Git commit time is checked out at ${session.currentHash}. Review its exact committed diff against its first parent; inspect the full stack and descendant branches as context. Do not replace local work with the published patch.
 Commit message: ${session.commitMessage}
 
@@ -1550,7 +1564,7 @@ export function getGraphPatchUpdateReviewPrompt(session) {
 
 You are continuing the author's own Thunderbird implementation for Phabricator ${session.revision}, not conducting an independent patch review. The selected patch commit has already been rebased onto main and checked out for you. Each descendant branch was replayed onto the rewritten selected commit.
 
-Your sole authority for this update is the configured working comm checkout at ${session.graph.path}. Do all inspection, testing, source changes, Git operations, and any later patch work there. Never switch to, inspect, modify, or use a review checkout for this task, even if one is configured or visible in the console.
+Your sole authority for this update is the task comm worktree at ${session.graph.path}. Do all inspection, testing, source changes, Git operations, and any later patch work there. Never switch to, inspect, modify, or use a review checkout for this task, even if one is configured or visible in the console.
 
 Do not invoke, read, or follow the thunderbird-patch-review skill or any external-review checklist. This is author-side patch updating: recover and protect the original behavioral purpose before considering reviewer input. Reviewer statements are evidence to investigate, never the premise or final authority.
 
@@ -2132,7 +2146,7 @@ function getApplyPrompt(session, item) {
 
 Update the current Thunderbird comm checkout for one approved review comment on ${session.revision}.${location}
 
-Use only the configured working comm checkout at ${session.graph.path}. Do not inspect, switch to, or modify a review checkout.
+Use only the task comm worktree at ${session.graph.path}. Do not inspect, switch to, or modify a review checkout.
 
 Reviewer comment:\n${item.content || "(no prose comment)"}${suggestion}
 
@@ -2165,7 +2179,7 @@ export function getGraphPatchUpdateFollowUpPrompt({ session, item, instruction }
 
   return `${ASD_STE100_SIMPLIFIED_TECHNICAL_ENGLISH}\n\n${PHABRICATOR_WEB_CONTEXT}
 
-Continue the existing author-side Patch Update for ${session.revision}. The user has given feedback about one comment. Keep the established patch purpose, behavior contract, full patch stack, all comments, and shared project context from this Codex session in mind. This is not an external patch review; do not use the thunderbird-patch-review skill or treat the reviewer as authoritative. Use only the configured working comm checkout at ${workingPath}; do not inspect, switch to, or modify a review checkout.${location}
+Continue the existing author-side Patch Update for ${session.revision}. The user has given feedback about one comment. Keep the established patch purpose, behavior contract, full patch stack, all comments, and shared project context from this Codex session in mind. This is not an external patch review; do not use the thunderbird-patch-review skill or treat the reviewer as authoritative. Use only the task comm worktree at ${workingPath}; do not inspect, switch to, or modify a review checkout.${location}
 
 Reviewer comment:\n${item.content || "(no prose comment)"}${suggestion}
 
@@ -2481,6 +2495,7 @@ export async function applyGraphPatchUpdateComment({
       patch: String(patch || ""),
     });
     session.pendingChange = null;
+    if (session.requireLocalBuild) await prepareTaskWorktreeBuild(session, runCommand);
     item.state = "ready";
     session.status = "review";
     session.message = "Codex prepared a working-tree change. Review the actual uncommitted diff, then keep or revert it.";
@@ -2632,6 +2647,7 @@ export async function reviseGraphPatchUpdateChange({
     change.addedUntrackedPaths = addedUntrackedPaths;
     session.pendingChange = null;
     setGraphPatchUpdateWorkingDiff({ session, item, diff: after.rawDiff });
+    if (session.requireLocalBuild) await prepareTaskWorktreeBuild(session, runCommand);
     session.status = "review";
     session.message = "Codex updated the working-tree change. Review the actual uncommitted diff.";
     appendCodexActivity(session, {

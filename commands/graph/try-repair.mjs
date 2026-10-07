@@ -1,3 +1,5 @@
+import { getConsoleBuildEnvironment } from "./build.mjs";
+import { prepareTaskWorktreeBuild } from "./task-worktrees.mjs";
 import { prepareSharedTryValidation, reuseSharedTryRepair } from "./try-shared-fixes.mjs";
 import { rememberTrySignatures, rememberCiPushes } from "./try-knowledge.mjs";
 import { updateRefs } from "./try-fixup.mjs";
@@ -15,6 +17,7 @@ import { run } from "../../lib/utils.mjs";
 import { startGraphCodexAppServer } from "./codex-app-server.mjs";
 import { resolveGraphCodexCommand } from "./patch-update.mjs";
 import { getMachTryArgs } from "../try.mjs";
+import { writeWorktreeBuildConfig } from "./worktrees.mjs";
 import { addTryAttempt, saveTrySubmissionOutput, finishTrySubmission } from "./try-submission.mjs";
 
 export function validateTryAssessment(value, evidence) {
@@ -157,7 +160,9 @@ export async function refreshTryRepairSource(state, store, runCommand = run) {
   return true;
 }
 
-export function createTryRepairer({ store, runCommand = run, codexCommand, generate, signal, startAgent = startGraphCodexAppServer } = {}) {
+export function createTryRepairer({ store, runCommand = run, codexCommand, generate, signal,
+  prepareBuild = runCommand === run && !process.env.NODE_TEST_CONTEXT && !globalThis.__tbToolsBlockExternalApis ? prepareTaskWorktreeBuild : null,
+  startAgent = startGraphCodexAppServer } = {}) {
   const git = async (cwd, args, extra = {}) => (await runCommand({ cmd: "git", args, cwd, capture: true, silent: true, signal, ...extra })).trim();
   async function hasSourceChanges(cwd) {
     if (await git(cwd, ["status", "--porcelain", "--untracked-files=no"])) return true;
@@ -192,7 +197,15 @@ export function createTryRepairer({ store, runCommand = run, codexCommand, gener
     }
     // Use a separate object directory and explicitly select Thunderbird. A fresh
     // Gecko checkout otherwise selects Firefox before it has a build config.
-    await writeFile(path.join(gecko, ".mozconfig"), "ac_add_options --enable-project=comm/mail\nmk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-try-monitor\n");
+    await writeWorktreeBuildConfig({ gecko, name: "try-monitor" });
+    const buildHash = await git(state.workspace, ["rev-parse", "HEAD"]);
+    if (prepareBuild && state.localBuildHash !== buildHash) {
+      const session = { graph: { path: state.workspace }, output: "", abortController: { signal } };
+      try { await prepareBuild(session, runCommand); }
+      finally { state.localBuildOutput = session.output; store.save(state); }
+      state.localBuildHash = buildHash;
+      store.save(state);
+    }
     return state.workspace;
   }
   async function ask(state, prompt, writable = false) {
@@ -223,6 +236,7 @@ export function createTryRepairer({ store, runCommand = run, codexCommand, gener
     const { client, thread } = await startAgent({ command,
       threadId: state.aiThreads[threadKey] || "",
       cwd,
+      env: await getConsoleBuildEnvironment({ path: cwd }),
       sandbox: writable ? "workspace-write" : "read-only", threadName: `Try ${state.subject}`,
       onNotification: notification => {
         const activity = writable ? getTryRepairActivity(notification) : "Evaluating";
@@ -361,6 +375,11 @@ export function createTryRepairer({ store, runCommand = run, codexCommand, gener
           const changes = await git(cwd, ["status", "--porcelain"]);
           if (!changes) throw new Error("The repair produced no code change. No duplicate Try was posted.");
           await git(cwd, ["diff", "--check"]);
+          if (prepareBuild) {
+            const build = { graph: { path: cwd }, output: "", abortController: { signal } };
+            try { await prepareBuild(build, runCommand); }
+            finally { state.localBuildOutput = build.output; store.save(state); }
+          }
           state.repairReport = report;
           store.save(state);
           const messagePath = path.join(path.dirname(cwd), "tb-try-fixup-message.txt");

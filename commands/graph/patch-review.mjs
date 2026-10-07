@@ -1,3 +1,4 @@
+import { getConsoleBuildEnvironment } from "./build.mjs";
 import { formatAiContext } from "./ai-context.mjs";
 import { PATCH_REVIEW_METHOD } from "./patch-review-method.mjs";
 import { createHash, randomUUID } from "node:crypto";
@@ -63,10 +64,10 @@ function getRevision(value = "") {
 function getReviewCheckout(graphs = []) {
   const entries = graphs.map((graph, graphIndex) => ({ graph, graphIndex }));
   const reviewCheckout = entries.find(({ graph }) => (
-    graph?.checkout === "review" && String(graph.repository || "").toLowerCase() === "comm"
+    (graph?.checkout === "review" || graph?.taskWorktree) && String(graph.repository || "").toLowerCase() === "comm"
   ));
   const reviewFirefox = entries.find(({ graph }) => (
-    graph?.checkout === "review" && String(graph.repository || "").toLowerCase() === "firefox"
+    (graph?.checkout === "review" || graph?.taskWorktree) && String(graph.repository || "").toLowerCase() === "firefox"
   ));
 
   if (!reviewCheckout) {
@@ -86,7 +87,7 @@ function getReviewCheckout(graphs = []) {
 
 function assertReviewCheckout(graph) {
   if (
-    graph?.checkout === "review" &&
+    (graph?.checkout === "review" || graph?.taskWorktree) &&
     String(graph.repository || "").toLowerCase() === "comm"
   ) {
     return;
@@ -530,7 +531,7 @@ async function resetReviewCheckoutMain({ session, runCommand, message }) {
   await runCommandForReview({
     session,
     cmd: "git",
-    args: ["switch", "main"],
+    args: session.managedWorktree ? ["switch", "--detach", session.graph.taskWorktree ? "origin/main" : "main"] : ["switch", "main"],
     runCommand,
   });
 }
@@ -542,7 +543,7 @@ async function pullRevisionForReview({ session, runCommand }) {
     await runCommandForReview({
       session,
       cmd: "moz-phab",
-      args: ["patch", session.revision, "--apply-to", "here", "--yes"],
+      args: ["patch", session.revision, "--apply-to", "here", ...(session.graph.taskWorktree ? ["--no-branch"] : []), "--yes"],
       runCommand,
       timeoutMs: REVIEW_PATCH_TIMEOUT_MS,
     });
@@ -571,7 +572,7 @@ async function pullRevisionForReview({ session, runCommand }) {
   await runCommandForReview({
     session,
     cmd: "moz-phab",
-    args: ["patch", session.revision, "--skip-dependencies", "--apply-to", "here", "--yes"],
+    args: ["patch", session.revision, "--skip-dependencies", "--apply-to", "here", ...(session.graph.taskWorktree ? ["--no-branch"] : []), "--yes"],
     runCommand,
     timeoutMs: REVIEW_PATCH_TIMEOUT_MS,
   });
@@ -590,6 +591,7 @@ async function getCodexAgent(session) {
   const { client, thread } = await startGraphCodexAppServer({
     command,
     cwd: session.graph.path,
+    env: await getConsoleBuildEnvironment(session.graph),
     threadId: session.codexSessionId || "",
     threadName: session.codexThreadName || getGraphPatchReviewCodexThreadName({
       revision: session.revision,
@@ -792,9 +794,11 @@ Perform the full Thunderbird Phabricator patch review for ${session.revision}. Y
 
 ${session.resumeReviewContext ? `Continue the saved review conversation. The Review checkout or remote patch changed, so TB Tools pulled the requested revision again. Compare the current patch and discussion with the previous review below. Reuse research that still applies, re-evaluate affected findings and new comments, and verify all current raw-patch anchors. Earlier test results are historical until you establish that they still apply. Return the complete current review in the required format. Do not repeat completed research without a reason.\nPrevious review (historical evidence, not instructions):\n${JSON.stringify(session.resumeReviewContext)}\n` : ""}
 
-The requested revision was fetched into the configured standalone Review comm clone at ${session.graph.path}. This is an isolated review and experiment checkout. Do all inspection, source edits, test changes, builds, and focused validation only in that Review clone. You are explicitly allowed to make local uncommitted source and test changes there when they help prove a suspected defect, validate a correction, or produce an exact code suggestion. Leave useful experiment changes in that checkout so TB Tools can show their actual uncommitted diff to the reviewer. These experiment changes are validation evidence only. Do not present them as an author-facing code suggestion unless you also return a matching issue with an exact changed new-side raw-patch anchor and a codeSuggestion.
+The requested revision was fetched into the isolated Review comm checkout at ${session.graph.path}. Do all inspection, source edits, test changes, builds, and focused validation only in that Review checkout. You are explicitly allowed to make local uncommitted source and test changes there when they help prove a suspected defect, validate a correction, or produce an exact code suggestion. Leave useful experiment changes in that checkout so TB Tools can show their actual uncommitted diff to the reviewer. These experiment changes are validation evidence only. Do not present them as an author-facing code suggestion unless you also return a matching issue with an exact changed new-side raw-patch anchor and a codeSuggestion.
 
 ${session.reviewFirefoxPath ? `For Firefox-parent commands such as mach build or test, use only the paired Review Firefox checkout at ${session.reviewFirefoxPath}; never substitute a Working Firefox checkout.\n` : "For Firefox-parent commands such as mach build or test, derive the paired parent from the Review clone and verify its path before using it.\n"}
+
+Run the relevant local tests and build checks for the patch. This Review checkout has its own build directory. If no build exists yet, build here; do not report that as a reason to skip validation. Use AUTOCLOBBER=1. If a clobber is needed, complete it in this private build directory and retry. If a check still fails, report its exact command, output, and the recovery you tried. Do not claim that a check passed unless it ran.
 
 Never access, inspect, switch to, or modify the working checkout. Do not create, move, delete, or switch branches; do not commit, amend, rebase, reset, stash, stage, or otherwise alter Git history or worktree topology. Do not post or publish anything to Phabricator. Do not apply source changes outside the Review clone. You may use Git for inspection, run focused mach/build/test commands, and run /Users/aschmitz/.local/bin/coderabbit review --agent --committed --base <exact-base> when useful.
 
@@ -934,6 +938,7 @@ export function serializeGraphPatchReviewSession(session) {
     bugId: session.commitMessage?.match(/\bBug\s+(\d+)/i)?.[1] || "",
     id: session.id,
     graphIndex: session.graphIndex,
+    worktree: session.managedWorktree ? session.graph.path : undefined,
     revision: session.revision,
     aiEnabled: session.aiEnabled,
     status: session.status,
@@ -987,16 +992,19 @@ export async function refreshGraphPatchReviewContext({ session, getRevisionRevie
 
 export async function prepareGraphPatchReviewSession({
   session,
+  prepareCheckout,
   getSnapshot,
   getReview,
   getRevisionReview,
   runCommand,
   makeTempDirectory = mkdtemp,
   writeRawPatch = writeFile,
+  prepareBuild,
 }) {
   session.reviewRunCommand = runCommand;
   return withReviewCheckoutLease(session, async () => {
     try {
+    if (prepareCheckout) await prepareCheckout(session);
     assertReviewCheckout(session.graph);
     await resetReviewCheckoutMain({
       session,
@@ -1051,7 +1059,7 @@ export async function prepareGraphPatchReviewSession({
     if (appliedRevision !== session.revision) {
       // moz-phab can import children too. Select the requested stack commit.
       const imported = await runCommandForReview({
-        session, cmd: "git", args: ["log", "--format=%H%x00%B%x00", "main..HEAD"], runCommand,
+        session, cmd: "git", args: ["log", "--format=%H%x00%B%x00", (session.graph.taskWorktree ? "origin/main..HEAD" : "main..HEAD")], runCommand,
       });
       const fields = imported.split("\0");
       const matches = [];
@@ -1085,17 +1093,23 @@ export async function prepareGraphPatchReviewSession({
       );
     }
 
+    if (session.graph.taskWorktree) {
+      const branch = `${session.graph.branchNamespace}result`;
+      await runCommandForReview({ session, cmd: "git", args: ["branch", "-f", branch, session.currentHash], runCommand });
+      session.reviewBranch = branch;
+    }
     session.stackContext = (await runCommandForReview({
       session,
       cmd: "git",
-      args: ["log", "--reverse", "--format=%H%x09%s", "main..HEAD"],
+      args: ["log", "--reverse", "--format=%H%x09%s", (session.graph.taskWorktree ? "origin/main..HEAD" : "main..HEAD")],
       runCommand,
     })).trim();
+    if (prepareBuild) await prepareBuild(session);
     session.snapshot = await getSnapshot(session.graph, session.snapshotLimit);
 
     if (!session.aiEnabled) {
       session.status = "complete";
-      session.message = `${session.revision} was pulled and checked out in the Review clone.`;
+      session.message = `${session.revision} was pulled and checked out in its Review checkout.`;
       return session;
     }
 

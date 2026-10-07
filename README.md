@@ -51,9 +51,9 @@ This file currently contains credentials for phabricator, bugzilla, and optional
 }
 ```
 
-Set `reviewCheckout` to a separate Firefox clone and its independent comm clone to enable the Working/Review switch in `tb console`. These must be sibling clones, not Git worktrees. The switch changes the single comm and Firefox graph tabs between the two pairs; Update can target one pair or both, and a selected commit or stack can be copied to a new branch in the other clone.
+For the browser-based `tb console`, set `reviewCheckout` to an independent Firefox/comm clone pair to enable the Working/Review switch. The desktop app creates paired Git worktrees automatically and uses those paths instead. Both modes keep the Working checkout in place.
 
-When all four checkout paths are configured, the console's More actions menu also provides **Sync Review from Working**. This intentionally destructive one-way action requires typing `SYNC REVIEW`: it aborts review Git operations, force-prunes every Review ref, removes Review changes and untracked/ignored files, and checks out the Working branch or detached commit in both Firefox and comm. It then copy-on-write clones the Working Firefox `obj-*` directories and `mozconfig*` files when the filesystem supports it. Working repositories must have no tracked changes, so their copied build artifacts match the checked-out source; working tree changes are not copied.
+When all four checkout paths are configured, the console's More actions menu provides **Sync Review from Working**. It requires typing `SYNC REVIEW` and removes Review source changes. With desktop worktrees, it detaches Review at the Working commits and keeps its private object directory and shared Git refs. With older independent clones, it retains the existing full clone-sync behavior, including copied build artifacts. Working source changes are not copied.
 
 For Notion, share the story data source with your Notion connection. The console looks up stories by the configured bug-id property and shows matching page links on selected patches.
 
@@ -63,7 +63,7 @@ The console's Phabricator Authentication menu item uses a separate private brows
 
 ## Thunderbird Desktop Console
 
-`tb console` starts a local browser-based control surface for day-to-day Thunderbird patch work. It keeps the comm checkout and the Firefox parent checkout visible together, updates while the server is running, and gives complex workflows a UI instead of forcing everything through prompts in the terminal. Configure an independent Review Checkout pair to work on another clone without changing the primary Working checkout.
+`tb console` starts a local browser-based control surface for Thunderbird patch work. The standalone desktop app runs the same console in a persistent window and creates its own Review worktrees. See the desktop app section below.
 
 Use the console to:
 
@@ -72,11 +72,14 @@ Use the console to:
 - authenticate with Phabricator from the menu to display native inline code suggestions alongside reviewed diffs, including suggestions that also have prose comments
 - create commits with Bug branch detection, a bug-number fallback, Phabricator-backed reviewer and review-group autocomplete, blocking-review toggles, and a durable `TB-Tools-Id` trailer for console metadata
 - checkout, rebase, interactively reorder/squash/fixup/drop local commit ranges, prune, amend, submit, and mark accepted patches with `checkin-needed-tb` from the selected commit
-- copy a selected commit or local stack between the Working and Review clone pairs on a new destination branch, with an atomic rollback if cherry-picking fails
+- keep console AI chats in the **TB Console** sidebar section. Each successful AI turn is archived after its result is saved by Codex; failed and interrupted turns stay visible. The console keeps its results and automatically restores the same chat when you resume or send a follow-up. Archiving does not delete conversation history
+- use **Update** for a freeform conversation about your patch. It loads the newest local patch and review history in the Working checkout, shows the current patch or pending changes beside the conversation, and lets you request more edits, amend, submit, or roll back the local patch to the start of the session. It has its own saved chat and does not post review comments
+- use **Verify** beside **Review Update** on patch cards and selected commits. Verify reviews your newest local copy (by Git commit time) in the Working comm checkout, with the same defect and accessibility checks as Review plus CodeRabbit. Address findings one at a time, preview each change, amend or revert it, then submit. Verify does not post review comments. Review Update handles reviewer feedback. Each flow has its own saved session
+- copy a selected commit or local stack between the Working and Review checkout pairs on a new destination branch, with an atomic rollback if cherry-picking fails
 - use artifact builds and `build faster` for frontend-only comm changes; use a normal build for native or Firefox changes
-- reuse matching console binary snapshots from either checkout and the shared mach download cache; keep each checkout’s object directory separate
-- destructively replace the complete Review pair with the Working Git history and copy Firefox build artifacts for a fast review build
-- choose whether Pull or Rebase acts on the selected clone pair or both pairs; build/run, lint, test, pull patch, and try follow the selected comm tab
+- reuse completed binary snapshots from `~/.tb-tools/build-cache` and the shared mach download cache; keep each checkout's writable object directory separate
+- sync Review source to the Working commits while keeping private worktree builds intact
+- choose whether Pull or Rebase acts on the selected checkout pair or both pairs; build/run, lint, test, pull patch, and try follow the selected comm tab
 - pull both repositories, rebase a local stack, build, run, lint, pull patches, create patches, start try runs, and land checkin-needed patches
 - run modified tests or explicit path/glob patterns, including headless runs, with parsed final summaries and rerun actions for failures
 - create persistent Meta Bug boards: group dependent stories by child meta bug, filter by assignee or child meta, update story fields in place, and open linked bugs internally or in Bugzilla
@@ -102,6 +105,16 @@ _The Land Patches flow brings the `tb land` sheriff workflow into the console, s
 ![Thunderbird Desktop Console parsed test output](/images/console-test-output.png)
 
 _Test runs preserve colored output and add parsed summaries, failed-file actions, rerun controls, copy buttons, and VS Code links._
+
+## Standalone desktop app
+
+Run `npm ci`, then `npm run desktop -- --comm=/path/to/firefox/comm`. Run `npm run desktop:package` to make a native app for the current system. The app keeps running in the tray after its console window closes. Links open as tabs in the main window. Normal clicks reuse the most recently used tab for the same service. Right-click a link for Open in New Tab or Open in Browser. Right-click any tab for Open in Browser. The fixed header keeps Back, Forward, Reload, and the tab list visible. Use the native window controls to close, minimize, or maximize the window. Reload and Cmd/Ctrl+R also work on the Console tab.
+
+The desktop app creates paired Review worktrees in `~/.tb-tools/worktrees`. Each revision under review gets its own pair, so different reviews can run together. Each active worktree has its own writable object directory. Completed artifact snapshots live in `~/.tb-tools/build-cache`. When sccache is installed, its compiler-result storage is shared; cache hits across worktrees depend on the active sccache server's base paths. The app turns off sccache direct mode to avoid stale headers across worktrees. A new worktree can build without copying another live object directory. Try repair worktrees also get a Thunderbird build config with a private object directory. Windows builds need Visual Studio C++ tools, MozillaBuild's `bin` directory on PATH, and native Python.
+
+In Settings, set one or more local times in `HH:MM` format and enable Daily source pull and build. The app fetches both `origin/main` branches, updates its own detached worktree in `~/.tb-tools/daily-build`, and runs `./mach build` there. It never switches the Working checkout. Build now, Cancel build, and View log are available in the same section. If the app starts after a scheduled time, it runs one catch-up build that day. Enabling the schedule also asks the packaged app to start at login on macOS or Windows; operating system approval may still be needed.
+
+For phone access over cellular, install Tailscale on the computer and phone and sign in to the same private network. Choose Pair Phone in the desktop app. It configures Tailscale Serve on private HTTPS port 8443 and shows the phone URL and a one-time code. Open the URL on the phone, enter the code, then add the page to the home screen. The phone uses the same console and actions through a separate paired gateway. Disable Phone Access and Revoke Paired Phones are in the app menu. The original local console stays bound to loopback.
 
 ## Command List
 ##### <ins>Quick Links</ins>
@@ -629,3 +642,127 @@ tb update
                                                ..::::::..
 
 ```
+### Minimize AI tasks
+
+Use **Minimize** in Update, Review Update, Verify, Review, conflict resolution,
+or Submit to use the console while the task continues. The task tray shows
+**Thinking**, **Working**, **Waiting for input**, or **Complete**. Click a task
+to reopen its existing session. Draft input is kept when switching tasks, and
+the tray restores tracked sessions after a page reload. Collapse the tray when
+it covers other controls. Completed tasks can be dismissed. In Review, **Close**
+or Escape cancels the active review and removes it from the tray. Use **Minimize**
+to keep the review running.
+
+Allow browser notifications to receive a system notification when a task changes
+state. Clicking it focuses the console tab and opens that task. Notifications
+require an open console tab and browser permission. If permission is blocked or
+unsupported, the tray still shows task status. Multiple console tabs share
+notification state to avoid duplicate alerts.
+
+Successful final review actions, such as **Accept**, **Request Changes**, and
+**Post Comment**, close their dialog. Confirming **Submit Patch** closes the AI
+dialog when submission starts; its Submit dialog closes on success. Errors keep
+the relevant dialog open. Minimizing never cancels a task. Tasks that need the
+same checkout still run one at a time to protect their source changes.
+
+### Implement assigned bugs
+
+With `ai.enabled` enabled, assigned bugs without patches have an **Implement**
+button. It opens an AI dialog where you choose the latest `main` or the current
+commit as the base and add instructions. The console
+requires a clean working comm checkout, marks the bug `ASSIGNED`, and creates a
+`Bug-<number>` branch. It reads all bug details and comments and asks the agent to
+inspect related project history, plans, instructions, and source conventions.
+
+Use **Settings** in the More actions menu to choose the AI model and reasoning
+level for each task type. Choices are saved in `~/.tb-tools/ai-settings.json` and
+apply to the next turn, including resumed work. Defaults use `gpt-6-sol`; reviews
+and repairs use high reasoning, and other work uses medium reasoning. Unavailable
+models or reasoning levels require a settings change; there is no silent fallback.
+
+The implementation and verification agents use separate saved chats.
+They must provide evidence for acceptance criteria, applicable tests, and
+accessibility. Verification uses the normal Verify checks, including CodeRabbit.
+Findings go back to the implementation agent, and agreed changes amend the same
+commit. Blocked checks and unresolved findings stop the workflow with saved
+reports and a **Retry** action.
+
+After verification, Implement posts a full-build Try through the normal monitor.
+When no patch-caused failures remain, it automatically folds any Try fixup into
+the implementation commit. Other Try workflows still use the manual **Amend**
+button. Implement saves its stages and both conversations under
+`~/.tb-tools/implementations/`; the server resumes unfinished work after restart.
+The dialog shows progress, reports, and styled working and committed diffs. Send
+live feedback while the agents implement or verify. Feedback reaches the active
+agent and is checked again before committing or posting Try. After Try submission
+starts, the dialog shows monitor progress. Minimize the dialog and reopen it from
+the AI task tray or the bug card button; unsent feedback stays in the dialog.
+The dashboard has no inline implementation reports or run list.
+Use **Cancel implementation** in the dialog to stop an active or blocked run.
+Cancellation waits for the active operation to stop before releasing the checkout.
+Use **Dismiss** to remove a finished or blocked task from the task tray. Dismissing
+a blocked task also cancels it. Saved history and source changes remain.
+Other checkout actions wait until the
+workflow finishes or cancellation completes. Cancellation keeps
+the branch and local changes. If a Try already exists, its normal monitor keeps
+running after cancellation, but Implement no longer amends its fixes.
+
+### Automatic Try checks and fixes
+
+The console checks pending Try status once a minute while its server runs. Status reads do not call AI. Completed failures enter AI assessment; unresolved evidence uses a separate retry delay of up to 30 minutes.
+Older saved runs remain in Try history, but do not start automatic checks or AI
+assessments. Previously imported historical runs are paused on startup.
+Status polling does not call AI for pending, passing, or older attempts. Only the
+latest completed, failed attempt for a patch can start diagnosis or repair.
+Unresolved evidence and assessment errors may retry that same failed attempt.
+Retries resume its saved conversation rather than starting a new investigation.
+Four independent workflows may run at once.
+`tb try`, the console Try action, and Try runs posted during Submit save a
+monitor record before pushing. The record includes the exact comm and Gecko
+commits, task selection, submission marker, next check time, and Try history.
+The records live in `~/.tb-tools/try-monitor/`. Restarting the server resumes due
+checks and interrupted work. Closing a browser tab does not stop the worker.
+Checks wait while the server is stopped.
+
+A run passes when its scheduled jobs finish and no failure is caused by the
+patch or its fixup. The worker collects comparison evidence from recent comm-central and Try pushes,
+including runs from the same author and other authors. AI also checks the source, platform, build settings,
+and artifact revisions. Missing or uncertain evidence keeps a run pending.
+The graph shows the result, check times, evidence, errors, and older Try links.
+A Try for an earlier version of a patch is shown as stale.
+
+Diagnosis and repair use separate comm and Gecko Git worktrees for each workflow
+under the monitor directory. The worker creates one `fixup! <parent subject>`
+commit, then amends that commit for later repairs. Its body explains the full
+set of failure causes, file changes, checks, and validation limits. Each repair
+gets another Try with the saved task selection. The worker repeats until no
+patch-caused failures remain. The configured Codex CLI and normal `mach try`
+authentication must be available. Source and test logs are treated as evidence,
+not as instructions to the AI.
+
+Fixups appear in the graph with the same row style as uncommitted changes. Their
+**Amend** button folds the fixup into its parent and replays descendant branches,
+including forks and aliases. It requires a clean working checkout. Conflicting
+replays leave branches unchanged. Branch updates and interrupted Amend work have
+saved recovery records.
+
+The worker saves push output as it arrives and uses a unique marker to recover
+a submitted run after a crash. If it cannot prove whether a push succeeded, it
+keeps checking instead of posting a duplicate. Network or AI errors are saved
+and retried. A new manual Try supersedes the older automatic repair loop for the
+same patch. Older saved Try links remain history only; post a new Try
+to enable automatic repair when the old record lacks the original task selection.
+Try runs that include uncommitted changes also need a new run after those changes
+are committed before automatic repair can start.
+
+### AI context and checkout ownership
+
+Large evidence and history stay in local files instead of being copied into each
+AI message. Small indexes point to individual jobs, logs, and prior findings.
+Complete evidence remains available. This reduces repeated input; it does not
+replace required review coverage or tests. See [the AI usage audit](AI_USAGE_AUDIT.md).
+
+Review uses its own checkout queue, including follow-up turns. Update and Implement
+reserve the working checkout while active. A busy Codex writer causes an error;
+it does not start a second writer in a new chat. Try diagnosis and repair use
+per-workflow checkouts and saved conversations. Separate checkouts can run at once.

@@ -28,6 +28,7 @@ export async function squashTryFixup({ graph, hash, store = createTryMonitorStor
   const git = async (...args) => (await runCommand({ cmd: "git", args, cwd: graph.path, capture: true, silent: true })).trim();
   let temporary;
   try {
+    state.branchNamespace ||= graph.branchNamespace || "";
     await assertCurrentTrySource(state, runCommand);
     if (state.attempts.at(-1)?.buildValidationBlocked) throw new Error("No build completed successfully. Run a matching-source Try before Amend.");
     if (!["passed", "paused", "needs-evidence", "waiting"].includes(state.phase)) throw new Error("Wait for the current repair or submission before amending.");
@@ -49,9 +50,15 @@ export async function squashTryFixup({ graph, hash, store = createTryMonitorStor
     await git("merge-base", "--is-ancestor", parent, source);
     const parentParents = (await git("show", "-s", "--format=%P", parent)).split(" ").filter(Boolean);
     if (parentParents.length !== 1) throw new Error("Cannot amend a root or merge commit with this action.");
+    const namespace = state.branchNamespace;
+    // A managed task can move its own branches and its exact repair receipt.
+    // Author branches and other tasks can retain the same source commit.
     const branches = (await git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/tb-tools/repair-owners/"))
-      .split("\n").filter(Boolean).map(line => line.split(" "));
-    const descendants = (await git("rev-list", "--reverse", "--topo-order", "--ancestry-path", `${parent}..`, "--branches"))
+      .split("\n").filter(Boolean).map(line => line.split(" "))
+      .filter(([ref, old]) => !namespace || ref.startsWith(`refs/heads/${namespace}`) ||
+        ref === state.fixupRef || ref.startsWith("refs/tb-tools/repair-owners/") && old === hash);
+    const descendants = (await git("rev-list", "--reverse", "--topo-order", "--ancestry-path", `${parent}..`,
+      ...(namespace ? [...branches.map(([ref]) => ref), hash] : ["--branches"])))
       .split("\n").filter(Boolean);
     const rewrites = new Map();
     temporary = await mkdtemp(path.join(os.tmpdir(), "tb-try-amend-"));

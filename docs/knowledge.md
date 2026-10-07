@@ -41,10 +41,11 @@ Existing reusable-knowledge bullets seed provisional lessons without extra AI ca
 ## Search and learning
 
 SQLite provides local full-text search. A small MiniLM model supplies meaning-based
-search. The model runs in a worker on this computer. Its first use downloads model
+search. The model runs in a separate process on this computer. Its first use downloads model
 files from Hugging Face; source text is not sent there. Model files and indexes
 are local caches, not Git content. Exact search continues when the model is not
-ready or a download fails. Query embedding waits at most 300 milliseconds.
+ready or a download fails. A native model crash cannot close the console. Exact
+search remains available if the model process stops. Query embedding waits at most 300 milliseconds.
 
 The console adds at most 10,000 characters of retrieved evidence by default.
 Relevant records include paths to their full evidence. Current code and explicit

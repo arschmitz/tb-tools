@@ -254,7 +254,7 @@ async function pollTasks() {
       if (!tasks.has(task.key) || task.version !== version) return;
       trackAiTask({ kind: task.kind, session, title: task.title, endpoint: task.endpoint });
       const adapter = adapters.get(task.kind);
-      if (adapter?.dialog?.open && adapter.id === task.id) adapter.onUpdate(session);
+      if (adapter?.dialog?.open && adapter.id === task.id) adapter.onUpdate?.(session);
     } catch (error) {
       if (!tasks.has(task.key) || task.version !== version) return;
       task.unavailable = error.message;
@@ -270,7 +270,7 @@ if (INTERACTIVE.aiEnabled && INTERACTIVE.enabled) {
   try {
     for (const key of JSON.parse(sessionStorage.getItem(`${storageKey}:dismissed`) || "[]")) dismissed.add(key);
     for (const task of JSON.parse(sessionStorage.getItem(storageKey) || "[]")) {
-      if (!["update", "review", "implement", "submit"].includes(task.kind) || typeof task.id !== "string") continue;
+      if (!["update", "review", "implement", "submit", "rebase"].includes(task.kind) || typeof task.id !== "string") continue;
       task.key = `${task.kind}:${task.id}`;
       task.endpoint = `/api/${task.kind === "update" ? "patch-update" : task.kind}/${encodeURIComponent(task.id)}`;
       if (dismissed.has(task.key)) continue;

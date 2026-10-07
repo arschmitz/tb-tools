@@ -1235,6 +1235,10 @@ export function resetRenderedGraph(index) {
 }
 
 export function applyGraphSnapshot(index, snapshot, { force = false } = {}) {
+  if (snapshot.taskWorktree) {
+    void refreshGraphFromServer(index, { force: true }).catch(error => console.error("Could not refresh the repository graph:", error));
+    return false;
+  }
   const state = graphStates[index];
   const nextSignature = getSnapshotFingerprint(snapshot);
 

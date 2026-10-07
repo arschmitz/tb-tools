@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
+  <title>Thunderbird Commands</title>
+  <link rel="stylesheet" href="browser-shell.css">
+</head>
+<body>
+  <header class="browser-header">
+    <div class="toolbar" role="toolbar" aria-label="Page navigation">
+      <button type="button" data-action="back" id="back" aria-label="Back" title="Back">←</button>
+      <button type="button" data-action="forward" id="forward" aria-label="Forward" title="Forward">→</button>
+      <button type="button" data-action="reload" id="reload" aria-label="Reload" title="Reload">↻</button>
+      <span class="address" id="address" aria-live="polite">Console</span>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Application tabs"></nav>
+  </header>
+  <script src="browser-shell.js"></script>
+</body>
+</html>

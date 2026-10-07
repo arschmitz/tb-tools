@@ -1,3 +1,5 @@
+import { uiState } from "./config.js";
+import { openRebaseFailureDialog } from "./rebase-dialog.js";
 import { setLiveText, replaceChangedChildren, hasSelectedText } from "./live-text.js";
 import { createActivityEntry as createSharedActivityEntry, bindAiFeedbackForm } from "./ai-dialog-controls.js";
 import { registerAiTaskDialog, enableTaskNotifications } from "./ai-task-tray.js";
@@ -1027,6 +1029,10 @@ function renderSession(currentSession) {
     candidate.changeApplied && candidate.changeAccepted && !candidate.changesAmended
   ));
 
+  if (session.rebaseConflict && session.rebaseConflict.id !== uiState.lastUpdateRebaseId) {
+    uiState.lastUpdateRebaseId = session.rebaseConflict.id;
+    openRebaseFailureDialog(session.rebaseConflict, { fallbackMessage: session.error });
+  }
   if (session.snapshot) {
     const snapshotKey = `${session.id}:${session.currentHash}`;
 

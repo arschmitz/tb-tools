@@ -1,72 +1,73 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { execFile } from "node:child_process";
+import { test } from "node:test";
+import { promisify } from "node:util";
 import { createLocalEmbeddings } from "../commands/knowledge/embeddings.mjs";
-import { createKnowledgeService } from "../commands/knowledge/service.mjs";
-import { openKnowledgeStore } from "../commands/knowledge/store.mjs";
 
-function worker() {
-  const result = new EventEmitter();
-  result.unref = () => {};
-  result.postMessage = message => { result.lastMessage = message; };
-  result.terminate = async () => { result.emit("exit", 1); };
-  return result;
+function setup(t) {
+  const worker = new EventEmitter();
+  const messages = [], errors = [];
+  worker.unref = () => {};
+  worker.postMessage = message => messages.push(message);
+  worker.terminate = async () => worker.emit("exit", 0);
+  const embeddings = createLocalEmbeddings("/cache", {
+    createWorker: () => worker, onError: error => errors.push(error.message),
+  });
+  t.after(() => embeddings.close());
+  return { worker, messages, errors, embeddings };
 }
 
-test("file workers remove inline input options and retain other Node options", async () => {
-  const previous = process.execArgv;
-  process.execArgv = ["--input-type=module", "--input-type", "module", "--import", "./test/block-external-apis.mjs"];
-  let options;
-  const fake = worker();
-  try {
-    const runtime = createLocalEmbeddings("/tmp/knowledge", { createWorker: (url, value) => {
-      assert.match(url.pathname, /embedding-worker\.mjs$/);
-      options = value; return fake;
-    } });
-    assert.deepEqual(options.execArgv, ["--import", "./test/block-external-apis.mjs"]);
-    assert.equal(options.workerData.cache, "/tmp/knowledge/models");
-    await runtime.close();
-  } finally { process.execArgv = previous; }
+test("standalone shutdown waits for the model process to exit before Node exits", async () => {
+  const module = new URL("../commands/knowledge/embeddings.mjs", import.meta.url).href;
+  const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "--eval", `
+    const { createLocalEmbeddings } = await import(${JSON.stringify(module)});
+    const embeddings = createLocalEmbeddings('/unused-cache');
+    await embeddings.close();
+    process.stdout.write('model process closed');
+  `], { timeout: 10_000 });
+  assert.equal(stdout, "model process closed");
 });
 
-test("worker failure retains the first cause and rejects pending embedding requests", async () => {
-  const fake = worker(), errors = [];
-  let readyCalls = 0;
-  const runtime = createLocalEmbeddings("/tmp/knowledge", { createWorker: () => fake,
-    onError: error => errors.push(error.message), onReady: () => { readyCalls++; } });
-  fake.emit("message", { ready: true });
-  assert.equal(runtime.ready, true);
-  const request = runtime.embed(["A source-linked lesson"]);
-  const rejected = assert.rejects(request, /Model initialization failed/);
-  fake.emit("error", new Error("Model initialization failed"));
-  fake.emit("exit", 1);
-  fake.emit("message", { ready: true });
-  await rejected;
-  assert.deepEqual(errors, ["Model initialization failed"]);
-  assert.equal(runtime.ready, false);
-  assert.equal(readyCalls, 1);
-  assert.equal(await runtime.embed(["Retry"]), null);
-  await runtime.close();
+test("a model process failure rejects pending requests and leaves exact search available", async t => {
+  const { worker, embeddings, errors } = setup(t);
+  assert.equal(await embeddings.embed(["before loading"]), null);
+  worker.emit("message", { ready: true });
+  const first = assert.rejects(embeddings.embed(["first"]), /exited/);
+  const second = assert.rejects(embeddings.embed(["second"]), /exited/);
+  worker.emit("exit", 5);
+  await Promise.all([first, second]);
+  assert.equal(embeddings.ready, false);
+  assert.equal(await embeddings.embed(["after failure"]), null);
+  worker.emit("error", new Error("duplicate failure"));
+  worker.emit("message", { ready: true });
+  assert.equal(embeddings.ready, false);
   assert.equal(errors.length, 1);
 });
 
-test("a new semantic runtime can recover from a saved error without losing its diagnostic", async t => {
-  const directory = await mkdtemp(path.join(tmpdir(), "tb-semantic-retry-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const previous = await openKnowledgeStore(directory);
-  previous.setting("semanticError", "Local embedding worker exited (1).");
-  previous.close();
-  const semantic = { ready: false, model: "test", embed: async () => [], close: async () => {} };
-  const service = await createKnowledgeService({ directory, semantic: true, importLegacy: false }, { embeddings: semantic });
-  try {
-    assert.equal(service.store.setting("semanticError"), null);
-    assert.equal(service.store.setting("semanticLastError").message, "Local embedding worker exited (1).");
-    semantic.ready = true;
-    await service.indexSemantic();
-    assert.equal(service.semanticReady, true);
-    assert.equal(service.store.setting("semanticError"), null);
-  } finally { await service.close(); }
+test("initialization and send failures disable the model without an uncaught error", async t => {
+  const { worker, embeddings, errors } = setup(t);
+  worker.emit("message", { error: "model unavailable" });
+  assert.deepEqual(errors, ["model unavailable"]);
+  assert.equal(await embeddings.embed(["query"]), null);
+  const other = setup(t);
+  other.worker.emit("message", { ready: true });
+  other.worker.postMessage = () => { throw new Error("process closed"); };
+  await assert.rejects(other.embeddings.embed(["query"]), /process closed/);
+  assert.equal(other.embeddings.ready, false);
+});
+
+test("model requests keep input limits, timeouts and clean shutdown", async t => {
+  const { worker, embeddings, messages, errors } = setup(t);
+  worker.emit("message", { ready: true });
+  const completed = embeddings.embed(["a".repeat(3000)]);
+  assert.equal(messages[0].texts[0].length, 2000);
+  worker.emit("message", { id: messages[0].id, vectors: [[1, 0]] });
+  assert.deepEqual(await completed, [[1, 0]]);
+  assert.equal(await embeddings.embed(["slow"], 1), null);
+  const pending = embeddings.embed(["during shutdown"]);
+  await embeddings.close();
+  assert.equal(await pending, null);
+  assert.equal(embeddings.ready, false);
+  assert.deepEqual(errors, []);
 });

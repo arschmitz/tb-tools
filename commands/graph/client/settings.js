@@ -7,6 +7,41 @@ const status = dialog?.querySelector(".console-settings-status");
 const save = dialog?.querySelector(".console-settings-save");
 let generation = 0;
 let saving = false;
+const daily = dialog?.querySelector(".daily-build-settings");
+
+async function requestDailyBuild(body) {
+  const response = await fetch(`/api/daily-build${body ? "" : `?token=${encodeURIComponent(INTERACTIVE.token)}`}`, body ? {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: INTERACTIVE.token, ...body }),
+  } : { cache: "no-store" });
+  const result = await response.json();
+  if (!response.ok || !result.ok) {
+    const error = new Error(result.error || "Could not load daily build settings.");
+    error.status = response.status;
+    throw error;
+  }
+  return result;
+}
+
+function renderDailyBuild(result, updateSettings = true) {
+  if (!daily) return;
+  if (updateSettings) {
+    daily.querySelector(".daily-build-enabled").checked = result.settings.enabled;
+    daily.querySelector(".daily-build-times").value = result.settings.times.join("\n");
+  }
+  daily.querySelector(".daily-build-status").textContent =
+    `Build: ${result.status}${result.completedAt ? ` · ${new Date(result.completedAt).toLocaleString()}` : ""}${result.error ? ` · ${result.error}` : ""}${result.settings.enabled && result.loginStatus && result.loginStatus !== "enabled" ? ` · Start at login: ${result.loginStatus}` : ""}`;
+  daily.querySelector(".daily-build-cancel").disabled = result.status !== "running";
+}
+
+async function loadDailyBuild() {
+  if (!daily) return;
+  try { renderDailyBuild(await requestDailyBuild()); }
+  catch (error) {
+    if (error.status === 404) daily.hidden = true;
+    else daily.querySelector(".daily-build-status").textContent = error.message;
+  }
+}
 
 function option(value, text = value) {
   const node = document.createElement("option");
@@ -74,6 +109,7 @@ export async function openConsoleSettings() {
   rows.replaceChildren();
   save.disabled = true;
   status.textContent = "Loading available models...";
+  void loadDailyBuild();
   try {
     const result = await requestSettings();
     if (current !== generation) return;
@@ -108,3 +144,38 @@ form?.addEventListener("submit", async event => {
 });
 dialog?.querySelector(".console-settings-close").addEventListener("click", () => dialog.close());
 dialog?.addEventListener("close", () => { generation++; });
+
+daily?.querySelector(".daily-build-save").addEventListener("click", async () => {
+  const times = daily.querySelector(".daily-build-times").value.split(/[\n,]+/).map(time => time.trim()).filter(Boolean);
+  try { renderDailyBuild(await requestDailyBuild({ action: "save", settings: {
+    enabled: daily.querySelector(".daily-build-enabled").checked, times,
+  } })); }
+  catch (error) { daily.querySelector(".daily-build-status").textContent = error.message; }
+});
+daily?.querySelector(".daily-build-run").addEventListener("click", async () => {
+  try { renderDailyBuild(await requestDailyBuild({ action: "run" })); }
+  catch (error) { daily.querySelector(".daily-build-status").textContent = error.message; }
+});
+daily?.querySelector(".daily-build-cancel").addEventListener("click", async () => {
+  try { renderDailyBuild(await requestDailyBuild({ action: "cancel" })); }
+  catch (error) { daily.querySelector(".daily-build-status").textContent = error.message; }
+});
+
+daily?.querySelector(".daily-build-log-open").addEventListener("click", async () => {
+  const log = daily.querySelector(".daily-build-log");
+  if (!log.hidden) { log.hidden = true; return; }
+  try {
+    const response = await fetch(`/api/daily-build/log?token=${encodeURIComponent(INTERACTIVE.token)}`);
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "Could not load build log.");
+    log.textContent = result.output || "No build log yet.";
+    log.hidden = false;
+  } catch (error) { daily.querySelector(".daily-build-status").textContent = error.message; }
+});
+
+setInterval(() => {
+  if (!daily || daily.hidden || !dialog?.open) return;
+  void requestDailyBuild().then(result => renderDailyBuild(result, false)).catch(error => {
+    daily.querySelector(".daily-build-status").textContent = error.message;
+  });
+}, 5000);
