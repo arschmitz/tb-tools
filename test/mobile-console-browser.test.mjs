@@ -42,7 +42,7 @@ test("paired phone opens the console at phone width and can change views", async
   await page.goto(url);
   await page.locator('input[name="code"]').fill(gateway.issuePairCode().code);
   await page.getByRole("button", { name: "Pair this phone" }).click();
-  await page.getByRole("heading", { name: "Thunderbird Desktop Console" }).waitFor();
+  await page.getByRole("heading", { name: "Thunderbird Development Dashboard" }).waitFor();
   assert.equal(await page.evaluate(() => document.querySelector('meta[name="viewport"]')?.content),
     "width=device-width, initial-scale=1");
   assert.equal(await page.evaluate(() => document.documentElement.clientWidth), 390);
