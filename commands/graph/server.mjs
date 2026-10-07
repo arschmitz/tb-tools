@@ -1229,6 +1229,21 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      const brandingAssets = {
+        "/favicon.ico": ["favicon-v3.ico", "image/x-icon"],
+        "/assets/branding/app-icon.png": ["thunderbird-development-dashboard-app-icon-v2.png", "image/png"],
+        "/assets/branding/logo-light.png": ["thunderbird-development-dashboard-horizontal-mono-light-v7.png", "image/png"],
+        "/assets/branding/logo-dark.png": ["thunderbird-development-dashboard-horizontal-mono-dark-v7.png", "image/png"],
+      };
+      const brandingAsset = brandingAssets[url.pathname];
+      if (request.method === "GET" && brandingAsset) {
+        const [filename, contentType] = brandingAsset;
+        const content = await readFile(new URL(`../../assets/branding/${filename}`, import.meta.url));
+        response.writeHead(200, { "content-type": contentType, "cache-control": "no-cache" });
+        response.end(content);
+        return;
+      }
+
       const clientScript = GRAPH_CLIENT_SCRIPTS.find(
         (script) => url.pathname === `/assets/${script.output}`,
       );
