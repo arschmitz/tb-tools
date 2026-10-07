@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { executeConsoleArtifactBuild, getConsoleBuildEnvironment, prepareConsoleBuild, supportsArtifactBuild } from "../commands/graph/build.mjs";
+import { executeConsoleArtifactBuild, getConsoleBuildEnvironment, prepareConsoleBuild, publishCompletedConsoleBuild, supportsArtifactBuild } from "../commands/graph/build.mjs";
+import { prepareTaskWorktreeBuild } from "../commands/graph/task-worktrees.mjs";
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "tb-build-test-"));
@@ -239,4 +240,68 @@ test("console test sessions use the successful artifact build", async (t) => {
   }
   assert.equal(session.status, "complete");
   assert.equal(calls.at(-1).env.MOZCONFIG, plan.paths.config);
+});
+
+
+test("a completed native build warms another worktree without sharing paths or writable output", async t => {
+  const f = await fixture(t);
+  const first = f.graphs[0];
+  const root = path.dirname(first.path);
+  const object = path.join(root, "obj-original");
+  await mkdir(path.join(object, "dist", "bin"), { recursive: true });
+  const target = path.join(root, "native-library");
+  await writeFile(target, "native binary");
+  await symlink(target, path.join(object, "dist", "bin", "library"));
+  const environmentCommand = f.runCommand;
+  const runCommand = async command => command.cmd === "git" && command.args[0] === "rev-parse"
+    ? "a".repeat(40) : environmentCommand(command);
+  const cacheDirectory = path.join(root, "native-shared-cache");
+  const snapshot = await publishCompletedConsoleBuild({ graph: first, runCommand, cacheDirectory });
+  await rm(target);
+  assert.equal(await readFile(path.join(snapshot, "dist", "bin", "library"), "utf8"), "native binary");
+  const second = await prepareConsoleBuild({ graph: f.graphs[1], runCommand, cacheDirectory });
+  assert.equal(second.donor, snapshot);
+  const calls = [];
+  await executeConsoleArtifactBuild({ plan: second, execute: executor(second, calls) });
+  assert.deepEqual(calls.map(call => call.args), [["configure"], ["build"]]);
+  await writeFile(path.join(second.paths.object, "dist", "bin", "library"), "task changed");
+  assert.equal(await readFile(path.join(snapshot, "dist", "bin", "library"), "utf8"), "native binary");
+  f.changes.set(root, "source.cpp");
+  await assert.rejects(publishCompletedConsoleBuild({ graph: first, runCommand, cacheDirectory }), /changed source/);
+});
+
+test("compiler server paths do not split compatible binary snapshots", async t => {
+  const f = await fixture(t);
+  const runCommand = async command => {
+    const output = await f.runCommand(command);
+    if (command.args[0] !== "environment") return output;
+    const environment = JSON.parse(output);
+    environment.mozconfig.env = { added: { SCCACHE_BASEDIRS: command.cwd, SCCACHE_SERVER_UDS: `${command.cwd}/server.sock` } };
+    return JSON.stringify(environment);
+  };
+  const first = await prepareConsoleBuild({ graph: f.graphs[0], runCommand });
+  const second = await prepareConsoleBuild({ graph: f.graphs[1], runCommand });
+  assert.equal(first.key, second.key);
+});
+
+test("a task switches from artifact output to a native build after native source changes", async t => {
+  const f = await fixture(t);
+  const graph = f.graphs[0];
+  const plan = await f.prepare(graph);
+  await executeConsoleArtifactBuild({ plan, execute: executor(plan, []) });
+  f.changes.set(graph.path, "mail/native.cpp\0");
+  const calls = [];
+  const session = { graph, output: "" };
+  const runCommand = async command => {
+    calls.push(command);
+    return f.runCommand(command);
+  };
+  await prepareTaskWorktreeBuild(session, runCommand);
+  assert.ok(calls.some(command => command.cmd === "./mach" && command.args.join(" ") === "build" && !command.env.MOZCONFIG));
+  assert.deepEqual(await getConsoleBuildEnvironment(graph), {});
+  assert.match(session.output, /using a normal build/);
+  await assert.rejects(prepareTaskWorktreeBuild(session, async command => {
+    if (command.args.join(" ") === "build") throw new Error("Native compiler failed");
+    return f.runCommand(command);
+  }), /Native compiler failed/);
 });

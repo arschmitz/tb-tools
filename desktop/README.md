@@ -1,7 +1,7 @@
 # Desktop host
 
 `main.cjs` starts the existing console server on loopback and keeps it alive when
-its window closes. It creates a Review worktree pair before loading the console.
+its window closes. The console shows one comm repository and its Firefox parent.
 External links open as tabs inside the main window. A fixed header keeps Back,
 Forward, Reload, and the tab list visible while a page is open. Native window
 controls close, minimize, or maximize the window. Each external tab has a close
@@ -17,13 +17,39 @@ The Edit menu supplies the normal copy, paste, cut, undo, and select-all shortcu
 Right-click selected text to copy it. Right-click a text field to use its editing
 commands. These commands work in Console and external pages.
 
-The daily build service stores its schedule and state in `~/.tb-tools/daily-build`.
-It fetches both `origin/main` branches and builds in its own detached worktree.
-It does not switch the Working checkout. Each worktree has a private object
-directory. Completed artifact snapshots are shared. sccache stores compiler
-results in one cache when installed, but cross-worktree hits depend on the
-active server's base paths. The app disables sccache direct mode because
+Update, Verify, Review, Implement, rebase, Build, Test, Lint, and Try use task
+worktrees. A worktree is a separate source directory that shares the repository's
+Git history. Each task has its own paired Firefox and comm directories under
+`~/.tb-tools/worktrees` and branches under `tb-task/<task-id>/`. Two tasks can
+start from the same commit. Neither task moves the other task's branches or the
+author's checkout. Task branches appear in the shared repository graph. There
+is no permanent Review checkout and no Working-to-Review sync. Direct author
+actions such as Checkout and Commit still act on the author's source directory.
+Both the desktop host and `tb console` use this same model.
+
+Build and Test copy the current tracked and untracked edits into a task without
+changing their source. AI tasks prepare a real local build before starting.
+Native code changes require a native build. Edited AI candidates build again
+before completion. Build failures remain failures, with their command output.
+Update and Review sessions retain their worktree path across restarts. Paused
+rebases retain their replay plan and pending conflict resolution for Continue.
+Task directories remain available for resume and inspection.
+
+Each worktree has private build output. Completed binary snapshots and the
+compiler cache live in `~/.tb-tools/build-cache`. `TB_BUILD_CACHE_PATH` can move
+this cache. Compatible completed native builds and downloaded artifacts can
+warm another worktree, including the author's directory. Configuration files,
+generated headers, and writable compiler objects are never shared. A fresh
+artifact worktree runs one full `mach build` before `mach build faster`.
+When sccache is installed, each worktree uses its own server and source base
+path with the common compiler cache. The app disables sccache direct mode because
 [version 0.18 can reuse stale headers across worktrees](https://github.com/mozilla/sccache/issues/2863).
+
+The daily build service stores its schedule and state in `~/.tb-tools/daily-build`.
+Settings accepts one or more local times. The service fetches both `origin/main`
+branches and builds in its own detached worktree. It does not switch the author's
+checkout. After success, it publishes the completed installed binaries to the
+same shared cache. Failed and incomplete builds are not published.
 
 `mobile-gateway.mjs` listens on loopback and requires a one-time pairing code.
 It gives each phone its own session and translates that session's API token to
@@ -41,3 +67,11 @@ build macOS arm64, Windows x64, and Linux x64 bundles from one checkout. You can
 also pass targets such as `win32:arm64` or `linux:arm64` to
 `npm run desktop:package -- <target>`. Run the smoke test on each target system
 before distribution. Packages are not signed or notarized.
+
+`npm run desktop:worktree:smoke -- /path/to/comm` creates two real task worktrees,
+builds each, runs `test_mailServices.js` in each, and checks that the author's
+HEAD, status, and unmerged index remain unchanged. `desktop:cache:smoke` checks
+compiler-cache hits across the two source paths and verifies that a changed
+header causes a new compile. Windows Mach commands use Python; Unix commands
+run the executable Mach script. These probes validate the current host. Building
+a Windows or Linux package does not replace running its smoke tests on that OS.

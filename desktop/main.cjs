@@ -1,6 +1,6 @@
 const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, WebContentsView, shell, clipboard,
   ipcMain } = require("electron");
-const { randomUUID, createHash } = require("node:crypto");
+const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -398,23 +398,17 @@ async function start() {
   const commPath = await chooseCheckout();
   const [{ createGraphCommand }, { startInteractiveGraphServer },
     { createDailyBuildService }, { createMobileGateway }, { createRemoteAccessService },
-    { ensurePairedWorktrees, getWorktreeDirectory, writeWorktreeBuildConfig },
     { default: savedConfig }] = await Promise.all([
     import("../commands/graph.mjs"), import("../commands/graph/server.mjs"),
     import("../commands/graph/daily-build.mjs"), import("./mobile-gateway.mjs"),
     import("./remote-access.mjs"),
-    import("../commands/graph/worktrees.mjs"), import("../lib/config.mjs"),
+    import("../lib/config.mjs"),
   ]);
-  const checkoutId = createHash("sha256").update(commPath).digest("hex").slice(0, 8);
-  const review = await ensurePairedWorktrees({ geckoSource: path.dirname(commPath),
-    commSource: commPath, directory: getWorktreeDirectory(`review-${checkoutId}`) });
-  await writeWorktreeBuildConfig({ gecko: review.gecko.path, name: "review" });
-  const appConfig = { ...savedConfig, managedReviewWorktrees: checkoutId, reviewCheckout: {
-    firefoxPath: review.gecko.path, commPath: review.comm.path,
-  } };
+  const appConfig = { ...savedConfig, taskWorktrees: true };
   dailyBuild = createDailyBuildService({ geckoSource: path.dirname(commPath), commSource: commPath,
+    ...(process.env.TB_DESKTOP_TEST === "1" ? { directory: path.join(app.getPath("userData"), "daily-build") } : {}),
     onSettingsSaved: async settings => {
-      if (app.isPackaged && !process.argv.includes("--smoke-test") &&
+      if (process.env.TB_DESKTOP_TEST !== "1" && app.isPackaged && !process.argv.includes("--smoke-test") &&
           ["darwin", "win32"].includes(process.platform)) {
         app.setLoginItemSettings({ openAtLogin: settings.enabled });
         return app.getLoginItemSettings().status ||
@@ -429,7 +423,9 @@ async function start() {
     makeToken: () => token, waitForClose: async () => "",
     startServer: async options => {
       consoleHtml = options.html;
-      consoleServer = await startInteractiveGraphServer({ ...options, dailyBuild });
+      consoleServer = await startInteractiveGraphServer({ ...options, dailyBuild,
+        ...(process.env.TB_DESKTOP_TEST === "1" ? { implementationManager: null, tryMonitor: null,
+          patchSessionDirectory: path.join(app.getPath("userData"), "patch-sessions") } : {}) });
       return consoleServer;
     } });
   await graphCommand({ open: false, port: 0, closeTabs: false });
@@ -443,7 +439,7 @@ async function start() {
     const page = await fetch(consoleServer.url);
     const status = await fetch(new URL(`/api/daily-build?token=${token}`, consoleServer.url));
     if (!page.ok || !status.ok) throw new Error("Desktop smoke test could not reach the console and daily build API.");
-    process.stdout.write(`${JSON.stringify({ ok: true, review: review.comm.path,
+    process.stdout.write(`${JSON.stringify({ ok: true, taskWorktrees: true,
       console: consoleServer.url, mobile: mobileAddress.url })}\n`);
     app.quit();
     return;

@@ -1,3 +1,4 @@
+import { normalizeMachCommand } from "../../lib/mach-command.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -8,7 +9,7 @@ import { isGeneratedWorktreeBuildConfig } from "./worktrees.mjs";
 // Unknown files require a normal build. In particular, do not skip native code,
 // interface definitions, generated files, or build configuration changes.
 export function supportsArtifactBuild(files) {
-  return files.every((file) => !/(?:^|\/)CMakeLists\.txt$/.test(file) && /\.(?:js|mjs|jsm|css|xhtml|html|xul|ftl|properties|dtd|svg|png|jpg|jpeg|gif|webp|ico|md|txt)$/.test(file));
+  return files.every((file) => /(?:^|\/)(?:browser|xpcshell|mochitest|chrome|a11y)\.toml$/.test(file) || !/(?:^|\/)CMakeLists\.txt$/.test(file) && /\.(?:js|mjs|jsm|css|xhtml|html|xul|ftl|properties|dtd|svg|png|jpg|jpeg|gif|webp|ico|md|txt)$/.test(file));
 }
 
 async function exists(file) {
@@ -25,12 +26,14 @@ function shellQuote(value) {
 }
 
 function cacheKeyBuildConfig(originalText, mozconfig) {
-  const source = originalText.replace(/(^|\n)mk_add_options MOZ_OBJDIR=[^\n]+/g,
+  const source = originalText.replace(/^export SCCACHE_(?:BASEDIRS|DIR|SERVER_UDS|SERVER_PORT|IDLE_TIMEOUT)=[^\n]+\n/gm, "").replace(/(^|\n)mk_add_options MOZ_OBJDIR=[^\n]+/g,
     "$1mk_add_options MOZ_OBJDIR=<private>");
   const vars = JSON.parse(JSON.stringify(mozconfig.vars || {}), (key, value) =>
     key === "_mozconfig_opt" && typeof value === "string" && value.startsWith("MOZ_OBJDIR=")
       ? "MOZ_OBJDIR=<private>" : value);
-  return { source, env: mozconfig.env, vars, make_extra: mozconfig.make_extra };
+  const env = JSON.parse(JSON.stringify(mozconfig.env || {}), (key, value) =>
+    /^SCCACHE_(?:BASEDIRS|DIR|SERVER_UDS|SERVER_PORT|IDLE_TIMEOUT)$/.test(key) ? undefined : value);
+  return { source, env, vars, make_extra: mozconfig.make_extra };
 }
 
 export function getArtifactBuildPaths(graph) {
@@ -48,6 +51,64 @@ export function getArtifactBuildPaths(graph) {
 export function getSharedBuildCacheDirectory() {
   return path.resolve(process.env.TB_BUILD_CACHE_PATH ||
     path.join(os.homedir(), ".tb-tools", "build-cache"));
+}
+
+
+function binaryCompatibilityKey(revisions, environment, originalText) {
+  return createHash("sha256").update(JSON.stringify({
+    revisions, args: environment.mozconfig.configure_args || [],
+    resolvedConfig: cacheKeyBuildConfig(originalText, environment.mozconfig),
+    artifactOverrides: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith("MOZ_ARTIFACT_"))),
+    platform: process.platform, arch: process.arch,
+    state: process.env.MOZBUILD_STATE_PATH || path.join(os.homedir(), ".mozbuild"),
+  })).digest("hex");
+}
+
+// Publish only portable installed files after a successful native build.
+// Configure files, generated headers and compiler objects stay in their worktree.
+export async function publishCompletedConsoleBuild({ graph, runCommand,
+  env = {}, cacheDirectory = getSharedBuildCacheDirectory() }) {
+  const root = path.dirname(graph.path);
+  const git = async (cwd, args) => String(await runCommand({ cmd: "git", args, cwd, capture: true, silent: true })).trim();
+  const changed = async cwd => {
+    const untracked = (await git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]))
+      .split("\0").filter(name => name && !(cwd === root && (name === ".mozconfig" || name.startsWith("comm/"))));
+    return untracked.length || await git(cwd, ["diff", "HEAD", "--name-only"]);
+  };
+  const revisions = [];
+  for (const cwd of [root, graph.path]) {
+    if (await changed(cwd)) throw new Error("Cannot publish build binaries from changed source.");
+    revisions.push(await git(cwd, ["rev-parse", "HEAD"]));
+  }
+  const output = String(await runCommand({ cmd: "./mach", args: ["environment", "--format", "json"],
+    cwd: root, env, capture: true, silent: true }));
+  const environment = JSON.parse(output.slice(output.indexOf("{")));
+  if (environment.mozconfig.configure_args.includes("--enable-artifact-builds")) return null;
+  const originalText = environment.mozconfig.path ? await readFile(environment.mozconfig.path, "utf8") : "";
+  const key = binaryCompatibilityKey(revisions, environment, originalText);
+  const snapshot = path.join(cacheDirectory, `compiled-${key}`);
+  if (await exists(path.join(snapshot, "complete"))) return snapshot;
+  const staging = `${snapshot}-${randomUUID()}`;
+  try {
+    const dist = path.join(environment.topobjdir, "dist");
+    if (!await exists(path.join(dist, "bin"))) throw new Error("Completed build has no installed binaries.");
+    await mkdir(path.join(staging, "dist"), { recursive: true });
+    for (const name of ["bin", "lib"]) {
+      if (await exists(path.join(dist, name))) await cp(path.join(dist, name), path.join(staging, "dist", name),
+        { recursive: true, dereference: true, mode: constants.COPYFILE_FICLONE });
+    }
+    // Recheck the source before making the snapshot visible to another task.
+    for (let index = 0; index < 2; index++) {
+      const cwd = index === 0 ? root : graph.path;
+      if (await git(cwd, ["rev-parse", "HEAD"]) !== revisions[index] || await changed(cwd)) {
+        throw new Error("Source changed while publishing completed build binaries.");
+      }
+    }
+    await writeFile(path.join(staging, "complete"), key);
+    try { await rename(staging, snapshot); }
+    catch (error) { if (!await exists(path.join(snapshot, "complete"))) throw error; }
+    return snapshot;
+  } finally { await rm(staging, { recursive: true, force: true }); }
 }
 
 export async function getConsoleBuildEnvironment(graph) {
@@ -123,7 +184,7 @@ export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log 
   // change safely, so use the normal build in that case.
   if (args.some(arg => arg.startsWith("--with-ccache"))) {
     const lines = originalText.split("\n");
-    const filtered = lines.map(line => /^\s*ac_add_options\s+--with-ccache(?:=|\s|$)/.test(line) ? ":" : line);
+    const filtered = lines.map(line => /^\s*ac_add_options\s+--with-ccache(?:=|\s|$)|^export SCCACHE_/.test(line) ? ":" : line);
     if (filtered.every((line, index) => line === lines[index])) {
       log("The mozconfig sources a ccache option; using a normal build.\n");
       if (await exists(paths.active)) await writeFile(paths.active, JSON.stringify({ artifact: false }));
@@ -131,12 +192,7 @@ export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log 
     }
     sourceConfig = filtered.join("\n");
   }
-  const key = createHash("sha256").update(JSON.stringify({
-    revisions, args, resolvedConfig: cacheKeyBuildConfig(originalText, environment.mozconfig),
-    artifactOverrides: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith("MOZ_ARTIFACT_"))),
-    platform: process.platform, arch: process.arch,
-    state: process.env.MOZBUILD_STATE_PATH || path.join(os.homedir(), ".mozbuild"),
-  })).digest("hex");
+  const key = binaryCompatibilityKey(revisions, environment, originalText);
   await mkdir(paths.directory, { recursive: true });
   const config = [
     sourceConfig,
@@ -149,14 +205,16 @@ export async function prepareConsoleBuild({ graph, graphs = [], runCommand, log 
     await writeFile(paths.config, config);
   }
   log("Using an artifact build. Later builds use the faster target.\n");
-  const command = (commandArgs) => ({
+  const command = (commandArgs) => normalizeMachCommand({
     cmd: "./mach", args: commandArgs, cwd: paths.root, capture: true,
     env: { MOZCONFIG: paths.config },
   });
   const snapshot = path.join(cacheDirectory, `binaries-${key}`);
   let donor = "";
   // Only completed snapshots can be shared. Writable object directories stay private.
-  if (await exists(path.join(snapshot, "complete"))) {
+  const compiled = path.join(cacheDirectory, `compiled-${key}`);
+  if (await exists(path.join(compiled, "complete"))) donor = compiled;
+  if (!donor && await exists(path.join(snapshot, "complete"))) {
     donor = snapshot;
     log(`Reusing build artifacts from ${cacheDirectory}.\n`);
   }

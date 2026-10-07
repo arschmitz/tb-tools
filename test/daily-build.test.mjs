@@ -33,17 +33,26 @@ test("daily build uses detached paired worktrees and does not move either source
   const directory = path.join(root, "build-service");
   const sourceHeads = [git(geckoSource, "rev-parse", "HEAD"), git(commSource, "rev-parse", "HEAD")];
   const built = [];
+  const published = [];
+  let failBuild = false;
   let date = new Date(2026, 9, 6, 8, 0);
   const service = createDailyBuildService({ geckoSource, commSource, directory,
     now: () => date,
     build: async options => {
       built.push(options);
+      if (failBuild) throw new Error("Build failed before completion");
       assert.equal(git(options.cwd, "rev-parse", "HEAD"), git(geckoSource, "rev-parse", "origin/main"));
       assert.equal(git(path.join(options.cwd, "comm"), "rev-parse", "HEAD"),
         git(commSource, "rev-parse", "origin/main"));
       assert.match(await readFile(options.env.MOZCONFIG, "utf8"), /obj-daily-build/);
       await mkdir(path.dirname(options.file), { recursive: true });
       await writeFile(options.file, "build passed\n");
+    },
+    publishBuild: async options => {
+      assert.equal(await readFile(built.at(-1).file, "utf8"), "build passed\n");
+      assert.equal(options.graph.path, path.join(built.at(-1).cwd, "comm"));
+      published.push(options);
+      return path.join(root, "shared-binaries");
     },
   });
   await service.start();
@@ -56,6 +65,8 @@ test("daily build uses detached paired worktrees and does not move either source
   assert.equal(service.status().status, "passed");
   assert.equal(await service.readLog(), "build passed\n");
   assert.equal(built.length, 1);
+  assert.equal(published.length, 1);
+  assert.equal(service.status().buildSnapshot, path.join(root, "shared-binaries"));
   await service.checkSchedule();
   assert.equal(built.length, 1);
   assert.deepEqual([git(geckoSource, "rev-parse", "HEAD"), git(commSource, "rev-parse", "HEAD")], sourceHeads);
@@ -70,6 +81,12 @@ test("daily build uses detached paired worktrees and does not move either source
   assert.equal(git(path.join(directory, "gecko", "comm"), "rev-parse", "HEAD"), newSourceHead);
   assert.equal(git(geckoSource, "rev-parse", "HEAD"), sourceHeads[0]);
   assert.deepEqual(service.status().settings.times, ["09:00", "21:30"]);
+  assert.equal(published.length, 2);
+  failBuild = true;
+  await service.runNow();
+  await service.wait();
+  assert.equal(service.status().status, "failed");
+  assert.equal(published.length, 2, "Failed builds must not publish a snapshot");
 });
 
 test("daily build rejects invalid local times", () => {

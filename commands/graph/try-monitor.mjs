@@ -21,7 +21,7 @@ function recordInspection(attempt, inspection, now) {
     !builds.some(job => job.state === "completed" && job.result === "success"));
 }
 
-export function createTryMonitor({ graphs, store = createTryMonitorStore(), treeherder,
+export function createTryMonitor({ graphs, taskWorktrees = false, store = createTryMonitorStore(), treeherder,
   repairer, codexCommand, rustOriginCheck = checkRustOriginUpdate, aiEnabled = true, now = Date.now, onError = console.error, tickIntervalMs = 60000 } = {}) {
   const controller = new AbortController();
   treeherder ||= createTreeherderClient({ signal: controller.signal });
@@ -194,7 +194,7 @@ export function createTryMonitor({ graphs, store = createTryMonitorStore(), tree
     const scheduled = [];
     try {
       const paths = graphs && new Set(graphs.filter(graph => graph.path).map(graph => path.resolve(graph.path)));
-      const workflows = store.list().filter(state => !paths || paths.has(path.resolve(state.path)));
+      const workflows = store.list().filter(state => !paths || paths.has(path.resolve(state.path)) || taskWorktrees && state.repositoryPath && paths.has(path.resolve(state.repositoryPath)));
       for (const saved of workflows) {
         if (stopped || active.size >= 4) break;
         const usageBlock = saved.attempts.at(-1)?.aiUsageBlock;

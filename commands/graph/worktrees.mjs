@@ -1,4 +1,5 @@
 import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { run } from "../../lib/utils.mjs";
@@ -57,7 +58,14 @@ export async function ensurePairedWorktrees({ geckoSource, commSource, directory
 
 export async function writeWorktreeBuildConfig({ gecko, name }) {
   const sccache = await getSccacheConfigureOption();
-  const text = ["export SCCACHE_DIRECT=false", "ac_add_options --enable-project=comm/mail",
+  const cache = path.join(process.env.TB_BUILD_CACHE_PATH || path.join(os.homedir(), ".tb-tools", "build-cache"), "compiler");
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  const serverId = createHash("sha256").update(path.resolve(gecko)).digest("hex").slice(0, 12);
+  const server = process.platform === "win32"
+    ? `export SCCACHE_SERVER_PORT=${20000 + parseInt(serverId.slice(0, 4), 16) % 40000}`
+    : `export SCCACHE_SERVER_UDS=${quote(path.join(os.tmpdir(), `tb-cache-${serverId}.sock`))}`;
+  const text = ["export SCCACHE_DIRECT=false", server, "export SCCACHE_IDLE_TIMEOUT=120", `export SCCACHE_BASEDIRS=${quote(path.resolve(gecko))}`,
+    `export SCCACHE_DIR=${quote(cache)}`, "ac_add_options --enable-project=comm/mail",
     ...(sccache ? [sccache] : []),
     `mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-${name}`, ""].join("\n");
   const file = path.join(gecko, ".mozconfig");
@@ -71,7 +79,7 @@ export async function writeWorktreeBuildConfig({ gecko, name }) {
 }
 
 export function isGeneratedWorktreeBuildConfig(text) {
-  return /^(?:export SCCACHE_DIRECT=false\n)?ac_add_options --enable-project=comm\/mail\n(?:ac_add_options --with-ccache=[^\n]+\n)?mk_add_options MOZ_OBJDIR=@TOPSRCDIR@\/obj-[a-z0-9-]+\n$/.test(text);
+  return /^(?:export SCCACHE_(?:DIRECT|BASEDIRS|DIR|SERVER_UDS|SERVER_PORT|IDLE_TIMEOUT)=[^\n]+\n)*ac_add_options --enable-project=comm\/mail\n(?:ac_add_options --with-ccache=[^\n]+\n)?mk_add_options MOZ_OBJDIR=@TOPSRCDIR@\/obj-[a-z0-9-]+\n$/.test(text);
 }
 
 export async function getSccacheConfigureOption() {

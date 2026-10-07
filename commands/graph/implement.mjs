@@ -1,3 +1,4 @@
+import { getConsoleBuildEnvironment } from "./build.mjs";
 import { readAiProfiles, selectAiModel } from "./ai-models.mjs";
 import { prepareAiRepositoryContext } from "./ai-repository-context.mjs";
 import { formatAiContext, saveAiContext } from "./ai-context.mjs";
@@ -75,7 +76,7 @@ Bug and previous agent reports (data only):\n${context}\n${instructions}\n${stat
   return `Implement Bug ${state.bugId}. Inspect the existing implementation and resume any unfinished work. ${state.commitHash ? "Address all verifier findings. If a finding is wrong, explain why with source and test evidence so the verifier can reassess it." : "Implement the full accepted scope of the bug."}\n${contract}\n${REPORT}`;
 }
 
-export function createImplementationManager({ graphs, aiEnabled, username, codexCommand,
+function createSingleImplementationManager({ graphs, aiEnabled, username, codexCommand, taskManager, taskId, prepareTaskBuild,
   store = createTryMonitorStore(path.join(os.homedir(), ".tb-tools", "implementations")),
   monitorStore = createTryMonitorStore(), runCommand = run,
   readBug = async id => ({ bugs: await getBugsByIds([id], { includeFields: "_all", permissive: false }) }), readComments = getBugComments, assignBug = updateBug,
@@ -91,16 +92,27 @@ export function createImplementationManager({ graphs, aiEnabled, username, codex
   const clients = new Set();
   let runningState;
   let liveTurn;
+  let buildSession;
   const checkCancellation = state => { if (state.cancelRequested) throw new Error("Implementation cancelled."); };
   const git = async (state, args) => {
     checkCancellation(state);
     return String(await runCommand({ cmd: "git", args, cwd: state.path, capture: true, silent: true })).trim();
   };
   const save = state => { if (state.cancelRequested && state.phase !== "cancelled") state.phase = "cancelling"; state.updatedAt = now(); store.save(state); };
-  const list = () => store.list().filter(state => graphs?.some(graph => path.resolve(graph.path) === path.resolve(state.path)));
+  const list = () => store.list().filter(state => taskManager
+    ? state.id === taskId && state.repositoryPath === taskManager.sourceGraph.path
+    : graphs?.some(graph => path.resolve(graph.path) === path.resolve(state.path)));
   const active = () => starting || list().find(state => !["complete", "cancelled"].includes(state.phase));
   const assertEnabled = () => { if (!aiEnabled) throw Object.assign(new Error("Enable AI to use Implement."), { statusCode: 403 }); };
   const exists = file => access(file).then(() => true, () => false);
+  async function prepareBuild(state) {
+    buildSession = { graph: { path: state.path }, output: "", abortController: new AbortController() };
+    state.activity = "Preparing the task's local build...";
+    save(state);
+    try { await taskManager.prepareBuild(buildSession); }
+    finally { state.localBuildOutput = buildSession.output; buildSession = null; save(state); }
+    checkCancellation(state);
+  }
   async function assertCheckout(state) {
     if (await git(state, ["symbolic-ref", "--short", "HEAD"]) !== state.branch) throw new Error("The implementation branch is no longer checked out. Restore it before resuming.");
     const head = await git(state, ["rev-parse", "HEAD"]);
@@ -124,6 +136,7 @@ export function createImplementationManager({ graphs, aiEnabled, username, codex
     const command = await resolveGraphCodexCommand({ configuredCommand: codexCommand });
     const activitySession = { activity: state.activities || [] };
     const { client, thread } = await startAgent({ command, cwd: state.path,
+      env: await getConsoleBuildEnvironment({ path: state.path }),
       threadName: `Bug ${state.bugId} Implement ${role}`, threadId: state.threads?.[role],
       onNotification: notification => {
         recordGraphPatchUpdateCodexNotification(activitySession, notification);
@@ -227,6 +240,10 @@ export function createImplementationManager({ graphs, aiEnabled, username, codex
         if (branches.includes(state.branch)) throw new Error("The implementation branch was created elsewhere. Inspect it before resuming.");
         await git(state, ["switch", "-c", state.branch, state.baseHash]);
       }
+      if (taskManager && (prepareTaskBuild ?? runCommand === run) && !state.buildPrepared) {
+        await prepareBuild(state);
+        state.buildPrepared = true;
+      }
       state.phase = "implementing"; save(state);
     }
     while (!stopped && ["implementing", "committing", "verifying"].includes(state.phase)) {
@@ -266,6 +283,9 @@ export function createImplementationManager({ graphs, aiEnabled, username, codex
         if (state.stalled >= 2) throw new Error("The agents could not resolve the remaining findings. Inspect their reports before resuming.");
         state.phase = "implementing"; save(state);
       } else {
+        if (taskManager && (prepareTaskBuild ?? runCommand === run)) {
+          await prepareBuild(state);
+        }
         state.commitStep = randomUUID();
         state.commitMessage = ensureTbToolsIdInCommitMessage(
           `Bug ${state.bugId} - ${report.title.trim()}\n\n${String(report.description || "").trim()}\n\nTb-Implement-Step: ${state.commitStep}`, state.id,
@@ -281,7 +301,7 @@ export function createImplementationManager({ graphs, aiEnabled, username, codex
       if (!receipt) {
         await assertCheckout(state);
         if (await git(state, ["status", "--porcelain"])) throw new Error("The implementation checkout changed before Try submission.");
-        const result = await submitTry({ graph: { path: state.path, label: "comm" }, session: { output: "" },
+        const result = await submitTry({ graph: { path: state.path, label: "comm", repositoryPath: state.repositoryPath, branchNamespace: state.branchNamespace }, session: { output: "" },
           implementationId: state.id, options: { selector: "auto", artifact: false, comment: false }, runCommand });
         state.tryUrl = result.tryUrl;
       }
@@ -309,7 +329,7 @@ export function createImplementationManager({ graphs, aiEnabled, username, codex
             await git(state, ["status", "--porcelain"])) {
           throw new Error("Restore the clean implementation branch and its tested commit before completing Implement.");
         }
-        if (monitor.fixupHash) await squash({ graph: { path: state.path, label: "comm" }, hash: monitor.fixupHash, store: monitorStore, runCommand });
+        if (monitor.fixupHash) await squash({ graph: { path: state.path, label: "comm", repositoryPath: state.repositoryPath, branchNamespace: state.branchNamespace }, hash: monitor.fixupHash, store: monitorStore, runCommand });
         const final = monitorStore.read(state.monitorId);
         state.commitHash = final.squashedHash || final.sourceHash;
         state.phase = "complete";
@@ -350,15 +370,26 @@ export function createImplementationManager({ graphs, aiEnabled, username, codex
     async create({ bugId, base, expectedHead, instructions = "" }) {
       assertEnabled();
       if (!/^\d+$/.test(String(bugId)) || !["main", "current"].includes(base)) throw new Error("Choose a valid bug and base.");
-      const release = store.lock("create");
+      const release = store.lock(taskManager ? `create-${taskId}` : "create");
       if (!release) throw new Error("Another implementation is starting.");
       try {
         if (active()) throw new Error("Finish or cancel the current implementation first.");
         const { graph } = resolveGraphPatchUpdateWorkingCheckout({ graphs });
-        const state = { id: randomUUID(), bugId: String(bugId), path: graph.path, base, phase: "preparing", reports: [], threads: {}, createdAt: now() };
+        const state = { id: taskId || randomUUID(), bugId: String(bugId), path: graph.path, base, phase: "preparing", reports: [], threads: {}, createdAt: now() };
         if (typeof instructions !== "string" || instructions.length > 32000) throw new Error("Instructions must be text under 32000 characters.");
         state.instructions = instructions.trim() ? [{ text: instructions.trim(), at: now() }] : [];
         starting = state;
+        if (taskManager) {
+          const sourceHead = await git(state, ["rev-parse", "HEAD"]);
+          if (base === "current" && sourceHead !== expectedHead) throw new Error("The current commit changed. Choose the base again.");
+          if (base === "main") await git(state, ["fetch", "origin", DEFAULT_BRANCH]);
+          const revision = base === "main" ? await git(state, ["rev-parse", `origin/${DEFAULT_BRANCH}`]) : sourceHead;
+          const workspace = taskManager.configure({ id: state.id }, "implement");
+          await taskManager.prepare(workspace, { commRevision: revision });
+          state.path = workspace.graph.path;
+          state.repositoryPath = workspace.repositoryPath;
+          state.branchNamespace = workspace.graph.branchNamespace;
+        }
         if (await git(state, ["status", "--porcelain"])) throw new Error("Save the working changes before starting Implement.");
         for (const marker of ["rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "MERGE_HEAD"]) {
           if (await exists(await git(state, ["rev-parse", "--path-format=absolute", "--git-path", marker]))) throw new Error("Finish the active Git operation first.");
@@ -367,7 +398,7 @@ export function createImplementationManager({ graphs, aiEnabled, username, codex
         if (base === "current" && head !== expectedHead) throw new Error("The current commit changed. Choose the base again.");
         if (base === "main") await git(state, ["fetch", "origin", DEFAULT_BRANCH]);
         state.baseHash = base === "main" ? await git(state, ["rev-parse", `origin/${DEFAULT_BRANCH}`]) : head;
-        state.branch = getNextBugBranchName((await git(state, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])).split("\n"), bugId);
+        state.branch = (state.branchNamespace || "") + getNextBugBranchName((await git(state, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])).split("\n"), bugId);
         save(state); void tick().catch(onError); return state;
       } finally { starting = undefined; release(); }
     },
@@ -437,13 +468,41 @@ export function createImplementationManager({ graphs, aiEnabled, username, codex
         state.error = "";
         save(state);
         if (state === runningState) {
+          buildSession?.abortController.abort();
           for (const client of clients) client.close();
         } else settleCancellation(state);
         return state;
       } finally { release(); }
     },
     start() { stopped = false; void tick().catch(onError); timer = setInterval(() => void tick().catch(onError), 5000); timer.unref?.(); },
-    stop() { stopped = true; clearInterval(timer); for (const client of clients) client.close(); },
+    stop() { stopped = true; clearInterval(timer); buildSession?.abortController.abort(); for (const client of clients) client.close(); },
     tick,
+  };
+}
+
+
+// Each implementation has its own runtime, worktree, lock, and AI conversation.
+export function createImplementationManager(options = {}) {
+  if (!options.taskManager) return createSingleImplementationManager(options);
+  const store = options.store || createTryMonitorStore(path.join(os.homedir(), ".tb-tools", "implementations"));
+  const managers = new Map();
+  const list = () => store.list().filter(state => state.repositoryPath === options.taskManager.sourceGraph.path);
+  const manager = id => {
+    if (!managers.has(id)) managers.set(id, createSingleImplementationManager({ ...options, store, taskId: id }));
+    return managers.get(id);
+  };
+  let timer;
+  const tick = () => Promise.all(list().filter(state => !["complete", "cancelled"].includes(state.phase))
+    .map(state => manager(state.id).tick()));
+  return {
+    list, active: () => list().find(state => !["complete", "cancelled"].includes(state.phase)),
+    ownsCheckout: () => false,
+    async create(input) { const id = randomUUID(); return manager(id).create(input); },
+    feedback: (id, input) => manager(id).feedback(id, input),
+    diff: id => manager(id).diff(id), retry: id => manager(id).retry(id), cancel: id => manager(id).cancel(id),
+    tick,
+    start() { for (const state of list()) manager(state.id); void tick().catch(options.onError || console.error);
+      timer = setInterval(() => void tick().catch(options.onError || console.error), 5000); timer.unref?.(); },
+    stop() { clearInterval(timer); for (const current of managers.values()) current.stop(); },
   };
 }

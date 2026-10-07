@@ -109,6 +109,45 @@ test("Amend rejects a Try where no build completed", async t => {
   assert.equal(await git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"), before);
 });
 
+test("managed Amend changes only its task branches and exact repair receipt", async t => {
+  const f = await fixture(t);
+  const originalRefs = await f.git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/");
+  await f.git("branch", "tb-task/first/patch", f.parent);
+  await f.git("branch", "tb-task/first/child", "child-a");
+  await f.git("branch", "tb-task/second/patch", f.parent);
+  await f.git("update-ref", "refs/tb-tools/repair-owners/own", f.fixup);
+  await f.git("update-ref", "refs/tb-tools/repair-owners/other", f.parent);
+  await f.git("switch", "tb-task/first/patch");
+  f.state.branchNamespace = "tb-task/first/";
+  f.state.tbToolsId = "stable";
+  f.store.save(f.state);
+  const result = await squashTryFixup({ graph: { path: f.root }, hash: f.fixup, store: f.store });
+  assert.notEqual(result.hash, f.parent);
+  assert.equal(await f.git("rev-parse", "tb-task/first/patch"), result.hash);
+  assert.equal(await f.git("rev-parse", "tb-task/first/child^^"), result.hash);
+  assert.equal(await f.git("show", "tb-task/first/child:feature.txt"), "fixed");
+  assert.equal(await f.git("rev-parse", "tb-task/second/patch"), f.parent);
+  assert.equal(await f.git("rev-parse", "refs/tb-tools/repair-owners/own"), result.hash);
+  assert.equal(await f.git("rev-parse", "refs/tb-tools/repair-owners/other"), f.parent);
+  for (const line of originalRefs.split("\n")) {
+    const [ref, old] = line.split(" ");
+    assert.equal(await f.git("rev-parse", ref), ref === f.state.fixupRef ? result.hash : old);
+  }
+});
+
+test("managed Try source lookup ignores a newer version in another task", async t => {
+  const { findCurrentTrySource } = await import("../commands/graph/try-source.mjs");
+  const f = await fixture(t);
+  await f.git("branch", "tb-task/first/patch", f.parent);
+  await f.git("switch", "-c", "tb-task/second/patch", f.parent);
+  await f.commit("feature.txt", "other task edit\n", "New version\n\nTB-Tools-Id: stable");
+  f.state.branchNamespace = "tb-task/first/";
+  f.state.tbToolsId = "stable";
+  assert.equal(await findCurrentTrySource(f.state), f.parent);
+  await f.git("branch", "-D", "tb-task/first/patch");
+  assert.equal(await findCurrentTrySource(f.state), "");
+});
+
 test("Amend rejects dirty work and does not change branches", async t => {
   const { git, root, store, fixup, parent } = await fixture(t);
   await writeFile(path.join(root, "feature.txt"), "user edit\n");
@@ -257,9 +296,15 @@ test("Try diagnosis uses separate tested checkouts and resumes its saved convers
   const first = state("first"), second = state("second");
   store.save(first); store.save(second);
   const calls = [];
+  const builtPaths = [];
   const repairer = createTryRepairer({ store, codexCommand: process.execPath,
+    prepareBuild: async session => {
+      assert.match(await readFile(path.join(session.graph.path, "..", ".mozconfig"), "utf8"), /obj-try-monitor/);
+      builtPaths.push(session.graph.path);
+    },
     startAgent: async options => {
       calls.push(options);
+      assert.ok(builtPaths.includes(options.cwd), "Prepare a local build before starting diagnosis");
       assert.notEqual(options.cwd, root);
       assert.equal(options.sandbox, "read-only");
       assert.equal(await readFile(path.join(options.cwd, "source.txt"), "utf8"), "tested source\n");
@@ -280,6 +325,7 @@ test("Try diagnosis uses separate tested checkouts and resumes its saved convers
   store.save(resumed);
   await repairer.assess(resumed, evidence);
   assert.equal(calls.at(-1).threadId, thread, "A later failed Try continues the same investigation");
+  assert.equal(builtPaths.length, 2, "An unchanged tested commit keeps its prepared build");
   assert.equal(await readFile(path.join(root, "source.txt"), "utf8"), "active author edits\n");
 });
 

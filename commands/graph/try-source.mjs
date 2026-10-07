@@ -6,7 +6,7 @@ import { getTbToolsIdFromCommitMessage } from "../../lib/commit-message.mjs";
 export async function findCurrentTrySource(state, runCommand = run) {
   if (!state.tbToolsId) return state.sourceHash;
   const git = async (...args) => String(await runCommand({ cmd: "git", args, cwd: state.path, capture: true, silent: true })).trim();
-  const refs = (await git("for-each-ref", "--format=%(refname)", "refs/heads/"))
+  const refs = (await git("for-each-ref", "--format=%(refname)", `refs/heads/${state.branchNamespace || ""}`))
     .split("\n").filter(ref => ref && !ref.startsWith("refs/heads/tb-try-fixup/"));
   if (!refs.length) return "";
   const matches = (await git("log", "--format=%H%x00%B%x00", "--fixed-strings", "--regexp-ignore-case",

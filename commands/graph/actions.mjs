@@ -1,3 +1,4 @@
+import { normalizeMachCommand } from "../../lib/mach-command.mjs";
 import { ensureGraphCommit } from "./commit-access.mjs";
 import { prepareMonitoredTry } from "./try-submission.mjs";
 import { createHash, randomUUID } from "node:crypto";
@@ -29,7 +30,7 @@ import { getDefaultLintFiles, LINT_DIRS } from "../lint.mjs";
 import { createSubmitCommand } from "../submit.mjs";
 import { createTestCommand } from "../test.mjs";
 import { createTryCommand } from "../try.mjs";
-import { prepareConsoleBuild, executeConsoleArtifactBuild, getConsoleBuildEnvironment } from "./build.mjs";
+import { prepareConsoleBuild, executeConsoleArtifactBuild, getConsoleBuildEnvironment, publishCompletedConsoleBuild } from "./build.mjs";
 import { getNextBugBranchName } from "./branches.mjs";
 import {
   CHECKIN_NEEDED_KEYWORD,
@@ -562,7 +563,7 @@ async function ensureCleanGraph(graph, runCommand) {
 async function getLocalBranchesAtCommit(graph, hash, runCommand) {
   return runCommand({
     cmd: "git",
-    args: ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", hash, "refs/heads"],
+    args: ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", hash, graph.branchNamespace ? `refs/heads/${graph.branchNamespace}` : "refs/heads"],
     cwd: graph.path,
     capture: true,
     silent: true,
@@ -576,7 +577,7 @@ async function getLocalBranchTips(graph, runCommand) {
       "for-each-ref",
       "--sort=refname",
       "--format=%(refname:short)%00%(objectname)",
-      "refs/heads",
+      graph.branchNamespace ? `refs/heads/${graph.branchNamespace}` : "refs/heads",
     ],
     cwd: graph.path,
     capture: true,
@@ -599,7 +600,7 @@ async function getLocalBranchTips(graph, runCommand) {
 async function getLocalBranchesContainingCommit(graph, hash, runCommand) {
   return runCommand({
     cmd: "git",
-    args: ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", hash, "refs/heads"],
+    args: ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", hash, graph.branchNamespace ? `refs/heads/${graph.branchNamespace}` : "refs/heads"],
     cwd: graph.path,
     capture: true,
     silent: true,
@@ -1008,7 +1009,7 @@ async function getRebaseStackBranches({
 async function getLocalBranchNames(graph, runCommand) {
   const branchData = await runCommand({
     cmd: "git",
-    args: ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    args: ["for-each-ref", "--format=%(refname:short)", graph.branchNamespace ? `refs/heads/${graph.branchNamespace}` : "refs/heads"],
     cwd: graph.path,
     capture: true,
     silent: true,
@@ -1029,8 +1030,8 @@ async function getBugBranchNameForCommit(graph, hash, runCommand) {
     return "";
   }
 
-  return getNextBugBranchName(
-    await getLocalBranchNames(graph, runCommand),
+  return (graph.branchNamespace || "") + getNextBugBranchName(
+    (await getLocalBranchNames(graph, runCommand)).map(branch => graph.branchNamespace ? branch.slice(graph.branchNamespace.length) : branch),
     bugId,
   );
 }
@@ -1745,6 +1746,16 @@ export async function updateGraphCheckout({
 
   await fetchGraphMain(graph, runCommand);
   const originMainHash = await getGraphOriginMainHash(graph, runCommand);
+  if (graph.taskWorktree) {
+    await ensureCleanGraph(graph, runCommand);
+    // Fetch shared remote refs, then move only this task's detached checkout.
+    await runCommand({ cmd: "git", args: ["switch", "--detach", originMainHash],
+      cwd: graph.path, silent: true });
+    graph.branch = "(detached)";
+    return { action: "update", mode: updateMode, path: graph.path, label: graph.label,
+      currentHash: originMainHash, branch: graph.branch, rebasedCount: 0,
+      message: `${graph.label} fetched origin/${DEFAULT_BRANCH} in its task worktree.` };
+  }
   const recoveredMainBranches = await recoverDivergedGraphMainBranches({
     graph,
     originMainHash,
@@ -3939,12 +3950,12 @@ export function chooseGraphMachCheckout(graphs = [], graphIndex) {
 }
 
 function getGraphMachCommand(graph, args) {
-  return {
+  return normalizeMachCommand({
     cmd: path.join("..", "mach"),
     args: Array.isArray(args) ? args : String(args).split(/\s+/).filter(Boolean),
     cwd: graph.path,
     capture: true,
-  };
+  });
 }
 
 function appendGraphMachOutput(session, output = "") {
@@ -4190,6 +4201,10 @@ async function runGraphMachActionSessionUnlocked({
       }
     }
 
+    if (graph.taskWorktree && !session.cancelRequested && !plan) {
+      await publishCompletedConsoleBuild({ graph, runCommand }).catch(error =>
+        log(`Build passed; binary snapshot was not saved: ${error.message}\n`));
+    }
     if (session.cancelRequested) {
       finishCanceledGraphMachSession(session);
       return;
@@ -6222,12 +6237,14 @@ export async function createBranchForCommit({
 
   const branchData = await runCommand({
     cmd: "git",
-    args: ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    args: ["for-each-ref", "--format=%(refname:short)", graph.branchNamespace ? `refs/heads/${graph.branchNamespace}` : "refs/heads"],
     cwd: graph.path,
     capture: true,
     silent: true,
   });
-  const branch = getNextBugBranchName(branchData.split(/\r?\n/).filter(Boolean), bugId);
+  const namespace = graph.branchNamespace || "";
+  const branch = namespace + getNextBugBranchName(branchData.split(/\r?\n/).filter(Boolean)
+    .map(name => namespace ? name.slice(namespace.length) : name), bugId);
 
   await runCommand({
     cmd: "git",

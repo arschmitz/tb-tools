@@ -1,3 +1,4 @@
+import { createRebaseSessionStore } from "./rebase-session-store.mjs";
 import { ensureGraphCommit } from "./commit-access.mjs";
 import { AI_SETTINGS_PATH, AI_TASK_TYPES, readAiProfiles, saveAiProfiles } from "./ai-models.mjs";
 import { createGraphCodexAppServer } from "./codex-app-server.mjs";
@@ -129,6 +130,7 @@ import {
 } from "./actions.mjs";
 import { copyGraphCommitsBetweenCheckouts } from "./checkout-transfer.mjs";
 import { syncReviewCheckoutFromWorking } from "./review-sync.mjs";
+import { createTaskWorktreeManager } from "./task-worktrees.mjs";
 import { ensurePairedWorktrees, getWorktreeDirectory, writeWorktreeBuildConfig } from "./worktrees.mjs";
 import { getGraphCommitReview } from "./reviews.mjs";
 import {
@@ -337,10 +339,12 @@ export async function startInteractiveGraphServer({
   syncReviewCheckout = syncReviewCheckoutFromWorking,
   serverFactory = createServer,
   patchSessionDirectory,
+  taskWorktreeDirectory,
+  prepareTaskBuild = runCommand === run,
   reviewHandledPath,
   implementationManager,
   backgroundTryStore = createTryMonitorStore(),
-  tryMonitor = runCommand === run ? createTryMonitor({ graphs, aiEnabled: isGraphAiEnabled(appConfig), codexCommand: appConfig?.ai?.command }) : null,
+  tryMonitor = runCommand === run && !process.env.NODE_TEST_CONTEXT && !globalThis.__tbToolsBlockExternalApis ? createTryMonitor({ graphs, taskWorktrees: appConfig?.taskWorktrees === true, aiEnabled: isGraphAiEnabled(appConfig), codexCommand: appConfig?.ai?.command }) : null,
 }) {
   const serverGraphs = graphs.map((graph) => ({
     ...graph,
@@ -349,11 +353,15 @@ export async function startInteractiveGraphServer({
     workingTreeCount: graph.workingTreeCount || 0,
     patchIdCache: new Map(),
   }));
+  const taskWorktrees = appConfig?.taskWorktrees === true;
+  const taskManager = taskWorktrees ? createTaskWorktreeManager({ graphs: serverGraphs,
+    runCommand, directory: taskWorktreeDirectory }) : null;
   const managedReviewId = /^[a-f0-9]{8}$/.test(appConfig?.managedReviewWorktrees || "")
     ? appConfig.managedReviewWorktrees : "";
   const workingComm = serverGraphs.find(graph => graph.checkout === "working" && graph.repository === "comm");
   const workingFirefox = serverGraphs.find(graph => graph.checkout === "working" && graph.repository === "firefox");
   function configureManagedReviewSession(session) {
+    if (taskManager) { taskManager.configure(session, "review"); return; }
     if (!managedReviewId) return;
     if (!workingComm || !workingFirefox) throw new Error("Managed Review needs Working Firefox and comm checkouts.");
     const name = `review-${managedReviewId}-${session.revision.toLowerCase()}`;
@@ -363,15 +371,22 @@ export async function startInteractiveGraphServer({
     session.managedWorktree = true;
   }
   async function prepareManagedReviewCheckout(session) {
+    if (session.graph.taskWorktree) { await taskManager.prepare(session); return; }
     if (!session.managedWorktree) return;
     const gecko = session.reviewFirefoxPath;
     await ensurePairedWorktrees({ geckoSource: workingFirefox.path,
       commSource: workingComm.path, directory: gecko });
     await writeWorktreeBuildConfig({ gecko, name: `review-${session.revision.toLowerCase()}` });
   }
+  async function getCommandCheckout(graphIndex, kind) {
+    const selected = chooseGraphMachCheckout(serverGraphs, graphIndex);
+    if (!taskManager) return selected;
+    const workspace = await taskManager.prepareCurrent(kind);
+    return { ...selected, graph: workspace.graph };
+  }
   const implementation = implementationManager === undefined && !process.env.NODE_TEST_CONTEXT && !globalThis.__tbToolsBlockExternalApis
     ? createImplementationManager({ graphs: serverGraphs, aiEnabled: isGraphAiEnabled(appConfig),
-      username: appConfig?.bugzilla?.user, codexCommand: appConfig?.ai?.command, runCommand })
+      username: appConfig?.bugzilla?.user, codexCommand: appConfig?.ai?.command, runCommand, taskManager, prepareTaskBuild })
     : implementationManager;
   async function getSettingsModels() {
     if (getAiModels) return getAiModels();
@@ -384,6 +399,11 @@ export async function startInteractiveGraphServer({
   const patchUpdateSessions = new Map();
   const patchReviewSessions = new Map();
   const patchSessionStore = createPatchSessionStore({ directory: patchSessionDirectory });
+  if (taskWorktrees) for (const { kind, session } of patchSessionStore.list(serverGraphs)) {
+    session.aiEnabled = isGraphAiEnabled(appConfig);
+    session.codexCommand = String(appConfig?.ai?.command || "");
+    (kind === "review" ? patchReviewSessions : patchUpdateSessions).set(session.id, session);
+  }
   function savePatchSessions() {
     for (const [kind, sessions] of [["update", patchUpdateSessions], ["review", patchReviewSessions]]) {
       for (const session of sessions.values()) {
@@ -403,6 +423,10 @@ export async function startInteractiveGraphServer({
     snapshotLimit,
     { afterCheckoutUpdate = false } = {},
   ) {
+    session.status = "preparing";
+    session.error = "";
+    session.restored = false;
+    session.interrupted = false;
     if (afterCheckoutUpdate) {
       session.previousHash = session.currentHash;
       session.refreshAfterCheckoutUpdate = true;
@@ -425,10 +449,19 @@ export async function startInteractiveGraphServer({
       session.refreshAfterCheckoutUpdate = false;
     }
     const workingCheckout = resolveGraphPatchUpdateWorkingCheckout({
-      graphs: serverGraphs,
+      graphs: session.graph.taskWorktree ? taskManager.taskGraphs(session) : serverGraphs,
     });
 
-    void preparePatchUpdateSession({
+    void (async () => {
+      let found;
+      if (session.graph.taskWorktree && !session.workspacePrepared) {
+        found = await findGraphPatchCommit({ graph: taskManager.sourceGraph,
+          revision: session.revision, newest: ["verify", "freeform"].includes(session.mode), runCommand });
+        session.originalHash = found.hash; session.currentHash = found.hash;
+        await taskManager.prepare(session, { commRevision: found.hash, cloneBranches: true });
+        session.workspacePrepared = true;
+      }
+      return preparePatchUpdateSession({
       session,
       graphs: workingCheckout.graphs,
       getRustUpstreamStatus: () => getServerRustUpstreamStatus({
@@ -442,7 +475,18 @@ export async function startInteractiveGraphServer({
       runCommand,
       saveMemory: savePatchUpdateMemory,
       snapshotLimit,
-    }).catch(() => {}).finally(savePatchSessions);
+      ...(taskWorktrees && prepareTaskBuild ? { prepareBuild: taskManager.prepareBuild } : {}),
+      ...(found ? { findPatchCommit: async () => found } : {}),
+    });
+    })().catch(error => {
+      if (error.rebaseState) {
+        error.rebaseState.patchUpdateSessionId = session.id;
+        const payload = {};
+        attachRebaseConflict(payload, error);
+        session.rebaseConflict = payload.rebaseConflict;
+      }
+      session.status = "error"; session.error = error.message; session.message = error.message;
+    }).finally(savePatchSessions);
   }
 
   async function getPatchSessionBaseHash(session) {
@@ -458,14 +502,16 @@ export async function startInteractiveGraphServer({
   async function restorePatchSession(kind, fresh, body, response) {
     const sessions = kind === "update" ? patchUpdateSessions : patchReviewSessions;
     const runningReview = kind === "review" && [...sessions.values()].find((entry) =>
-      entry.revision === fresh.revision && entry.graph.path === fresh.graph.path &&
+      entry.revision === fresh.revision && (entry.graph.path === fresh.graph.path ||
+        fresh.managedWorktree && entry.repositoryPath === fresh.repositoryPath) &&
       !entry.cancelled && ["pulling", "reviewing"].includes(entry.status));
-    if (runningReview && body.resume !== false) {
+    if (runningReview && !runningReview.restored && body.resume !== false) {
       sendJson(response, 200, { ok: true, ...serializeGraphPatchReviewSession(runningReview) });
       return true;
     }
     const saved = [...sessions.values()].find((entry) =>
-      entry.revision === fresh.revision && entry.graph.path === fresh.graph.path &&
+      entry.revision === fresh.revision && (entry.graph.path === fresh.graph.path ||
+        fresh.managedWorktree && entry.repositoryPath === fresh.repositoryPath) &&
       (entry.mode || "update") === (fresh.mode || "update") && canResumePatchSession(entry))
       || patchSessionStore.load(kind, fresh);
     if (!fresh.aiEnabled || !canResumePatchSession(saved)) return false;
@@ -484,6 +530,9 @@ export async function startInteractiveGraphServer({
       const resumed = {
         ...fresh,
         id: saved.id,
+        graph: saved.graph,
+        reviewFirefoxPath: saved.reviewFirefoxPath,
+        repositoryPath: saved.repositoryPath,
         codexSessionId: saved.codexSessionId,
         codexThreadName: saved.codexThreadName,
         codexAgent: null,
@@ -503,6 +552,7 @@ export async function startInteractiveGraphServer({
       void preparePatchReviewSession({
         session: resumed,
         prepareCheckout: prepareManagedReviewCheckout,
+      ...(taskWorktrees && prepareTaskBuild ? { prepareBuild: taskManager.prepareBuild } : {}),
         getSnapshot: getServerGraphSnapshot,
         getReview: ({ graph, hash }) => getServerCommitReview(graph, hash, { force: true }),
         getRevisionReview: phabWebSession.getReview?.bind(phabWebSession),
@@ -511,6 +561,18 @@ export async function startInteractiveGraphServer({
       sendJson(response, 200, { ok: true, ...serializeGraphPatchReviewSession(resumed) });
       return true;
     };
+    if (kind === "update" && saved.rebaseConflict) {
+      sessions.set(saved.id, saved);
+      sendJson(response, 200, { ok: true, ...serializeGraphPatchUpdateSession(saved) });
+      return true;
+    }
+    if (saved.managedWorktree && saved.interrupted && !saved.codexSessionId) {
+      if (kind === "review") return restartReview();
+      startPatchUpdatePreparation(saved, getRequestLimit(body.snapshotLimit));
+      sessions.set(saved.id, saved);
+      sendJson(response, 200, { ok: true, ...serializeGraphPatchUpdateSession(saved) });
+      return true;
+    }
     const head = await getPatchSessionCheckoutHash(saved, runCommand);
     if (kind === "review" && head !== saved.currentHash) return restartReview();
     const baseChanged = kind === "update" && saved.baseHash &&
@@ -607,7 +669,16 @@ export async function startInteractiveGraphServer({
   let dashboardTrySessionId = "";
   const landSessions = new Map();
   const testSessions = new Map();
-  const rebaseSessions = new Map();
+  const rebaseStore = createRebaseSessionStore({ directory: patchSessionDirectory ? path.join(patchSessionDirectory, "rebases") : undefined });
+  const rebaseSessions = new Map(rebaseStore.load(serverGraphs).map(session => [session.id, session]));
+  function saveRebaseSessions() {
+    for (const session of rebaseSessions.values()) {
+      try { rebaseStore.save(session); }
+      catch (error) { session.error = `Could not save this rebase for resume: ${error.message}`; }
+    }
+  }
+  const rebaseSessionTimer = setInterval(saveRebaseSessions, 2000);
+  rebaseSessionTimer.unref();
   const commitIntegrationCache = new Map();
   const commitIntegrationInflight = new Map();
   const commitReviewCache = new Map();
@@ -723,6 +794,8 @@ export async function startInteractiveGraphServer({
     implementation?.stop();
     savePatchSessions();
     clearInterval(patchSessionTimer);
+    clearInterval(rebaseSessionTimer);
+    saveRebaseSessions();
     const shouldCloseBrowserTabs = Boolean(closeBrowserTabsOnShutdown);
     const shutdownDelay = shouldCloseBrowserTabs
       ? Math.max(Number(delay) || 0, Number(browserShutdownGraceMs) || 0)
@@ -774,7 +847,7 @@ export async function startInteractiveGraphServer({
       ...activePatchUpdateHashes,
     ]);
 
-    return snapshot;
+    return { ...snapshot, taskWorktree: graph.taskWorktree === true };
   }
 
   function getCommitCacheKey(graph, hash) {
@@ -880,11 +953,11 @@ export async function startInteractiveGraphServer({
     const id = error.rebaseState.id || randomUUID();
 
     error.rebaseState.id = id;
+    error.rebaseState.status = "review";
+    error.rebaseState.savedConflict = { ...error.rebaseConflict, id };
     rebaseSessions.set(id, error.rebaseState);
-    body.rebaseConflict = {
-      ...error.rebaseConflict,
-      id,
-    };
+    rebaseStore.save(error.rebaseState);
+    body.rebaseConflict = error.rebaseState.savedConflict;
   }
 
   async function getServerOriginMainStatus(graph, { force = false } = {}) {
@@ -1485,16 +1558,16 @@ export async function startInteractiveGraphServer({
       }
 
 
-      if (request.method === "POST" && isGraphAiEnabled(appConfig) && (implementation?.ownsCheckout ? implementation.ownsCheckout() : implementation?.active()) &&
+      if (!taskWorktrees && request.method === "POST" && isGraphAiEnabled(appConfig) && (implementation?.ownsCheckout ? implementation.ownsCheckout() : implementation?.active()) &&
           !url.pathname.startsWith("/api/implement/") &&
           /^\/api\/(?:patch-update|checkout|commit-action|try|submit|update-graphs|mach|lint|test|dashboard\/patch-action|new-patch|checkout-transfer|interactive-rebase|rebase|commit|unshelf-graphs|mach-action|patch|land|amend-current|amend-message|amend-try-fixup)(?:\/|$)/.test(url.pathname)) {
         throw Object.assign(new Error("Implement owns the working checkout. Finish or cancel it before starting another action."), { statusCode: 409 });
       }
-      if (request.method === "POST" && [...submitSessions.values()].some(session => ["running", "prompt"].includes(session.status)) &&
+      if (!taskWorktrees && request.method === "POST" && [...submitSessions.values()].some(session => ["running", "prompt"].includes(session.status)) &&
           (/^\/api\/submit$/.test(url.pathname) || /^\/api\/(?:patch-update|checkout|checkout-transfer|commit-action|try|update-graphs|mach-action|lint|test|new-patch|interactive-rebase|rebase|commit|unshelf-graphs|patch|land|amend-current|amend-message|amend-try-fixup|dashboard\/patch-action)(?:\/|$)/.test(url.pathname))) {
         throw Object.assign(new Error("Submit is still using the working checkout. Wait for it to finish before changing that checkout."), { statusCode: 409 });
       }
-      const workingAi = [...patchUpdateSessions.values()].find(session => session.freeformOperationRunning ||
+      const workingAi = [...patchUpdateSessions.values()].filter(session => !session.managedWorktree).find(session => session.freeformOperationRunning ||
         ["preparing", "reviewing", "applying", "amending"].includes(session.status));
       if (workingAi && request.method === "POST" &&
           /^\/api\/(?:checkout|checkout-transfer|commit-action|try|submit|update-graphs|mach-action|lint|test|new-patch|interactive-rebase|rebase|commit|unshelf-graphs|patch|land|amend-current|amend-message|amend-try-fixup)(?:\/|$)/.test(url.pathname)) {
@@ -1519,7 +1592,7 @@ export async function startInteractiveGraphServer({
         for (const session of implementation?.list() || []) jobs.push(summarizeBackgroundJob("Implement", session));
         const paths = new Set(serverGraphs.map(graph => graph.path));
         for (const session of backgroundTryStore.list()) {
-          if (!session.imported && paths.has(session.path)) jobs.push(summarizeBackgroundJob("Try repair", session));
+          if (!session.imported && (paths.has(session.path) || taskWorktrees && paths.has(session.repositoryPath))) jobs.push(summarizeBackgroundJob("Try repair", session));
         }
         sendJson(response, 200, { ok: true, aiEnabled: isGraphAiEnabled(appConfig),
           tryAiPaused: backgroundTryStore.isAutomationPaused(), jobs: jobs.filter(Boolean) });
@@ -1732,14 +1805,22 @@ export async function startInteractiveGraphServer({
           [...sessions.values()].some(session => session.status === "running"));
         const activePatch = [...patchUpdateSessions.values()].some(session =>
           session.freeformOperationRunning || ["preparing", "reviewing", "applying", "amending"].includes(session.status));
-        if (dashboardPatchActionRunning || activeCommand || activePatch) {
+        if (!taskManager && (dashboardPatchActionRunning || activeCommand || activePatch)) {
           throw Object.assign(new Error("Wait for the active checkout operation to finish."), { statusCode: 409 });
         }
         dashboardPatchActionRunning = true;
         try {
-          const { graph, graphIndex, result } = await prepareDashboardPatchAction({
-            graphs: serverGraphs, revision: body.revision, action: body.action, runCommand,
+          let actionGraphs = serverGraphs;
+          if (taskManager) {
+            const found = await findGraphPatchCommit({ graph: taskManager.sourceGraph, revision: body.revision, runCommand });
+            const workspace = taskManager.configure({ id: randomUUID() }, body.action);
+            await taskManager.prepare(workspace, { commRevision: found.hash, cloneBranches: true });
+            actionGraphs = taskManager.taskGraphs(workspace);
+          }
+          const { graph, graphIndex: actionGraphIndex, result } = await prepareDashboardPatchAction({
+            graphs: actionGraphs, revision: body.revision, action: body.action, runCommand,
           });
+          const graphIndex = taskManager ? serverGraphs.indexOf(taskManager.sourceGraph) : actionGraphIndex;
           if (body.action === "ci-verify") {
             const session = createGraphTrySession({ graph, graphIndex,
               snapshotLimit: getRequestLimit(body.snapshotLimit), getSnapshot: getServerGraphSnapshot,
@@ -1772,14 +1853,15 @@ export async function startInteractiveGraphServer({
           throw error;
         }
 
-        // A dashboard card can be opened while either checkout is displayed,
-        // but author-side patch work always belongs to the working comm clone.
+        // The repository graph stays fixed. A managed task gets its own checkout.
         const workingCheckout = resolveGraphPatchUpdateWorkingCheckout({
           graphs: serverGraphs,
         });
 
         const active = [...patchUpdateSessions.values()].find((entry) =>
-          entry.graph.path === workingCheckout.graph.path &&
+          (!taskWorktrees ? !entry.restored && entry.graph.path === workingCheckout.graph.path :
+            !entry.restored && body.resume !== false && entry.revision === String(body.revision || "").trim().toUpperCase().replace(/^(\d+)$/, "D$1") &&
+            (entry.mode || "update") === (["verify", "freeform"].includes(body.mode) ? body.mode : "update")) &&
           (entry.freeformOperationRunning || ["preparing", "reviewing", "applying", "amending"].includes(entry.status)));
         if (active) {
           if (active.revision === String(body.revision || "").trim().toUpperCase().replace(/^(\d+)$/, "D$1") &&
@@ -1802,6 +1884,7 @@ export async function startInteractiveGraphServer({
           snapshotLimit: getRequestLimit(body.snapshotLimit),
         });
 
+        if (taskManager) taskManager.configure(session, session.mode);
         if (await restorePatchSession("update", session, body, response)) return;
 
         patchUpdateSessions.set(session.id, session);
@@ -1819,7 +1902,7 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
         const session = createGraphPatchReviewSession({
-          graphs: serverGraphs,
+          graphs: taskWorktrees ? serverGraphs.map(graph => ({ ...graph, taskWorktree: true })) : serverGraphs,
           revision: body.revision,
           aiEnabled: isGraphAiEnabled(appConfig),
           codexCommand: appConfig?.ai?.command,
@@ -1828,7 +1911,7 @@ export async function startInteractiveGraphServer({
         configureManagedReviewSession(session);
 
         const activeReview = [...patchReviewSessions.values()].find(entry =>
-          entry.graph.path === session.graph.path && ["pulling", "reviewing", "posting"].includes(entry.status));
+          (!entry.restored && (entry.graph.path === session.graph.path || taskWorktrees && body.resume !== false && entry.revision === session.revision)) && ["pulling", "reviewing", "posting"].includes(entry.status));
         if (activeReview) {
           if (activeReview.revision === session.revision && body.resume !== false) {
             sendJson(response, 200, { ok: true, ...serializeGraphPatchReviewSession(activeReview) });
@@ -1843,6 +1926,7 @@ export async function startInteractiveGraphServer({
         void preparePatchReviewSession({
           session,
           prepareCheckout: prepareManagedReviewCheckout,
+          ...(taskWorktrees && prepareTaskBuild ? { prepareBuild: taskManager.prepareBuild } : {}),
           getSnapshot: getServerGraphSnapshot,
           getReview: ({ graph, hash }) => getServerCommitReview(graph, hash),
           getRevisionReview: phabWebSession.getReview?.bind(phabWebSession),
@@ -2858,23 +2942,33 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/commit-action") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
+        const actionGraphs = [...serverGraphs];
+        if (taskManager && body.action === "rebase") {
+          const workspace = await taskManager.prepareCurrent("rebase", body.hash);
+          actionGraphs[Number(body.graphIndex)] = workspace.graph;
+        }
         const result = await runGraphCommitAction({
-          graphs: serverGraphs,
+          graphs: actionGraphs,
           graphIndex: body.graphIndex,
           hash: body.hash,
           action: body.action,
-          preferredBranch: body.preferredBranch,
+          preferredBranch: actionGraphs[Number(body.graphIndex)]?.branchNamespace && body.preferredBranch &&
+            !body.preferredBranch.startsWith(actionGraphs[Number(body.graphIndex)].branchNamespace)
+            ? actionGraphs[Number(body.graphIndex)].branchNamespace + body.preferredBranch : body.preferredBranch,
           rebaseMode: body.rebaseMode,
           runCommand,
         });
         const snapshot = await getServerGraphSnapshot(
-          serverGraphs[Number(body.graphIndex)],
+          actionGraphs[Number(body.graphIndex)],
           getRequestLimit(body.snapshotLimit),
         );
         sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
       }
 
+      if (taskWorktrees && request.method === "POST" && ["/api/checkout-transfer", "/api/review-sync"].includes(url.pathname)) {
+        throw Object.assign(new Error("Task worktrees share one Git repository. Checkout transfer and Review sync are no longer used."), { statusCode: 410 });
+      }
       if (request.method === "POST" && url.pathname === "/api/checkout-transfer") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
@@ -2959,7 +3053,7 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
         const graphIndex = Number(body.graphIndex);
-        const graph = serverGraphs[graphIndex];
+        let graph = serverGraphs[graphIndex];
 
         if (!graph) {
           sendJson(response, 404, {
@@ -2969,11 +3063,13 @@ export async function startInteractiveGraphServer({
           return;
         }
 
+        if (taskManager) graph = (await taskManager.prepareCurrent("interactive-rebase", body.hash)).graph;
         const result = await startInteractiveRebase({
           graph,
           graphIndex,
           hash: body.hash,
-          preferredBranch: body.preferredBranch,
+          preferredBranch: graph.branchNamespace && body.preferredBranch && !body.preferredBranch.startsWith(graph.branchNamespace)
+            ? graph.branchNamespace + body.preferredBranch : body.preferredBranch,
           items: body.items || [],
           runCommand,
         });
@@ -2986,6 +3082,18 @@ export async function startInteractiveGraphServer({
         return;
       }
 
+      const savedRebaseMatch = url.pathname.match(/^\/api\/rebase\/([a-f0-9-]+)$/);
+      if (request.method === "GET" && savedRebaseMatch) {
+        validateToken(url.searchParams.get("token"), token);
+        const session = rebaseSessions.get(savedRebaseMatch[1]);
+        if (!session) throw Object.assign(new Error("Unknown rebase session."), { statusCode: 404 });
+        sendJson(response, 200, { ok: true, id: session.id, status: session.resolutionBusy || session.continueBusy ? "applying" : session.status || "review",
+          rebaseState: { sessionId: session.id, graphIndex: session.graphIndex,
+            conflict: session.savedConflict, resolutionId: session.resolution?.id },
+          resolution: session.resolution ? { id: session.resolution.id, diff: session.resolution.diff } : null,
+          rebaseConflict: session.savedConflict });
+        return;
+      }
       const resolutionMatch = url.pathname.match(/^\/api\/rebase\/([^/]+)\/resolution(?:\/(cancel))?$/);
       if (request.method === "POST" && resolutionMatch) {
         const body = await readRequestJson(request);
@@ -3002,6 +3110,7 @@ export async function startInteractiveGraphServer({
             return;
           }
           await applyRebaseResolution({ session, id: body.resolutionId, runCommand, cancel: true });
+          rebaseStore.save(session);
           sendJson(response, 200, { ok: true });
         } else {
           if (!isGraphAiEnabled(appConfig)) {
@@ -3019,6 +3128,7 @@ export async function startInteractiveGraphServer({
             const resolution = await proposeRebaseResolution({ session, runCommand,
               codexCommand: appConfig?.ai?.command, generate: generateRebaseResolution,
               onProgress: streaming ? progress => sendEvent({ type: "progress", ...progress }) : undefined });
+            rebaseStore.save(session);
             if (streaming) sendEvent({ type: "result", ok: true, resolution });
             else sendJson(response, 200, { ok: true, resolution });
           } catch (error) {
@@ -3064,10 +3174,22 @@ export async function startInteractiveGraphServer({
         }
 
         const snapshot = await getServerGraphSnapshot(
-          serverGraphs[Number(session.graphIndex)],
+          session.graph,
           getRequestLimit(body.snapshotLimit),
         );
 
+        const update = patchUpdateSessions.get(session.patchUpdateSessionId);
+        if (update?.preparation) {
+          const rewritten = result.rewrittenCommits?.find(commit => commit.originalHash === session.hash)?.hash || result.currentHash;
+          update.preparation.rewrittenHashes.set(session.hash, rewritten);
+          update.preparation.baseHash ||= result.base;
+          update.currentHash = rewritten;
+          update.rebaseConflict = null;
+          startPatchUpdatePreparation(update, getRequestLimit(body.snapshotLimit));
+        }
+        session.status = "complete";
+        rebaseStore.remove(session.id);
+        rebaseSessions.delete(session.id);
         sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
       }
@@ -3197,10 +3319,7 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(
-          serverGraphs,
-          body.graphIndex,
-        );
+        const { graph, index } = await getCommandCheckout(body.graphIndex, "build");
         const session = createGraphMachSession({
           graph,
           graphs: serverGraphs,
@@ -3222,10 +3341,7 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(
-          serverGraphs,
-          body.graphIndex,
-        );
+        const { graph, index } = await getCommandCheckout(body.graphIndex, "try");
         const session = createGraphTrySession({
           graph,
           graphIndex: index,
@@ -3249,10 +3365,7 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(
-          serverGraphs,
-          body.graphIndex,
-        );
+        const { graph, index } = await getCommandCheckout(body.graphIndex, "lint");
         const session = createGraphLintSession({
           graph,
           graphIndex: index,
@@ -3273,15 +3386,13 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
 
-        const { graph, index } = chooseGraphMachCheckout(
-          serverGraphs,
-          body.graphIndex,
-        );
+        const { graph, index } = await getCommandCheckout(body.graphIndex, "test");
         const session = createGraphTestSession({
           graph,
           graphIndex: index,
           options: body.options || {},
           runCommand,
+          ...(taskWorktrees && prepareTaskBuild ? { prepareBuild: taskManager.prepareBuild } : {}),
         });
 
         testSessions.set(session.id, session);
@@ -3779,9 +3890,13 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/amend-try-fixup") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
-        const graph = serverGraphs[Number(body.graphIndex)];
+        const sourceGraph = serverGraphs[Number(body.graphIndex)];
+        const workflow = taskWorktrees && backgroundTryStore.list().find(state =>
+          state.repositoryPath === sourceGraph?.path && state.fixupHash === String(body.hash) && state.phase !== "squashed");
+        const graph = workflow ? { ...sourceGraph, path: workflow.path, taskWorktree: true,
+          repositoryPath: sourceGraph.path, branchNamespace: workflow.branchNamespace } : sourceGraph;
         await ensureGraphCommit(graph, body.hash, runCommand);
-        const result = await squashTryFixup({ graph, hash: String(body.hash), runCommand });
+        const result = await squashTryFixup({ graph, hash: String(body.hash), store: backgroundTryStore, runCommand });
         const snapshot = await getServerGraphSnapshot(graph, getRequestLimit(body.snapshotLimit));
         sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
@@ -3830,7 +3945,9 @@ export async function startInteractiveGraphServer({
         validateToken(body.token, token);
         noteBrowserActivity();
         const graphIndex = Number(body.graphIndex);
-        const graph = serverGraphs[graphIndex];
+        let graph = serverGraphs[graphIndex];
+        const taskUpdate = patchUpdateSessions.get(String(body.patchUpdateSessionId || ""));
+        if (taskUpdate?.managedWorktree && taskUpdate.graphIndex === graphIndex) graph = taskUpdate.graph;
 
         if (!graph) {
           sendJson(response, 404, {
@@ -3872,10 +3989,16 @@ export async function startInteractiveGraphServer({
           return;
         }
 
+        if (taskManager && !taskUpdate) {
+          const workspace = taskManager.configure({ id: randomUUID() }, "submit");
+          await taskManager.prepare(workspace, { commRevision: requestedHash, cloneBranches: true });
+          graph = workspace.graph;
+          current = await getCurrentGraphBase(graph, runCommand);
+        }
         if (requestedHash !== current.hash) {
           await checkoutGraphCommit({
-            graphs: serverGraphs,
-            graphIndex,
+            graphs: graph.taskWorktree ? [graph] : serverGraphs,
+            graphIndex: graph.taskWorktree ? 0 : graphIndex,
             hash: requestedHash,
             runCommand,
           });
@@ -4221,6 +4344,8 @@ export async function startInteractiveGraphServer({
     implementation?.stop();
     savePatchSessions();
     clearInterval(patchSessionTimer);
+    clearInterval(rebaseSessionTimer);
+    saveRebaseSessions();
     for (const session of [...patchUpdateSessions.values(), ...patchReviewSessions.values()]) {
       session.codexAgent?.client.close();
     }

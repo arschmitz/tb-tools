@@ -1,3 +1,4 @@
+import { normalizeMachCommand } from "../../lib/mach-command.mjs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -755,7 +756,7 @@ export function runInteractiveTestCommand({
   spawnCommand = spawn,
 }) {
   appendTestOutput(session, `$ ${formatCommandForOutput(command)}\n`);
-  const processCommand = getPseudoTerminalCommand(command);
+  const processCommand = getPseudoTerminalCommand(normalizeMachCommand(command));
 
   return new Promise((resolve, reject) => {
     const child = spawnCommand(processCommand.cmd, processCommand.args || [], {
@@ -876,6 +877,7 @@ function getGraphTestLiveSummary(session) {
 
 export function createGraphTestSession({
   graph,
+  prepareBuild,
   graphIndex,
   options = {},
   runCommand = run,
@@ -909,6 +911,7 @@ export function createGraphTestSession({
     }
 
     session.cancelRequested = true;
+    session.abortController?.abort();
     session.message = "Canceling tests...";
 
     if (session.cancelCurrentCommand) {
@@ -925,6 +928,7 @@ export function createGraphTestSession({
 
   queueMicrotask(async () => {
     try {
+      if (prepareBuild) { session.graph = graph; await prepareBuild(session); }
       session.targets = await getTestTargets({
         flavor: normalizedOptions.flavor,
         pattern: normalizedOptions.pattern,

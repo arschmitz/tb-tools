@@ -17,9 +17,17 @@ const review = rebaseDialog.querySelector(".rebase-resolution-review");
 const diff = rebaseDialog.querySelector(".rebase-resolution-diff");
 let busy = false;
 const taskView = registerAiTaskDialog({ kind: "rebase", dialog: rebaseDialog,
-  title: () => "AI conflict resolution", endpoint: () => undefined,
+  title: () => "AI conflict resolution", endpoint: value => `/api/rebase/${encodeURIComponent(value.id)}`,
   restore: value => {
+    if (value.rebaseConflict) openRebaseFailureDialog(value.rebaseConflict);
     uiState.rebaseDialogState = value.rebaseState;
+    if (value.resolution) {
+      diff.textContent = value.resolution.diff;
+      review.hidden = false;
+      resolveButton.hidden = true;
+      closeButton.textContent = "Cancel";
+      rebaseContinue.textContent = "Continue";
+    }
     rebaseContinue.disabled = value.status === "complete";
     resolveButton.disabled = value.status === "complete";
     if (!rebaseDialog.open) rebaseDialog.showModal();
@@ -165,6 +173,7 @@ export function openRebaseFailureDialog(conflict, { fallbackMessage = "" } = {})
     sessionId: conflict?.id || "",
   };
 
+  taskView.update({ id: conflict?.id, status: "review", rebaseState: uiState.rebaseDialogState });
   setBusy(false);
   review.hidden = true;
   diff.textContent = "";

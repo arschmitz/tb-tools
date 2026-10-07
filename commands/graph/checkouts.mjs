@@ -57,7 +57,7 @@ export function resolveGraphCheckouts({
 } = {}) {
   const workingCommPath = path.resolve(cwd);
   const workingFirefoxPath = path.resolve(workingCommPath, "..");
-  const reviewCheckout = includeReview ? getReviewCheckoutConfig(config) : null;
+  const reviewCheckout = includeReview && !config.taskWorktrees ? getReviewCheckoutConfig(config) : null;
   const hasReviewCheckout = Boolean(reviewCheckout);
   const checkouts = [];
 

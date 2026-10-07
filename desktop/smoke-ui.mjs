@@ -59,6 +59,16 @@ try {
   }
   assert.ok(consoleAddress?.startsWith("http://127.0.0.1:"));
   assert.equal((await fetch(consoleAddress)).ok, true);
+  const repositoryUi = await electron.evaluate(({ webContents }) =>
+    webContents.getAllWebContents().find(contents => contents.getTitle() === "Thunderbird Desktop Console")
+      .executeJavaScript(`import("/assets/graph-client/config.js").then(({ GRAPHS }) => ({
+        graphs: GRAPHS.map(({ checkout, repository, path }) => ({ checkout, repository, path })),
+        syncButtons: document.querySelectorAll('[data-menu-action="review-sync"]').length
+      }))`));
+  assert.equal(repositoryUi.graphs.length, 2);
+  assert.ok(repositoryUi.graphs.every(graph => graph.checkout === "working"));
+  assert.equal(repositoryUi.graphs.find(graph => graph.repository === "comm").path, path.resolve(commPath));
+  assert.equal(repositoryUi.syncButtons, 0);
   await checkClipboard(electron, shell, consoleAddress, "Console");
   const windowControls = await electron.evaluate(({ BrowserWindow, Menu }) => ({
     windows: BrowserWindow.getAllWindows().map(window => ({

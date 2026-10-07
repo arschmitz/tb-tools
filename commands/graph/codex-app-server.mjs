@@ -20,6 +20,7 @@ function toError(value, fallback = "Codex App Server request failed.") {
 export function createGraphCodexAppServer({
   command,
   cwd,
+  env = {},
   sandbox = "danger-full-access",
   threadName = "",
   threadId = "",
@@ -32,7 +33,7 @@ export function createGraphCodexAppServer({
 }) {
   const child = spawnProcess(command, ["app-server", "--stdio", ...CODEX_MEMORY_ARGS], {
     cwd,
-    env: getTbToolsCommandEnvironment(),
+    env: getTbToolsCommandEnvironment({ ...process.env, ...env }),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const pending = new Map();
@@ -344,6 +345,7 @@ export function createGraphCodexAppServer({
 export async function startGraphCodexAppServer({
   command,
   cwd,
+  env = {},
   threadName,
   sandbox,
   threadId,
@@ -355,6 +357,7 @@ export async function startGraphCodexAppServer({
   const client = createGraphCodexAppServer({
     command,
     cwd,
+    env,
     threadName,
     sandbox,
     threadId,

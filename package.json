@@ -12,7 +12,9 @@
     "desktop:package": "node desktop/package.mjs",
     "desktop:package:all": "node desktop/package.mjs darwin:arm64 win32:x64 linux:x64",
     "lint": "eslint .",
-    "test": "node --import=./test/block-external-apis.mjs --test --test-concurrency=1 test/*.test.mjs && node --import=./test/block-external-apis.mjs tb.mjs help >/dev/null"
+    "test": "node --import=./test/block-external-apis.mjs --test --test-concurrency=1 test/*.test.mjs && node --import=./test/block-external-apis.mjs tb.mjs help >/dev/null",
+    "desktop:worktree:smoke": "node desktop/worktree-smoke.mjs",
+    "desktop:cache:smoke": "node desktop/compiler-cache-smoke.mjs"
   },
   "author": "Alexander Schmitz<arschmitz@gmail.com>",
   "license": "ISC",

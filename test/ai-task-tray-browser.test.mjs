@@ -124,6 +124,28 @@ test("Review keeps running when minimized and reopens on its own notification", 
   assert.match(await page.locator(".patch-review-title").textContent(), /D2 review/i);
 });
 
+test("a paused rebase restores its files and pending AI changes after reload", async t => {
+  const { page, initialize } = await fixture(t);
+  const conflict = { id: "saved-rebase", type: "conflict", graphIndex: 0, conflictCommit: "abcdef123456",
+    label: "comm", files: [{ path: "source.js", absolutePath: "/task/comm/source.js" }] };
+  const value = { ok: true, id: conflict.id, status: "review", rebaseConflict: conflict,
+    rebaseState: { sessionId: conflict.id, graphIndex: 0, conflict, resolutionId: "saved-resolution" },
+    resolution: { id: "saved-resolution", diff: "diff --git a/source.js b/source.js\n+resolved source" } };
+  await page.route("**/api/rebase/saved-rebase**", route => route.fulfill({ json: value }));
+  await page.evaluate(async conflict => (await import("/assets/graph-client/rebase-dialog.js"))
+    .openRebaseFailureDialog(conflict), conflict);
+  await page.waitForTimeout(1800);
+  assert.doesNotMatch(await page.locator('[data-task-key="rebase:saved-rebase"]').textContent(), /Connection lost|not a function/);
+  await page.locator("#rebase-dialog .ai-task-minimize").click();
+  await page.reload(); await initialize();
+  await page.locator('[data-task-key="rebase:saved-rebase"] .ai-task-open').click();
+  await page.locator("#rebase-dialog[open]").waitFor();
+  assert.match(await page.locator(".rebase-conflict-path").textContent(), /source.js/);
+  assert.match(await page.locator(".rebase-resolution-diff").textContent(), /resolved source/);
+  assert.equal(await page.locator("#rebase-dialog .rebase-close").textContent(), "Cancel");
+  assert.equal(await page.evaluate(async () => (await import("/assets/graph-client/config.js")).uiState.rebaseDialogState.resolutionId), "saved-resolution");
+});
+
 for (const outcome of ["accept", "request-changes", "comment"]) test(`final ${outcome} closes only after success`, async t => {
   const { page, sessions } = await fixture(t);
   await page.evaluate(async () => (await import("/assets/graph-client/patch-review-dialog.js")).openPatchReviewDialog({ patch: { id: "D2" } }));

@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { run } from "../../lib/utils.mjs";
-import { ensurePairedWorktrees, getSccacheConfigureOption } from "./worktrees.mjs";
+import { publishCompletedConsoleBuild } from "./build.mjs";
+import { ensurePairedWorktrees, writeWorktreeBuildConfig } from "./worktrees.mjs";
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -85,6 +86,7 @@ export function createDailyBuildService({
   directory = path.join(os.homedir(), ".tb-tools", "daily-build"),
   runCommand = run,
   build = runLoggedBuild,
+  publishBuild = build === runLoggedBuild ? publishCompletedConsoleBuild : async () => null,
   now = () => new Date(),
   onSettingsSaved = async () => {},
 } = {}) {
@@ -117,11 +119,8 @@ export function createDailyBuildService({
     if (trees.gecko.hash !== geckoRevision || trees.comm.hash !== commRevision) {
       throw new Error("Daily build worktrees do not match the fetched revisions.");
     }
-    const sccache = await getSccacheConfigureOption();
-    await writeFile(mozconfig, ["export SCCACHE_DIRECT=false",
-      "ac_add_options --enable-project=comm/mail",
-      ...(sccache ? [sccache] : []),
-      "mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-daily-build", ""].join("\n"));
+    const config = await writeWorktreeBuildConfig({ gecko, name: "daily-build" });
+    await writeFile(mozconfig, await readFile(config, "utf8"));
     return { geckoRevision, commRevision };
   }
 
@@ -180,7 +179,9 @@ export function createDailyBuildService({
         state = { ...state, ...revisions };
         await saveState();
         await build({ cwd: gecko, env: { MOZCONFIG: mozconfig }, file: logFile, signal: abort.signal });
-        state = { ...state, status: "passed", activeSlots: [], ownerPid: null,
+        const buildSnapshot = await publishBuild({ graph: { path: path.join(gecko, "comm") },
+          runCommand, env: { MOZCONFIG: mozconfig } });
+        state = { ...state, buildSnapshot, status: "passed", activeSlots: [], ownerPid: null,
           completedAt: now().toISOString() };
       } catch (error) {
         state = { ...state, slots: abort.signal.aborted

@@ -1,3 +1,4 @@
+import { getConsoleBuildEnvironment } from "./build.mjs";
 import { formatAiContext } from "./ai-context.mjs";
 import { PATCH_REVIEW_METHOD } from "./patch-review-method.mjs";
 import { createHash, randomUUID } from "node:crypto";
@@ -63,10 +64,10 @@ function getRevision(value = "") {
 function getReviewCheckout(graphs = []) {
   const entries = graphs.map((graph, graphIndex) => ({ graph, graphIndex }));
   const reviewCheckout = entries.find(({ graph }) => (
-    graph?.checkout === "review" && String(graph.repository || "").toLowerCase() === "comm"
+    (graph?.checkout === "review" || graph?.taskWorktree) && String(graph.repository || "").toLowerCase() === "comm"
   ));
   const reviewFirefox = entries.find(({ graph }) => (
-    graph?.checkout === "review" && String(graph.repository || "").toLowerCase() === "firefox"
+    (graph?.checkout === "review" || graph?.taskWorktree) && String(graph.repository || "").toLowerCase() === "firefox"
   ));
 
   if (!reviewCheckout) {
@@ -86,7 +87,7 @@ function getReviewCheckout(graphs = []) {
 
 function assertReviewCheckout(graph) {
   if (
-    graph?.checkout === "review" &&
+    (graph?.checkout === "review" || graph?.taskWorktree) &&
     String(graph.repository || "").toLowerCase() === "comm"
   ) {
     return;
@@ -530,7 +531,7 @@ async function resetReviewCheckoutMain({ session, runCommand, message }) {
   await runCommandForReview({
     session,
     cmd: "git",
-    args: session.managedWorktree ? ["switch", "--detach", "main"] : ["switch", "main"],
+    args: session.managedWorktree ? ["switch", "--detach", session.graph.taskWorktree ? "origin/main" : "main"] : ["switch", "main"],
     runCommand,
   });
 }
@@ -542,7 +543,7 @@ async function pullRevisionForReview({ session, runCommand }) {
     await runCommandForReview({
       session,
       cmd: "moz-phab",
-      args: ["patch", session.revision, "--apply-to", "here", "--yes"],
+      args: ["patch", session.revision, "--apply-to", "here", ...(session.graph.taskWorktree ? ["--no-branch"] : []), "--yes"],
       runCommand,
       timeoutMs: REVIEW_PATCH_TIMEOUT_MS,
     });
@@ -571,7 +572,7 @@ async function pullRevisionForReview({ session, runCommand }) {
   await runCommandForReview({
     session,
     cmd: "moz-phab",
-    args: ["patch", session.revision, "--skip-dependencies", "--apply-to", "here", "--yes"],
+    args: ["patch", session.revision, "--skip-dependencies", "--apply-to", "here", ...(session.graph.taskWorktree ? ["--no-branch"] : []), "--yes"],
     runCommand,
     timeoutMs: REVIEW_PATCH_TIMEOUT_MS,
   });
@@ -590,6 +591,7 @@ async function getCodexAgent(session) {
   const { client, thread } = await startGraphCodexAppServer({
     command,
     cwd: session.graph.path,
+    env: await getConsoleBuildEnvironment(session.graph),
     threadId: session.codexSessionId || "",
     threadName: session.codexThreadName || getGraphPatchReviewCodexThreadName({
       revision: session.revision,
@@ -936,6 +938,7 @@ export function serializeGraphPatchReviewSession(session) {
     bugId: session.commitMessage?.match(/\bBug\s+(\d+)/i)?.[1] || "",
     id: session.id,
     graphIndex: session.graphIndex,
+    worktree: session.managedWorktree ? session.graph.path : undefined,
     revision: session.revision,
     aiEnabled: session.aiEnabled,
     status: session.status,
@@ -996,6 +999,7 @@ export async function prepareGraphPatchReviewSession({
   runCommand,
   makeTempDirectory = mkdtemp,
   writeRawPatch = writeFile,
+  prepareBuild,
 }) {
   session.reviewRunCommand = runCommand;
   return withReviewCheckoutLease(session, async () => {
@@ -1055,7 +1059,7 @@ export async function prepareGraphPatchReviewSession({
     if (appliedRevision !== session.revision) {
       // moz-phab can import children too. Select the requested stack commit.
       const imported = await runCommandForReview({
-        session, cmd: "git", args: ["log", "--format=%H%x00%B%x00", "main..HEAD"], runCommand,
+        session, cmd: "git", args: ["log", "--format=%H%x00%B%x00", (session.graph.taskWorktree ? "origin/main..HEAD" : "main..HEAD")], runCommand,
       });
       const fields = imported.split("\0");
       const matches = [];
@@ -1089,12 +1093,18 @@ export async function prepareGraphPatchReviewSession({
       );
     }
 
+    if (session.graph.taskWorktree) {
+      const branch = `${session.graph.branchNamespace}result`;
+      await runCommandForReview({ session, cmd: "git", args: ["branch", "-f", branch, session.currentHash], runCommand });
+      session.reviewBranch = branch;
+    }
     session.stackContext = (await runCommandForReview({
       session,
       cmd: "git",
-      args: ["log", "--reverse", "--format=%H%x09%s", "main..HEAD"],
+      args: ["log", "--reverse", "--format=%H%x09%s", (session.graph.taskWorktree ? "origin/main..HEAD" : "main..HEAD")],
       runCommand,
     })).trim();
+    if (prepareBuild) await prepareBuild(session);
     session.snapshot = await getSnapshot(session.graph, session.snapshotLimit);
 
     if (!session.aiEnabled) {

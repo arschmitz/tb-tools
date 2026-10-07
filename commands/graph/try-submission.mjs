@@ -17,7 +17,8 @@ export async function prepareMonitoredTry({ graph, target, options, runCommand =
   let geckoHash = "";
   try { geckoHash = await git(["rev-parse", "HEAD"], geckoPath); } catch { /* Report unsupported layouts if a repair is needed. */ }
   let state = {
-    version: 1, id: randomUUID(), implementationId, path: root, label: graph?.label || "comm",
+    version: 1, id: randomUUID(), implementationId, path: root, repositoryPath: graph?.repositoryPath || root, label: graph?.label || "comm",
+    branchNamespace: graph?.branchNamespace || "",
     hash: target?.hash || hash, sourceHash: hash, subject: target?.subject || message.split("\n")[0],
     tbToolsId: target?.tbToolsId || getTbToolsIdFromCommitMessage(message), patchId: target?.patchId || "",
     geckoPath, geckoHash, dirty, options: { ...options, comment: false },
