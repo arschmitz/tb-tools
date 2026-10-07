@@ -105,6 +105,7 @@ import { run } from "../lib/utils.mjs";
 
 const GRAPH_CLIENT_TEST_ASSETS = [
   { source: "style.css", output: "graph-client/style.css" },
+  { source: "desktop-browser-tabs.js", output: "graph-client/desktop-browser-tabs.js" },
   { source: "live-text.js", output: "graph-client/live-text.js" },
   { source: "settings.js", output: "graph-client/settings.js" },
   { source: "review-handled.js", output: "graph-client/review-handled.js" },
