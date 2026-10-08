@@ -308,7 +308,28 @@ test("Patch Review anchors actions and source changes in the patch diff", async 
   await page.locator(".patch-review-final").waitFor({ state: "visible" });
   assert.equal(await page.locator(".patch-review-final").evaluate((element) => element.open), false);
   await page.getByRole("button", { name: "Accept", exact: true }).waitFor({ state: "visible" });
-  assert.deepEqual(inlineDrafts, [{
+  await diff.locator('.pretty-file[data-file-path="mail/example.mjs"]').getByRole("button", { name: "Add comment on line 15", exact: true }).click();
+  const manual = diff.locator(".patch-review-manual-comment");
+  await manual.getByLabel("Comment", { exact: true }).fill("Please handle the empty selection.");
+  await manual.getByLabel("Code replacement (optional)").fill("return selectedItem ?? null;");
+  await manual.getByRole("button", { name: "Save Additional Inline Draft" }).click();
+  await manual.waitFor({ state: "detached" });
+  await diff.getByText("Please handle the empty selection.", { exact: true }).waitFor();
+  assert.equal(inlineDrafts.length, 2);
+  assert.equal(inlineDrafts[1].lineNumber, 15);
+  assert.equal(inlineDrafts[1].filePath, "mail/example.mjs");
+  assert.equal(inlineDrafts[1].suggestionText, "return selectedItem ?? null;");
+  const prefix = diff.locator('.pretty-file[data-file-path="mail/prefix.mjs"]');
+  await prefix.getByRole("button", { name: "Add comment on line 10", exact: true }).click();
+  await prefix.getByRole("button", { name: "Add comment on line 12", exact: true }).click({ modifiers: ["Shift"] });
+  await manual.getByRole("heading", { name: "Add comment on lines 10–12" }).waitFor();
+  await manual.getByLabel("Comment", { exact: true }).fill("Replace these three lines.");
+  await manual.getByLabel("Code replacement (optional)").fill("const replacement = true;");
+  await manual.getByRole("button", { name: "Save Additional Inline Draft" }).click();
+  await manual.waitFor({ state: "detached" });
+  assert.equal(inlineDrafts[2].lineNumber, 10);
+  assert.equal(inlineDrafts[2].lineLength, 3);
+  assert.deepEqual(inlineDrafts.slice(0, 1), [{
     content: "Please return the selected item.",
     commentText: "Please return the selected item.",
     hasSuggestion: true,

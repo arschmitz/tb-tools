@@ -35,9 +35,11 @@ const taskView = registerAiTaskDialog({ kind: "rebase", dialog: rebaseDialog,
 });
 
 rebaseDialog.addEventListener("cancel", event => {
+  event.preventDefault();
   if (busy || uiState.rebaseDialogState?.resolutionId) {
-    event.preventDefault();
     if (!busy) void cancelResolution();
+  } else {
+    closeRebaseDialog();
   }
 });
 
@@ -229,7 +231,7 @@ export function closeRebaseDialog() {
   }
   uiState.rebaseDialogState = null;
   rebaseError.textContent = "";
-  rebaseDialog.close();
+  taskView.dismiss();
 }
 
 export function setRebaseDialogBusy(message) {

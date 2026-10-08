@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   createSubmitCommand,
   getMozPhabSubmitArgs,
+  getMozPhabSubmitEnvironment,
   getSubmitLinksFromText,
 } from "../commands/submit.mjs";
 
@@ -56,7 +57,7 @@ test("submit command posts a mach try URL with mocked prompts and runners", asyn
       headless: true,
       pattern: "mail/**/browser_*.js",
     }],
-    ["run", { cmd: "moz-phab", args: ["submit", "--single"], capture: true }],
+    ["run", { cmd: "moz-phab", args: ["submit", "--single"], capture: true, env: getMozPhabSubmitEnvironment() }],
     ["try", {
       comment: false,
       flavor: "browser",

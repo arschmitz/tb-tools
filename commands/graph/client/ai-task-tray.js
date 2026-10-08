@@ -98,7 +98,7 @@ function render(task) {
   const text = task.unavailable || task.session?.error ? `${labels[task.state]} — ${task.unavailable || task.session.error}` : labels[task.state];
   const status = card.querySelector(".ai-task-state");
   if (status.textContent !== text) status.textContent = text;
-  card.querySelector(".ai-task-dismiss").hidden = task.state !== "complete" && !task.unavailable;
+  card.querySelector(".ai-task-dismiss").hidden = !["complete", "waiting"].includes(task.state) && !task.unavailable;
   card.querySelector(".ai-task-dismiss").setAttribute("aria-label", `Dismiss ${task.title}`);
   tray.hidden = false;
 }
@@ -242,6 +242,29 @@ export function registerAiTaskTarget(kind, restore) {
 function schedule() {
   if (!timer && !polling) timer = setTimeout(pollTasks, 1500);
 }
+
+async function restoreServerTasks() {
+  try {
+    const response = await fetch(`/api/background-jobs?token=${encodeURIComponent(INTERACTIVE.token)}`, { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok || !result.ok) return;
+    const kinds = { Review: "review", Update: "update", Implement: "implement", Submit: "submit", Rebase: "rebase" };
+    await Promise.all((result.jobs || []).filter(job => kinds[job.kind] && job.state === "running").map(async job => {
+      const kind = kinds[job.kind];
+      const id = job.id.slice(job.kind.length + 1);
+      const key = `${kind}:${id}`;
+      if (tasks.has(key) || dismissed.has(key)) return;
+      const endpoint = `/api/${kind === "update" ? "patch-update" : kind}/${encodeURIComponent(id)}`;
+      try {
+        const taskResponse = await fetch(`${endpoint}?token=${encodeURIComponent(INTERACTIVE.token)}`, { cache: "no-store" });
+        const session = await taskResponse.json();
+        if (!taskResponse.ok || !session.ok || tasks.has(key)) return;
+        if (getAiTaskState(session) === "complete") return;
+        trackAiTask({ kind, session, title: `${session.revision || job.title} ${job.kind}`, endpoint });
+      } catch { /* Other saved tasks can still be restored. */ }
+    }));
+  } catch { /* Browser storage remains available when the server cannot be reached. */ }
+}
 async function pollTasks() {
   timer = undefined; polling = true;
   await Promise.all([...tasks.values()].filter(task => task.endpoint && (task.needsRefresh || task.state !== "complete")).map(async task => {
@@ -279,4 +302,5 @@ if (INTERACTIVE.aiEnabled && INTERACTIVE.enabled) {
     }
   } catch { /* A fresh tray is safe if saved browser state cannot be read. */ }
   if (tasks.size) schedule();
+  void restoreServerTasks();
 }

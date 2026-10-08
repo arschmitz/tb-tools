@@ -1,6 +1,6 @@
 import { executeConsoleArtifactBuild, prepareConsoleBuild, publishCompletedConsoleBuild } from "./build.mjs";
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ensurePairedWorktrees, getWorktreeDirectory, writeWorktreeBuildConfig } from "./worktrees.mjs";
@@ -61,7 +61,8 @@ export function createTaskWorktreeManager({ graphs, runCommand, directory = getW
     const session = configure({ id: randomUUID() }, kind);
     const revision = await git(comm.path, ["rev-parse", "HEAD"]);
     const geckoRevision = await git(gecko.path, ["rev-parse", "HEAD"]);
-    await prepare(session, { geckoRevision, commRevision: revision, cloneBranches: true, cloneRevision });
+    await prepare(session, { geckoRevision, commRevision: revision,
+      cloneBranches: kind === "rebase" || kind === "interactive-rebase", cloneRevision });
     // Rebases apply committed patches. Keep unfinished source work in its checkout.
     if (kind === "rebase" || kind === "interactive-rebase") return session;
     for (const [source, destination] of [[gecko.path, path.dirname(session.graph.path)], [comm.path, session.graph.path]]) {
@@ -101,7 +102,51 @@ export function createTaskWorktreeManager({ graphs, runCommand, directory = getW
     return session;
   }
   const prepareBuild = session => prepareTaskWorktreeBuild(session, runCommand);
-  return { configure, prepare, prepareCurrent, prepareBuild, taskGraphs, sourceGraph: comm };
+  const cleaning = new Map();
+  async function cleanup(session, { review = session.taskKind === "review" } = {}) {
+    const graph = session.graph;
+    if (!graph?.taskWorktree || session.worktreeRemoved) return;
+    const root = path.dirname(graph.path);
+    if (!graph.taskId || root !== directory(`task-${graph.taskId}`) || graph.path !== path.join(root, "comm")) {
+      throw new Error("Refusing to remove a worktree outside this task's directory.");
+    }
+    if (cleaning.has(root)) return cleaning.get(root);
+    const operation = removePair(root, `tb-task/${graph.taskId}/`, review).then(() => { session.worktreeRemoved = true; });
+    cleaning.set(root, operation);
+    try { await operation; } finally { cleaning.delete(root); }
+  }
+  async function removePair(root, namespace, review) {
+    for (const [source, destination] of [[comm.path, path.join(root, "comm")], [gecko.path, root]]) {
+      const trees = await git(source, ["worktree", "list", "--porcelain"]);
+      const canonical = await realpath(destination).catch(error => {
+        if (error.code === "ENOENT") return destination;
+        throw error;
+      });
+      if (trees.split("\n").includes(`worktree ${canonical}`)) {
+        if (!review) {
+          const head = await git(destination, ["rev-parse", "HEAD"]);
+          await git(source, ["update-ref", `refs/heads/${namespace}retained-head`, head]);
+        }
+        await git(source, ["worktree", "remove", "--force", destination]);
+      }
+      if (review) {
+        const refs = await git(source, ["for-each-ref", "--format=%(refname)", `refs/heads/${namespace}`]);
+        for (const ref of refs.split("\n").filter(Boolean)) await git(source, ["update-ref", "-d", ref]);
+      }
+    }
+  }
+
+  async function cleanupTryWorkspace(state, storeDirectory) {
+    if (!state.workspace || state.workspaceRemoved) return;
+    if (!/^[a-z0-9-]+$/.test(state.id) || !Number.isSafeInteger(state.workspaceGeneration || 0) || (state.workspaceGeneration || 0) < 0) {
+      throw new Error("Invalid Try workspace identity.");
+    }
+    const expected = path.join(await realpath(storeDirectory), "workspaces", `${state.id}-${state.workspaceGeneration || 0}`, "gecko", "comm");
+    if (state.workspace !== expected) throw new Error("Refusing to remove a Try workspace outside its saved directory.");
+    await removePair(path.dirname(expected), `tb-try-workspace/${state.id}-${state.workspaceGeneration || 0}/`, false);
+    state.workspaceRemoved = true;
+  }
+  return { configure, prepare, prepareCurrent, prepareBuild, cleanup, cleanupTryWorkspace, taskGraphs, sourceGraph: comm };
 }
 
 export async function prepareTaskWorktreeBuild(session, runCommand) {

@@ -3,6 +3,17 @@ export function initializeDesktopBrowserTabs() {
   const navigation = document.querySelector(".console-navigation");
   if (!api || !navigation) return;
   document.body.classList.add("desktop-browser-host");
+  let dialogOpen;
+  const updateDialogState = () => {
+    const open = Boolean(document.querySelector("dialog[open]"));
+    if (open === dialogOpen) return;
+    dialogOpen = open;
+    api.overlay?.(open);
+  };
+  new MutationObserver(updateDialogState).observe(document.body, {
+    subtree: true, childList: true, attributes: true, attributeFilter: ["open"],
+  });
+  updateDialogState();
   const tabs = document.createElement("span");
   tabs.className = "desktop-browser-tabs";
   navigation.append(tabs);

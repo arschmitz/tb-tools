@@ -55,6 +55,15 @@ body > header {
   height: 75px;
   transform: translateY(-7px);
 }
+.desktop-browser-host .dashboard-brand picture {
+  width: 270px;
+  height: 90px;
+}
+.desktop-browser-host .dashboard-brand img {
+  width: 270px;
+  height: 112.5px;
+  transform: translateY(-10.5px);
+}
 .title-row {
   align-items: center;
   display: flex;
@@ -11478,6 +11487,25 @@ button.dashboard-bug-title {
 .desktop-browser-tabs { min-width: 0; overflow-x: auto; }
 .desktop-browser-tab .tab { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-browser-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; }
+.desktop-browser-toolbar button {
+  min-width: 42px;
+  min-height: 38px;
+  padding: 4px 10px;
+  border: 1px solid var(--diff-border);
+  border-radius: 5px;
+  background: var(--diff-header-bg);
+  color: inherit;
+  font: 22px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+.desktop-browser-toolbar button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+.desktop-browser-toolbar button:focus-visible {
+  outline: 2px solid #4b9eff;
+  outline-offset: 2px;
+}
 .desktop-browser-toolbar[hidden] { display: none; }
 .desktop-browser-address { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

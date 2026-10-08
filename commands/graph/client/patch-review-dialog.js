@@ -809,6 +809,102 @@ function appendReviewCheckoutDiff() {
   }
 }
 
+function enableAdditionalReviewComments() {
+  if (session.status !== "review" || getCurrentIssue()) return;
+  for (const row of patchDiffContent.querySelectorAll(".pretty-file .diff-line[data-new-line]")) {
+    if (!row.dataset.newLine || row.closest(".patch-review-working-diff")) continue;
+    const cell = row.querySelector(".new-line");
+    if (!cell || cell.querySelector("button")) continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.reviewAddComment = "true";
+    button.textContent = row.dataset.newLine;
+    button.setAttribute("aria-label", `Add comment on line ${row.dataset.newLine}`);
+    cell.replaceChildren(button);
+  }
+}
+
+function openAdditionalReviewComment(row, extend = false) {
+  if (pendingAction || session.status !== "review" || getCurrentIssue()) return;
+  const existing = patchDiffContent.querySelector(".patch-review-manual-comment");
+  if (existing) {
+    if (extend && existing.dataset.filePath === row.closest(".pretty-file").dataset.filePath) {
+      const first = Number(existing.dataset.firstLine);
+      const last = Number(row.dataset.newLine);
+      existing.dataset.startLine = String(Math.min(first, last));
+      existing.dataset.endLine = String(Math.max(first, last));
+      existing.querySelector("h3").textContent = `Add comment on lines ${existing.dataset.startLine}–${existing.dataset.endLine}`;
+      for (const line of row.closest(".pretty-file").querySelectorAll(".diff-line")) {
+        const selected = Number(line.dataset.newLine) >= Number(existing.dataset.startLine) &&
+          Number(line.dataset.newLine) <= Number(existing.dataset.endLine);
+        line.classList.toggle("patch-review-context-line", selected);
+      }
+    }
+    return;
+  }
+  const editor = document.createElement("article");
+  editor.className = "patch-review-manual-comment patch-review-inline-finding";
+  editor.dataset.filePath = row.closest(".pretty-file").dataset.filePath;
+  editor.dataset.firstLine = row.dataset.newLine;
+  editor.dataset.startLine = row.dataset.newLine;
+  editor.dataset.endLine = row.dataset.newLine;
+  const heading = document.createElement("h3");
+  heading.textContent = `Add comment on line ${row.dataset.newLine}`;
+  const commentLabel = document.createElement("label");
+  commentLabel.className = "patch-review-inline-field";
+  commentLabel.append("Comment");
+  const comment = document.createElement("textarea");
+  comment.rows = 4;
+  commentLabel.append(comment);
+  const replacementLabel = document.createElement("label");
+  replacementLabel.className = "patch-review-inline-field";
+  replacementLabel.append("Code replacement (optional)");
+  const replacement = document.createElement("textarea");
+  replacement.rows = 4;
+  replacement.spellcheck = false;
+  replacementLabel.append(replacement);
+  const save = document.createElement("button");
+  save.type = "button";
+  save.textContent = "Save Additional Inline Draft";
+  save.disabled = true;
+  comment.addEventListener("input", () => { save.disabled = !comment.value.trim(); });
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    await runAction("inline", {
+      anchor: { filePath: editor.dataset.filePath, lineNumber: Number(editor.dataset.startLine), lineLength: Number(editor.dataset.endLine) - Number(editor.dataset.startLine) + 1 },
+      kind: replacement.value ? "suggestion" : "comment",
+      message: comment.value,
+      codeSuggestion: replacement.value,
+    });
+    if (editor.isConnected) save.disabled = false;
+  });
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => {
+    editor.remove();
+    patchDiffContent.querySelectorAll(".patch-review-context-line").forEach(line => line.classList.remove("patch-review-context-line"));
+    renderSession(session);
+  });
+  const help = document.createElement("p");
+  help.textContent = "Shift-click another line to select a range for this comment or replacement.";
+  editor.append(heading, help, commentLabel, replacementLabel, save, cancel);
+  let thread = row.nextElementSibling;
+  if (!thread?.classList.contains("review-inline-thread")) {
+    thread = document.createElement("tr");
+    thread.className = "review-inline-thread";
+    const cell = document.createElement("td");
+    cell.colSpan = 3;
+    thread.append(cell);
+    row.after(thread);
+  }
+  thread.firstElementChild.append(editor);
+  row.closest(".diff-table").classList.add("has-review-comments");
+  row.classList.add("patch-review-context-line");
+  finalButtons?.forEach(button => { button.disabled = true; });
+  comment.focus();
+}
+
 function setPatchDiff(issue) {
   if (!patchDiffContent || !patchDiff) {
     return;
@@ -867,6 +963,7 @@ function setPatchDiff(issue) {
   appendExistingInlineComments();
   appendCurrentIssue(issue);
   appendReviewCheckoutDiff();
+  enableAdditionalReviewComments();
   renderDiscussion(reviewContext.reviewDiscussion);
 
 
@@ -1040,7 +1137,7 @@ function renderSession(value) {
   finalButtons?.forEach((button) => {
     setButton(button, {
       hidden: !completeReview,
-      disabled: actionPending,
+      disabled: actionPending || Boolean(patchDiffContent.querySelector(".patch-review-manual-comment")),
       text: pendingAction === "submit" ? "Posting..." : getFinalButtonText(button),
     });
   });
@@ -1320,6 +1417,12 @@ export function initializePatchReviewDialog() {
     updateInlineFindingActions(issue);
   });
   patchDiffContent?.addEventListener("click", (event) => {
+    const lineButton = event.target.closest("[data-review-add-comment]");
+    const row = event.target.closest(".diff-line[data-new-line]");
+    if (lineButton || (row && !event.target.closest("button, a") && !hasSelectedText(patchDiffContent))) {
+      if (row?.querySelector("[data-review-add-comment]")) openAdditionalReviewComment(row, event.shiftKey);
+      return;
+    }
     const button = event.target.closest("[data-review-inline-action]");
     const issue = getCurrentIssue();
 

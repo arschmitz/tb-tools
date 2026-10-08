@@ -83,6 +83,7 @@ let activityFilter = "notes";
 let activityFollowsLatest = true;
 let appliedSnapshotKey = "";
 let pendingAction = "";
+let submitError = "";
 let patchContextExpanded = false;
 let patchContextKey = "";
 let workingTreeDiff = {
@@ -343,7 +344,7 @@ function loadPatchDiff() {
     text: "",
   };
   void fetch(
-    `/api/graph/${encodeURIComponent(session.graphIndex)}/diff/${encodeURIComponent(session.currentHash)}?token=${encodeURIComponent(INTERACTIVE.token)}`,
+    `/api/graph/${encodeURIComponent(session.graphIndex)}/diff/${encodeURIComponent(session.currentHash)}?token=${encodeURIComponent(INTERACTIVE.token)}&patchUpdateSession=${encodeURIComponent(session.id)}`,
     { cache: "no-store" },
   ).then(async (response) => {
     const result = await response.json();
@@ -450,7 +451,8 @@ function loadWorkingTreeDiff(item) {
   };
   void fetch(
     "/api/graph/" + encodeURIComponent(session.graphIndex) +
-      "/diff/uncommitted-changes?token=" + encodeURIComponent(INTERACTIVE.token),
+      "/diff/uncommitted-changes?token=" + encodeURIComponent(INTERACTIVE.token) +
+      "&patchUpdateSession=" + encodeURIComponent(session.id),
     { cache: "no-store", signal: controller.signal },
   ).then(async (response) => {
     const result = await response.json();
@@ -929,6 +931,7 @@ function setPatchDiff(item) {
 }
 
 function resetPatchUpdateDialog(patch) {
+  submitError = "";
   viewGeneration++;
   session = undefined;
   renderedChat = "";
@@ -1044,8 +1047,8 @@ function renderSession(currentSession) {
 
   title.textContent = `${session.revision} ${session.mode === "verify" ? "Verify" : session.mode === "freeform" ? "Update" : "Review Update"}`;
   setPatchLinks(session.revision, session.bugId || undefined);
-  setLiveText(status, session.message || session.error || "");
-  status.classList.toggle("error", session.status === "error" || Boolean(item?.error));
+  setLiveText(status, submitError || session.message || session.error || "");
+  status.classList.toggle("error", Boolean(submitError) || session.status === "error" || Boolean(item?.error));
   setLiveText(output, visibleOutput);
   output.hidden = !outputVisible || !hasOutput;
   outputToggle.hidden = freeform || !hasOutput;
@@ -1373,8 +1376,15 @@ export function initializePatchUpdateDialog() {
     button.dataset.hash = session.currentHash;
     button.dataset.label = GRAPHS[session.graphIndex]?.label || "comm";
     const id = session.id;
+    submitError = "";
     openSubmitDialog(button, { patchUpdateSessionId: id,
       onStarted: () => { if (session?.id === id) taskView.minimize(); },
+      onError: message => {
+        if (session?.id !== id) return;
+        submitError = message;
+        status.classList.add("error");
+        status.textContent = message;
+      },
     });
   });
 }

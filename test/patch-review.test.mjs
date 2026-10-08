@@ -945,3 +945,15 @@ test("patch review activity and discussion stay readable in dark mode", () => {
   assert.match(css, /\.patch-review-activity-filter button\[aria-pressed="true"\] \{[\s\S]*?background: #0b5394;/);
   assert.match(css, /\.patch-review-coverage > summary,[\s\S]*?color: #f0f6fc;/);
 });
+
+test("additional review drafts reject lines outside the exact patch", async () => {
+  const session = { aiEnabled: true, status: "review", issues: [],
+    rawPatchHtml: '<section class="pretty-file" data-file-path="mail/example.mjs"><tr data-new-line="15"></tr></section>' };
+  let posted = false;
+  await assert.rejects(addGraphPatchReviewInline({ session,
+    anchor: { filePath: "mail/example.mjs", lineNumber: 99 }, kind: "comment", message: "Check this line.",
+    createInlineComment: async () => { posted = true; },
+  }), /exact review patch/);
+  assert.equal(posted, false);
+  assert.equal(session.issues.length, 0);
+});

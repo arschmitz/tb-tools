@@ -398,8 +398,14 @@ export async function startInteractiveGraphServer({
   const submitSessions = new Map();
   const patchUpdateSessions = new Map();
   const patchReviewSessions = new Map();
+  const preparingReviews = new Set();
+  async function prepareTrackedReview(options) {
+    preparingReviews.add(options.session.id);
+    try { return await preparePatchReviewSession(options); }
+    finally { preparingReviews.delete(options.session.id); }
+  }
   const patchSessionStore = createPatchSessionStore({ directory: patchSessionDirectory });
-  if (taskWorktrees) for (const { kind, session } of patchSessionStore.list(serverGraphs)) {
+  if (taskWorktrees) for (const { kind, session } of patchSessionStore.list(serverGraphs, { includeFinished: true })) {
     session.aiEnabled = isGraphAiEnabled(appConfig);
     session.codexCommand = String(appConfig?.ai?.command || "");
     (kind === "review" ? patchReviewSessions : patchUpdateSessions).set(session.id, session);
@@ -549,7 +555,7 @@ export async function startInteractiveGraphServer({
         workingTreeDiffVersion: (saved.workingTreeDiffVersion || 0) + 1,
       };
       sessions.set(resumed.id, resumed);
-      void preparePatchReviewSession({
+      void prepareTrackedReview({
         session: resumed,
         prepareCheckout: prepareManagedReviewCheckout,
       ...(taskWorktrees && prepareTaskBuild ? { prepareBuild: taskManager.prepareBuild } : {}),
@@ -679,6 +685,54 @@ export async function startInteractiveGraphServer({
   }
   const rebaseSessionTimer = setInterval(saveRebaseSessions, 2000);
   rebaseSessionTimer.unref();
+  let cleaningWorktrees = false;
+  async function cleanupFinishedWorktrees() {
+    if (!taskManager || cleaningWorktrees) return;
+    cleaningWorktrees = true;
+    try {
+      for (const [kind, sessions] of [["review", patchReviewSessions], ["update", patchUpdateSessions],
+        ["rebase", rebaseSessions], ["command", machSessions], ["command", lintSessions],
+        ["command", testSessions], ["command", trySessions], ["command", submitSessions]]) {
+        for (const session of sessions.values()) {
+          const ended = ["complete", "cancelled", "canceled"].includes(session.status) || kind === "command" && session.status === "error";
+          if (!ended || preparingReviews.has(session.id) || session.freeformOperationRunning || session.continueBusy || session.patchUpdateSessionId) continue;
+          if (kind === "update" && [...submitSessions.values()].some(submission =>
+            submission.patchUpdateSessionId === session.id && !["complete", "error", "cancelled"].includes(submission.status))) continue;
+          if (kind !== "review" && backgroundTryStore.list().some(state => state.path === session.graph?.path &&
+              (state.aiPid || state.workerPid || !["passed", "squashed", "cancelled", "superseded"].includes(state.phase)))) continue;
+          session.codexAgent?.client.close();
+          try { await taskManager.cleanup(session, { review: kind === "review" }); }
+          catch (error) { session.cleanupError = `Could not remove the task worktree: ${error.message}`; }
+        }
+      }
+      for (const state of implementation?.list() || []) {
+        if (!["complete", "cancelled"].includes(state.phase) || !state.repositoryPath) continue;
+        const workspace = taskManager.configure({ id: state.id }, "implement");
+        if (workspace.graph.path !== state.path) continue;
+        try { await taskManager.cleanup(workspace); }
+        catch (error) { state.cleanupError = `Could not remove the task worktree: ${error.message}`; }
+      }
+      for (const state of backgroundTryStore.list()) {
+        if (!["passed", "squashed", "cancelled", "superseded"].includes(state.phase) || state.aiPid || state.workerPid) continue;
+        if (state.repositoryPath !== taskManager.sourceGraph.path && state.path !== taskManager.sourceGraph.path) continue;
+        try {
+          await taskManager.cleanupTryWorkspace(state, backgroundTryStore.directory);
+          const taskName = path.basename(path.dirname(state.path));
+          const taskId = taskName.startsWith("task-") ? taskName.slice(5) : "";
+          const ownerActive = [...patchUpdateSessions.values(), ...patchReviewSessions.values(), ...rebaseSessions.values()]
+            .some(session => session.graph?.path === state.path && !["complete", "cancelled"].includes(session.status)) ||
+            (implementation?.list() || []).some(task => task.path === state.path && !["complete", "cancelled"].includes(task.phase));
+          if (taskId && state.repositoryPath === taskManager.sourceGraph.path && !ownerActive) {
+            const workspace = taskManager.configure({ id: taskId }, "try");
+            if (workspace.graph.path === state.path) await taskManager.cleanup(workspace);
+          }
+          backgroundTryStore.save(state);
+        } catch (error) { state.cleanupError = `Could not remove the Try worktree: ${error.message}`; }
+      }
+    } finally { cleaningWorktrees = false; }
+  }
+  const worktreeCleanupTimer = setInterval(() => { void cleanupFinishedWorktrees(); }, 2000);
+  worktreeCleanupTimer.unref();
   const commitIntegrationCache = new Map();
   const commitIntegrationInflight = new Map();
   const commitReviewCache = new Map();
@@ -795,6 +849,7 @@ export async function startInteractiveGraphServer({
     savePatchSessions();
     clearInterval(patchSessionTimer);
     clearInterval(rebaseSessionTimer);
+    clearInterval(worktreeCleanupTimer);
     saveRebaseSessions();
     const shouldCloseBrowserTabs = Boolean(closeBrowserTabsOnShutdown);
     const shutdownDelay = shouldCloseBrowserTabs
@@ -1564,7 +1619,7 @@ export async function startInteractiveGraphServer({
           /^\/api\/(?:patch-update|checkout|commit-action|try|submit|update-graphs|mach|lint|test|dashboard\/patch-action|new-patch|checkout-transfer|interactive-rebase|rebase|commit|unshelf-graphs|mach-action|patch|land|amend-current|amend-message|amend-try-fixup)(?:\/|$)/.test(url.pathname)) {
         throw Object.assign(new Error("Implement owns the working checkout. Finish or cancel it before starting another action."), { statusCode: 409 });
       }
-      if (!taskWorktrees && request.method === "POST" && !cancelMach && [...submitSessions.values()].some(session => ["running", "prompt"].includes(session.status)) &&
+      if (request.method === "POST" && !cancelMach && [...submitSessions.values()].some(session => !session.managedWorktree && ["running", "prompt"].includes(session.status)) &&
           (/^\/api\/submit$/.test(url.pathname) || /^\/api\/(?:patch-update|checkout|checkout-transfer|commit-action|try|update-graphs|mach-action|lint|test|new-patch|interactive-rebase|rebase|commit|unshelf-graphs|patch|land|amend-current|amend-message|amend-try-fixup|dashboard\/patch-action)(?:\/|$)/.test(url.pathname))) {
         throw Object.assign(new Error("Submit is still using the working checkout. Wait for it to finish before changing that checkout."), { statusCode: 409 });
       }
@@ -1708,6 +1763,14 @@ export async function startInteractiveGraphServer({
         const handledReviews = body
           ? await reviewHandled.set(body.revision, body.handled, { title: body.title })
           : await reviewHandled.list();
+        if (body?.handled) {
+          for (const session of patchReviewSessions.values()) {
+            if (session.revision !== String(body.revision).toUpperCase()) continue;
+            cancelGraphPatchReviewSession({ session });
+            session.status = "complete";
+          }
+          await cleanupFinishedWorktrees();
+        }
         sendJson(response, 200, { ok: true, handledReviews });
         return;
       }
@@ -1825,11 +1888,13 @@ export async function startInteractiveGraphServer({
           throw Object.assign(new Error("Wait for the active checkout operation to finish."), { statusCode: 409 });
         }
         dashboardPatchActionRunning = true;
+        let actionWorkspace;
         try {
           let actionGraphs = serverGraphs;
           if (taskManager) {
             const found = await findGraphPatchCommit({ graph: taskManager.sourceGraph, revision: body.revision, runCommand });
             const workspace = taskManager.configure({ id: randomUUID() }, body.action);
+            actionWorkspace = workspace;
             await taskManager.prepare(workspace, { commRevision: found.hash, cloneBranches: true });
             actionGraphs = taskManager.taskGraphs(workspace);
           }
@@ -1850,6 +1915,7 @@ export async function startInteractiveGraphServer({
           }
         } finally {
           dashboardPatchActionRunning = false;
+          if (actionWorkspace && body.action !== "ci-verify") await taskManager.cleanup(actionWorkspace);
         }
         return;
       }
@@ -1939,7 +2005,7 @@ export async function startInteractiveGraphServer({
         if (await restorePatchSession("review", session, body, response)) return;
 
         patchReviewSessions.set(session.id, session);
-        void preparePatchReviewSession({
+        void prepareTrackedReview({
           session,
           prepareCheckout: prepareManagedReviewCheckout,
           ...(taskWorktrees && prepareTaskBuild ? { prepareBuild: taskManager.prepareBuild } : {}),
@@ -2042,6 +2108,7 @@ export async function startInteractiveGraphServer({
           await addGraphPatchReviewInline({
             session,
             itemId: body.itemId,
+            anchor: body.anchor,
             kind: body.kind,
             message: body.message,
             codeSuggestion: body.codeSuggestion,
@@ -2916,7 +2983,13 @@ export async function startInteractiveGraphServer({
       const diffMatch = url.pathname.match(/^\/api\/graph\/(\d+)\/diff\/(.+)$/);
       if (request.method === "GET" && diffMatch) {
         validateToken(url.searchParams.get("token"), token);
-        const graph = serverGraphs[Number(diffMatch[1])];
+        const sessionId = url.searchParams.get("patchUpdateSession");
+        const updateSession = sessionId ? patchUpdateSessions.get(sessionId) : null;
+        if (sessionId && !updateSession) {
+          sendJson(response, 404, { ok: false, error: "Unknown patch update session." });
+          return;
+        }
+        const graph = updateSession?.graph || serverGraphs[Number(diffMatch[1])];
         const hash = decodeURIComponent(diffMatch[2]);
 
         if (!graph) {
@@ -3201,6 +3274,7 @@ export async function startInteractiveGraphServer({
         session.status = "complete";
         rebaseStore.remove(session.id);
         rebaseSessions.delete(session.id);
+        if (!session.patchUpdateSessionId) await taskManager?.cleanup(session);
         sendJson(response, 200, { ok: true, ...result, snapshot });
         return;
       }
@@ -4000,13 +4074,9 @@ export async function startInteractiveGraphServer({
           return;
         }
 
-        if (taskManager && !taskUpdate) {
-          const workspace = taskManager.configure({ id: randomUUID() }, "submit");
-          await taskManager.prepare(workspace, { commRevision: requestedHash, cloneBranches: true });
-          graph = workspace.graph;
-          current = await getCurrentGraphBase(graph, runCommand);
-        }
-        if (requestedHash !== current.hash) {
+        // moz-phab requires a named branch. Submit uses the selected checkout;
+        // it must not clone author branches into a new task workspace.
+        if (requestedHash !== current.hash || !current.branch || current.branch === "(detached)") {
           await checkoutGraphCommit({
             graphs: graph.taskWorktree ? [graph] : serverGraphs,
             graphIndex: graph.taskWorktree ? 0 : graphIndex,
@@ -4022,6 +4092,21 @@ export async function startInteractiveGraphServer({
             });
             return;
           }
+        }
+
+        if ((!current.branch || current.branch === "(detached)") && graph.taskWorktree && taskUpdate) {
+          await runGraphCommitAction({ graphs: [graph], graphIndex: 0,
+            hash: requestedHash, action: "branch", runCommand });
+          await checkoutGraphCommit({ graphs: [graph], graphIndex: 0, hash: requestedHash, runCommand });
+          current = await getCurrentGraphBase(graph, runCommand);
+        }
+
+        if (!current.branch || current.branch === "(detached)") {
+          sendJson(response, 409, {
+            ok: false,
+            error: "moz-phab requires a local branch at the selected commit. Check out that branch before submitting.",
+          });
+          return;
         }
 
         let afterMozPhabSubmit;
@@ -4092,6 +4177,7 @@ export async function startInteractiveGraphServer({
         });
 
         session.patchUpdateSessionId = patchUpdateSessionId;
+        session.managedWorktree = Boolean(graph.taskWorktree);
         submitSessions.set(session.id, session);
         sendJson(response, 200, {
           ok: true,
@@ -4356,6 +4442,7 @@ export async function startInteractiveGraphServer({
     savePatchSessions();
     clearInterval(patchSessionTimer);
     clearInterval(rebaseSessionTimer);
+    clearInterval(worktreeCleanupTimer);
     saveRebaseSessions();
     for (const session of [...patchUpdateSessions.values(), ...patchReviewSessions.values()]) {
       session.codexAgent?.client.close();

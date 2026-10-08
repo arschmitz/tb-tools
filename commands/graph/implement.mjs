@@ -182,13 +182,25 @@ function createSingleImplementationManager({ graphs, aiEnabled, username, codexC
     const message = await git(state, ["show", "-s", "--format=%B", "HEAD"]);
     // The commit may have finished before the process saved its receipt.
     if (head !== (state.commitHash || state.baseHash)) {
-      if (!message.includes(`Tb-Implement-Step: ${state.commitStep}`)) throw new Error("Unexpected commit while recovering Implement.");
+      const receipt = state.commitReceipt;
+      const matches = receipt
+        ? message === state.commitMessage.trim() &&
+          await git(state, ["rev-parse", "HEAD^{tree}"]) === receipt.tree &&
+          await git(state, ["show", "-s", "--format=%P", "HEAD"]) === receipt.parents
+        : state.commitStep && message.includes(`Tb-Implement-Step: ${state.commitStep}`);
+      if (!matches) throw new Error("Unexpected commit while recovering Implement.");
     } else {
       await assertCheckout(state);
       await git(state, ["add", "-A"]);
       const changed = await git(state, ["diff", "--cached", "--name-only"]);
       if (!changed && !state.commitHash) throw new Error("Implementation produced no patch.");
-      if (changed) await git(state, ["commit", ...(state.commitHash ? ["--amend"] : []), "-m", state.commitMessage]);
+      if (changed) {
+        state.commitMessage = state.commitMessage.replace(/^Tb-Implement-Step:.*(?:\r?\n|$)/gim, "").trim();
+        state.commitReceipt = { tree: await git(state, ["write-tree"]),
+          parents: state.commitHash ? await git(state, ["show", "-s", "--format=%P", "HEAD"]) : head };
+        save(state);
+        await git(state, ["commit", ...(state.commitHash ? ["--amend"] : []), "--cleanup=verbatim", "-m", state.commitMessage]);
+      }
     }
     state.commitHash = await git(state, ["rev-parse", "HEAD"]);
     state.phase = "verifying"; save(state);
@@ -286,9 +298,10 @@ function createSingleImplementationManager({ graphs, aiEnabled, username, codexC
         if (taskManager && (prepareTaskBuild ?? runCommand === run)) {
           await prepareBuild(state);
         }
-        state.commitStep = randomUUID();
+        delete state.commitStep;
+        delete state.commitReceipt;
         state.commitMessage = ensureTbToolsIdInCommitMessage(
-          `Bug ${state.bugId} - ${report.title.trim()}\n\n${String(report.description || "").trim()}\n\nTb-Implement-Step: ${state.commitStep}`, state.id,
+          `Bug ${state.bugId} - ${report.title.trim()}\n\n${String(report.description || "").trim()}`, state.id,
         ).message;
         state.phase = "committing"; save(state);
       }

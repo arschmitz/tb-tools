@@ -4,6 +4,7 @@ import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { run } from "../../lib/utils.mjs";
 import { getTbToolsIdFromCommitMessage } from "../../lib/commit-message.mjs";
+import { getPatchIdentityAliases, migrateRepositoryPatchIdentities, resolvePatchIdentity } from "../../lib/patch-identity.mjs";
 import { saveAiContext } from "./ai-context.mjs";
 
 const waitingRepairs = new Set();
@@ -11,6 +12,7 @@ const waitingRepairs = new Set();
 // Use patch identities, not workflow IDs or rewritten commit hashes. Parent
 // and child repairs share ownership while unrelated stacks can run together.
 export async function getTryRepairScope(state, runCommand = run) {
+  await migrateRepositoryPatchIdentities({ cwd: state.repositoryPath || state.path, runCommand, ids: [state.tbToolsId] });
   const git = async (...args) => String(await runCommand({ cmd: "git", args, cwd: state.path, capture: true, silent: true })).trim();
   const common = await git("rev-parse", "--git-common-dir");
   const repository = await realpath(path.resolve(state.path, common));
@@ -23,7 +25,7 @@ export async function getTryRepairScope(state, runCommand = run) {
     identities.add(getTbToolsIdFromCommitMessage(commits[i + 1]) || commits[i].trim());
   }
   if (!identities.size) identities.add(state.tbToolsId || state.sourceHash);
-  return [...identities].sort().map(identity => "repair-" + createHash("sha256").update(`${repository}\0${identity}`).digest("hex"));
+  return [...new Set([...identities].flatMap(getPatchIdentityAliases))].sort().map(identity => "repair-" + createHash("sha256").update(`${repository}\0${identity}`).digest("hex"));
 }
 
 export async function acquireTryRepairScope({ state, store, signal, runCommand = run }) {
@@ -101,17 +103,22 @@ export async function getRelatedTryRepairs(state, store, runCommand = run) {
 
 
 export function getTryRepairOwnerRef(targetId) {
-  return "refs/tb-tools/repair-owners/" + createHash("sha256").update(targetId).digest("hex");
+  return "refs/tb-tools/repair-owners/" + createHash("sha256").update(resolvePatchIdentity(targetId)).digest("hex");
 }
 
 export async function assertTryRepairOwner({ state, targetId, expectedHash, runCommand = run }) {
   const ref = getTryRepairOwnerRef(targetId);
   const git = async (...args) => String(await runCommand({ cmd: "git", args, cwd: state.path, capture: true, silent: true })).trim();
-  const hash = await git("rev-parse", "--verify", ref).catch(() => "");
-  if (hash && hash !== expectedHash && hash !== state.fixupHash &&
-      /^fixup! /.test(await git("show", "-s", "--format=%s", hash))) {
-    throw Object.assign(new Error(`This patch already has fixup ${hash.slice(0, 12)}. Its owning workflow must incorporate this repair; a second fixup will not be published.`),
-      { code: "TRY_REPAIR_OWNED", ownerRef: ref, ownerHash: hash });
+  let hash = "";
+  for (const id of getPatchIdentityAliases(targetId)) {
+    const oldRef = "refs/tb-tools/repair-owners/" + createHash("sha256").update(id).digest("hex");
+    const ownerHash = await git("rev-parse", "--verify", oldRef).catch(() => "");
+    if (ownerHash) hash = ownerHash;
+    if (ownerHash && ownerHash !== expectedHash && ownerHash !== state.fixupHash &&
+      /^fixup! /.test(await git("show", "-s", "--format=%s", ownerHash))) {
+      throw Object.assign(new Error(`This patch already has fixup ${ownerHash.slice(0, 12)}. Its owning workflow must incorporate this repair; a second fixup will not be published.`),
+        { code: "TRY_REPAIR_OWNED", ownerRef: oldRef, ownerHash });
+    }
   }
   return { ref, hash };
 }

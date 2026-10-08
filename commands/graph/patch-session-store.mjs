@@ -8,7 +8,7 @@ const runtimeKeys = new Set([
 ]);
 
 export function canResumePatchSession(session) {
-  return Boolean(session && !session.cancelled && session.currentHash &&
+  return Boolean(session && !session.cancelled && !session.worktreeRemoved && session.currentHash &&
     (session.codexSessionId || session.managedWorktree && session.originalHash || ["review", "complete"].includes(session.status)));
 }
 
@@ -19,14 +19,15 @@ export function createPatchSessionStore({ directory } = {}) {
   const filename = (kind, session) => path.join(root, `${createHash("sha256")
     .update(`${kind === "update" && ["verify", "freeform"].includes(session.mode) ? session.mode : kind}:${session.graph.path}:${session.revision}`).digest("hex")}.json`);
   return {
-    list(graphs) {
+    list(graphs, { includeFinished = false } = {}) {
       if (!root) return [];
       let files;
       try { files = readdirSync(root); } catch (error) { if (error.code === "ENOENT") return []; throw error; }
       return files.filter(file => file.endsWith(".json")).flatMap(file => {
         const saved = JSON.parse(readFileSync(path.join(root, file), "utf8"), (_key, value) =>
           value && Object.keys(value).length === 1 && Array.isArray(value.savedMapEntries) ? new Map(value.savedMapEntries) : value);
-        if (!saved.taskGraph || !canResumePatchSession(saved.data)) return [];
+        if (!saved.taskGraph || saved.data.worktreeRemoved || (!canResumePatchSession(saved.data) &&
+            !(includeFinished && ["complete", "cancelled", "canceled"].includes(saved.data.status)))) return [];
         const graphIndex = graphs.findIndex(graph => graph.path === saved.taskGraph.repositoryPath);
         if (graphIndex < 0) return [];
         return [{ kind: saved.kind, session: { ...saved.data,
@@ -38,7 +39,7 @@ export function createPatchSessionStore({ directory } = {}) {
     save(kind, session) {
       if (!root) return;
       const file = filename(kind, session);
-      if (!canResumePatchSession(session)) {
+      if (!canResumePatchSession(session) && !session.worktreeRemoved) {
         try {
           const existing = JSON.parse(readFileSync(file, "utf8"));
           if (canResumePatchSession(existing.data)) return;

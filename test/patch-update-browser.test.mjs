@@ -84,6 +84,7 @@ test("Patch Update anchors reviewer feedback and working-tree changes in one pat
     html,
     preparePatchUpdateSession: async ({ session }) => {
       patchUpdateSession = session;
+      session.graph = { ...graph, path: "/task/verify/comm" };
       session.activity = Array.from({ length: 30 }, (_, index) => [
         { id: `note-${index}`, kind: "note", title: "Codex note", detail: `Note ${index}: ${"This is a long note about the patch. ".repeat(12)} ${"long_path_".repeat(35)}` },
         { id: `command-${index}`, kind: "command", title: "Running command", detail: `git diff -- ${"long_path_".repeat(35)}` },
@@ -143,13 +144,13 @@ test("Patch Update anchors reviewer feedback and working-tree changes in one pat
       session.workingTreeDiffVersion = (session.workingTreeDiffVersion || 0) + 1;
       session.message = "Source change was amended into the current commit. You can now post a reply, skip, or mark this comment done.";
     },
-    runCommand: async ({ args = [] }) => {
+    runCommand: async ({ args = [], cwd }) => {
       if (args[0] === "log") {
         return GIT_LOG_RECORD;
       }
 
       if (args[0] === "diff") {
-        return currentWorkingTreeDiff;
+        return cwd === "/task/verify/comm" ? currentWorkingTreeDiff : "";
       }
 
       if (args.includes("show")) {
@@ -349,6 +350,8 @@ test("Patch Update anchors reviewer feedback and working-tree changes in one pat
   assert.equal(await restoredFinding.getByRole("button", { name: "Make Change", exact: true }).isVisible(), true);
   assert.equal(await page.locator(".patch-update-dialog .codex-run-status").innerText(), "Waiting for your input");
   await page.screenshot({ path: "/tmp/tb-patch-update-ui.png" });
+  // The remaining checks exercise resuming a task in the main checkout.
+  patchUpdateSession.graph = graph;
   const savedSessionId = patchUpdateSession.id;
   Object.assign(patchUpdateSession.items[0], { changesAmended: true, changeApplied: true, state: "applying" });
   await page.locator(".patch-update-close").click();

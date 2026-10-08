@@ -765,7 +765,7 @@ export async function pollSubmitSession() {
   }
 }
 
-export async function openSubmitDialog(button, { patchUpdateSessionId = "", onStarted } = {}) {
+export async function openSubmitDialog(button, { patchUpdateSessionId = "", onStarted, onError } = {}) {
   const graphIndex = Number(button.dataset.graphIndex);
   const status = document.getElementById("diff-" + graphIndex).querySelector(".checkout-status");
   const isCurrent = button.dataset.isCurrent === "true";
@@ -829,6 +829,7 @@ export async function openSubmitDialog(button, { patchUpdateSessionId = "", onSt
   } catch (error) {
     status.classList.add("error");
     status.textContent = error && error.message ? error.message : String(error);
+    onError?.(status.textContent);
   } finally {
     button.disabled = false;
   }

@@ -112,6 +112,8 @@ Run `npm ci`, then `npm run desktop -- --comm=/path/to/firefox/comm`. Run `npm r
 
 The desktop app creates paired Review worktrees in `~/.tb-tools/worktrees`. Each revision under review gets its own pair, so different reviews can run together. Each active worktree has its own writable object directory. Completed artifact snapshots live in `~/.tb-tools/build-cache`. When sccache is installed, its compiler-result storage is shared; cache hits across worktrees depend on the active sccache server's base paths. The app turns off sccache direct mode to avoid stale headers across worktrees. A new worktree can build without copying another live object directory. Try repair worktrees also get a Thunderbird build config with a private object directory. Windows builds need Visual Studio C++ tools, MozillaBuild's `bin` directory on PATH, and native Python.
 
+When a review completes, is cancelled, or is marked handled, the console removes its task worktrees and task branches. Review-only commits then become eligible for normal Git garbage collection if no other branch refers to them. Other finished tasks remove their worktrees but keep their branches and final commits. The console saves detached final commits under `tb-task/<task-id>/retained-head` in each repository. Try repair commits use `tb-try-workspace/<workflow-id>-<generation>/retained-head`. Tasks waiting for input keep their worktrees. A task also keeps its worktree while a Try workflow still uses it. Shared build caches stay available.
+
 In Settings, set one or more local times in `HH:MM` format and enable Daily source pull and build. The app fetches both `origin/main` branches, updates its own detached worktree in `~/.tb-tools/daily-build`, and runs `./mach build` there. It never switches the Working checkout. Build now, Cancel build, and View log are available in the same section. If the app starts after a scheduled time, it runs one catch-up build that day. Enabling the schedule also asks the packaged app to start at login on macOS or Windows; operating system approval may still be needed.
 
 For phone access over cellular, install Tailscale on the computer and phone and sign in to the same private network. Choose Pair Phone in the desktop app. It configures Tailscale Serve on private HTTPS port 8443 and shows the phone URL and a one-time code. Open the URL on the phone, enter the code, then add the page to the home screen. The phone uses the same console and actions through a separate paired gateway. Disable Phone Access and Revoke Paired Phones are in the app menu. The original local console stays bound to loopback.
@@ -154,10 +156,10 @@ For phone access over cellular, install Tailscale on the computer and phone and 
 3. Make changes until ready to commit
 4. run lint `tb lint`
 5. run tests based on your changes `tb test`
-6. Commit changes `tb commit` and follow prompt to generate commit message. New commits include a `TB-Tools-Id` trailer so console metadata such as try runs can survive rebases and amends.
+6. Commit changes `tb commit` and follow prompt to generate commit message. Unsubmitted commits include a `TB-Tools-Id` trailer so console metadata such as try runs can survive rebases and amends. Submitted patches use their `Differential Revision` as the tracking ID.
 7. Make more changes
 8. Add changes to your commit `tb amend`, selecting new files to add
-9. When ready to submit patches to phabricator lint changes, run tests based on changes, push a try run with `mach try`, and submit unsubmitted comments in phabricator `tb submit`
+9. When ready to submit patches to phabricator lint changes, run tests based on changes, push a try run with `mach try`, and submit unsubmitted comments in phabricator `tb submit`. Both `tb submit` and the console Submit action remove internal trailers from messages uploaded to Phabricator. After submission, they remove `TB-Tools-Id` from the local commit and track the patch by `Differential Revision`. Saved history and tasks resolve old IDs through local aliases. A one-time migration finds submitted commits in local branches and reflogs. Missing or conflicting mappings keep the old ID.
 
 ## Sheriff Duty
 

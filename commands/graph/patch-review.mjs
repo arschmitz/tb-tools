@@ -915,7 +915,7 @@ export function createGraphPatchReviewSession({
 }
 
 export function cancelGraphPatchReviewSession({ session }) {
-  if (!session || ["cancelled", "complete", "error"].includes(session.status)) {
+  if (!session || ["cancelled", "complete"].includes(session.status)) {
     return session;
   }
 
@@ -1198,6 +1198,7 @@ export async function prepareGraphPatchReviewSession({
 export async function addGraphPatchReviewInline({
   session,
   itemId,
+  anchor,
   kind,
   message,
   codeSuggestion,
@@ -1210,7 +1211,26 @@ export async function addGraphPatchReviewInline({
     throw error;
   }
 
-  const issue = session.issues.find((candidate) => candidate.id === String(itemId));
+  let issue = session.issues.find((candidate) => candidate.id === String(itemId));
+  const manual = !itemId && anchor;
+  if (manual) {
+    const escape = value => String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    const filePath = String(anchor.filePath || "");
+    const lineNumber = Number(anchor.lineNumber);
+    const lineLength = Number(anchor.lineLength ?? 1);
+    const file = String(session.rawPatchHtml || "").split('<section class="pretty-file"').find(section =>
+      section.startsWith(` data-file-path="${escape(filePath)}"`));
+    if (session.status !== "review" || !Number.isInteger(lineNumber) || lineNumber < 1 ||
+        !Number.isInteger(lineLength) || lineLength < 1 || lineLength > 10000 ||
+        !Array.from({ length: lineLength }, (_, index) => lineNumber + index)
+          .every(line => file?.includes(`data-new-line="${line}"`))) {
+      const error = new Error("Choose a new-side line in the exact review patch.");
+      error.statusCode = 400;
+      throw error;
+    }
+    issue = { id: `manual:${randomUUID()}`, filePath, lineNumber, lineLength,
+      state: "ready", suggestedComment: "", codeSuggestion: "" };
+  }
 
   if (!issue || !["ready", "applied"].includes(issue.state)) {
     const error = new Error("That review issue is no longer available to post.");
@@ -1275,6 +1295,7 @@ export async function addGraphPatchReviewInline({
   }));
   // Let the browser replace its cached raw-patch context with this draft inline.
   session.reviewContextVersion = (session.reviewContextVersion || 0) + 1;
+  if (manual) session.issues.push(issue);
   issue.suggestedComment = comment;
   issue.codeSuggestion = replacement;
   issue.state = "pending";

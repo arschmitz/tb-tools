@@ -41,7 +41,7 @@ for (const target of targets) {
       electronVersion,
       out: process.env.TB_DESKTOP_PACKAGE_OUT || path.join(root, "dist"),
       overwrite: true,
-      asar: { unpack: "**/*.{node,dll,dylib,so,so.*}" },
+      asar: { unpack: "**/*.{node,dll,dylib,so,so.*}", unpackDir: "lib/mozphab-submit" },
       prune: !crossTarget,
       icon: platform === "darwin" ? path.join(root, "assets", "branding", "app-icon.icns")
         : platform === "win32" ? path.join(root, "assets", "branding", "app-icon.ico") : undefined,

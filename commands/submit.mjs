@@ -3,6 +3,9 @@ import defaultTry from "./try.mjs";
 import defaultLint from "./lint.mjs";
 import ora from "ora";
 import readlineSync from "readline-sync";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { finishSubmittedPatchIdentity } from "../lib/submitted-patch-identity.mjs";
 import { comment as defaultComment } from "../lib/phab.mjs";
 import { getCommitMessage as defaultGetCommitMessage } from "../lib/git.mjs";
 import {
@@ -35,6 +38,11 @@ export function getMozPhabSubmitArgs({ message = "" } = {}) {
   }
 
   return args;
+}
+
+export function getMozPhabSubmitEnvironment() {
+  const directory = fileURLToPath(new URL("../lib/mozphab-submit/", import.meta.url)).replace(/\.asar([\\/])/, ".asar.unpacked$1");
+  return { TB_TOOLS_MOZPHAB_SUBMIT: "1", PYTHONPATH: [directory, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter) };
 }
 
 export function createSubmitCommand({
@@ -93,14 +101,21 @@ export function createSubmitCommand({
       }
     }
 
+    const beforeMessage = await getCommitMessage();
     const submitContext = await beforeMozPhabSubmit({ options });
     const submitOutput = await runCommand({
       cmd: "moz-phab",
       args: getSubmitArgs(options),
       capture: true,
+      env: getMozPhabSubmitEnvironment(),
     });
-    await afterMozPhabSubmit({ options, output: submitOutput, context: submitContext });
-    const commitMessage = await getCommitMessage().catch(() => "");
+    let commitMessage;
+    try {
+      commitMessage = await getCommitMessage();
+      await finishSubmittedPatchIdentity({ beforeMessage, message: commitMessage, runCommand });
+    } finally {
+      await afterMozPhabSubmit({ options, output: submitOutput, context: submitContext });
+    }
     Object.assign(result, getSubmitLinksFromText(`${submitOutput || ""}\n${commitMessage || ""}`));
 
     const tryAnswer = await prompts.keyInYNStrict("Do you want to post a try run? [y/n]:", { guide: false });

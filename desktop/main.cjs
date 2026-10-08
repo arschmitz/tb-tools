@@ -24,6 +24,7 @@ let quitting = false;
 let restarting = false;
 const browserTabs = new Map();
 let browserHeaderHeight = 200;
+let consoleDialogOpen = false;
 
 if (process.env.TB_DESKTOP_TEST === "1" && process.env.TB_DESKTOP_TEST_USER_DATA) {
   app.setPath("userData", process.env.TB_DESKTOP_TEST_USER_DATA);
@@ -127,12 +128,11 @@ function installPageCommands(contents) {
 function browserState() {
   const active = browserTabs.get(activeTabId);
   const history = active?.view.webContents.navigationHistory;
-  const index = history?.getActiveIndex() ?? -1;
   return {
     activeId: activeTabId,
     address: active?.view.webContents.getURL() || active?.url || "Console",
-    canGoBack: index > 0,
-    canGoForward: Boolean(history && index < history.length() - 1),
+    canGoBack: Boolean(history?.canGoBack()),
+    canGoForward: Boolean(history?.canGoForward()),
     canReload: Boolean(activeView && !activeView.webContents.isDestroyed()),
     tabs: [...browserTabs.values()].map(tab => ({ id: tab.id,
         title: tab.title || webAddress(tab.url)?.hostname || "Page", url: tab.url })),
@@ -150,12 +150,13 @@ function layoutBrowser() {
   const [width, height] = consoleWindow.getContentSize();
   consoleView?.setBounds({ x: 0, y: 0, width, height });
   if (activeView === consoleView) return;
+  activeView?.setVisible(!consoleDialogOpen);
   activeView?.setBounds({ x: 0, y: browserHeaderHeight, width,
     height: Math.max(0, height - browserHeaderHeight) });
 }
 
 function focusActivePage() {
-  const contents = activeView?.webContents;
+  const contents = (consoleDialogOpen ? consoleView : activeView)?.webContents;
   if (contents && !contents.isDestroyed()) contents.focus();
 }
 
@@ -215,14 +216,19 @@ function handleBrowserAction(event, { action, tabId } = {}) {
   if (!tab) return;
   const contents = tab.view.webContents;
   const history = contents.navigationHistory;
-  const index = history.getActiveIndex();
-  if (action === "back" && index > 0) history.goToIndex(index - 1);
-  else if (action === "forward" && index < history.length() - 1) history.goToIndex(index + 1);
+  if (action === "back" && history.canGoBack()) history.goBack();
+  else if (action === "forward" && history.canGoForward()) history.goForward();
 }
 
 ipcMain.on("commands-browser-action", handleBrowserAction);
 ipcMain.on("commands-browser-ready", event => {
   if (event.sender === consoleView?.webContents) sendBrowserState();
+});
+ipcMain.on("commands-browser-overlay", (event, open) => {
+  if (event.sender !== consoleView?.webContents || typeof open !== "boolean") return;
+  consoleDialogOpen = open;
+  layoutBrowser();
+  focusActivePage();
 });
 ipcMain.on("commands-browser-layout", (event, height) => {
   if (event.sender !== consoleView?.webContents || !Number.isFinite(height)) return;
@@ -249,6 +255,7 @@ function showConsole() {
       consoleView?.webContents.close();
       for (const tab of browserTabs.values()) tab.view.webContents.close();
       browserTabs.clear();
+      consoleDialogOpen = false;
       consoleView = undefined;
       activeView = undefined;
       activeTabId = "console";
@@ -384,11 +391,11 @@ function installMenu() {
     { label: "Pages", submenu: [
       { label: "Back", accelerator: "CmdOrCtrl+[", click: () => { const page = selectedPage();
         const history = page?.view.webContents.navigationHistory;
-        if (history?.getActiveIndex() > 0) history.goToIndex(history.getActiveIndex() - 1); } },
+        if (history?.canGoBack()) history.goBack(); } },
       { label: "Forward", accelerator: "CmdOrCtrl+]", click: () => { const page = selectedPage();
         const history = page?.view.webContents.navigationHistory;
-        if (history && history.getActiveIndex() < history.length() - 1) {
-          history.goToIndex(history.getActiveIndex() + 1);
+        if (history?.canGoForward()) {
+          history.goForward();
         } } },
       { label: "Reload Page", accelerator: "CmdOrCtrl+R", click: reloadActivePage },
       { label: "Close Page", click: () => closeTab() },

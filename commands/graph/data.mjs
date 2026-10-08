@@ -2,6 +2,7 @@ import { getMonitoredTryVerdict, mergeMonitoredTryRuns } from "./try-monitor-sto
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { migratePatchIdentityFields, migrateRepositoryPatchIdentities, resolvePatchIdentity } from "../../lib/patch-identity.mjs";
 import {
   getTbToolsIdFromCommitMessage,
   installTbToolsCommitMsgHook,
@@ -294,6 +295,7 @@ export function getContentHash(value = "") {
 }
 
 function normalizeGraphTryRun(run = {}) {
+  run = migratePatchIdentityFields({ ...run });
   const url = String(run.url || "").trim();
 
   if (!url) {
@@ -379,7 +381,14 @@ export async function readGraphTryStore({
 } = {}) {
   try {
     const storePath = await getGraphTryStorePath({ graph, runCommand });
-    return normalizeGraphTryStore(JSON.parse(await readFile(storePath, "utf8")));
+    const saved = JSON.parse(await readFile(storePath, "utf8"));
+    if (!graph.patchIdentityMigration) {
+      graph.patchIdentityMigration = migrateRepositoryPatchIdentities({ cwd: graph.path, runCommand,
+        ids: (saved.runs || Object.values(saved.runsByPatchId || {}).flat()).map(run => run.tbToolsId || run.tryId || run.localPatchId) })
+        .catch(error => { delete graph.patchIdentityMigration; throw error; });
+    }
+    await graph.patchIdentityMigration;
+    return normalizeGraphTryStore(saved);
   } catch (error) {
     if (error?.code === "ENOENT") {
       return normalizeGraphTryStore();
@@ -537,7 +546,8 @@ function filterGraphTryRuns(store, {
   subject = "",
   tbToolsId = "",
 } = {}) {
-  const runs = store?.runs || [];
+  tbToolsId = resolvePatchIdentity(tbToolsId);
+  const runs = (store?.runs || []).map(run => migratePatchIdentityFields({ ...run }));
 
   return sortGraphTryRuns(runs.flatMap((run) => {
     if (run.monitorId && hash && run.mergedInto === hash) return [run];
@@ -550,7 +560,7 @@ function filterGraphTryRuns(store, {
 
     if (tbToolsId) {
       if (run.tbToolsId) {
-        return run.tbToolsId === tbToolsId || subjectMatch
+        return run.tbToolsId === tbToolsId || (!tbToolsId.startsWith("http") && !run.tbToolsId.startsWith("http") && subjectMatch)
           ? [{ ...run, hash: run.monitorId ? run.hash : hash || run.hash }]
           : [];
       }

@@ -1,7 +1,7 @@
 import { normalizeMachCommand } from "../lib/mach-command.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -229,6 +229,7 @@ test("build and test tasks capture current edits without changing the source or 
   const second = await f.manager.prepareCurrent("test");
   assert.notEqual(first.graph.path, second.graph.path);
   for (const task of [first, second]) {
+    assert.equal(git(task.graph.path, "for-each-ref", "--format=%(refname)", `refs/heads/${task.graph.branchNamespace}`), "");
     assert.equal(await readFile(path.join(task.graph.path, "patch.js"), "utf8"), "unsaved working edit\n");
     assert.equal(await readFile(path.join(task.graph.path, "new-file.js"), "utf8"), "new source\n");
   }
@@ -378,4 +379,183 @@ test("a paused managed update resumes its selected patch and descendants after r
   assert.equal(git(f.comm, "rev-parse", "Bug123"), selectedHash);
   assert.equal(git(f.comm, "rev-parse", "Bug124"), originalChild);
   assert.equal(await readFile(path.join(f.comm, "source.js"), "utf8"), "selected side\n");
+});
+
+test("Submit uses the selected author branch and creates no task refs or worktrees", async t => {
+  const f = await fixture(t);
+  git(f.comm, "switch", "main");
+  const refsBefore = git(f.comm, "for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads");
+  const treePaths = () => git(f.comm, "worktree", "list", "--porcelain").split("\n").filter(line => line.startsWith("worktree "));
+  const treesBefore = treePaths();
+  let uploaded = false;
+  const runCommand = async command => {
+    if (command.cmd === "moz-phab") {
+      assert.equal(command.cwd, f.comm);
+      assert.equal(git(command.cwd, "branch", "--show-current"), "Bug123");
+      assert.equal(git(command.cwd, "rev-parse", "HEAD"), f.hash);
+      uploaded = true;
+      return "https://phabricator.services.mozilla.com/D100001";
+    }
+    return run(command);
+  };
+  const server = await startInteractiveGraphServer({ graphs: f.graphs, html: "", token: "test",
+    appConfig: { taskWorktrees: true }, runCommand, prepareTaskBuild: false,
+    taskWorktreeDirectory: name => path.join(f.root, name) });
+  t.after(() => new Promise(resolve => server.server.close(resolve)));
+  const post = (route, body) => fetch(new URL(route, server.url), { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "test", ...body }) });
+  const response = await post("/api/submit", { graphIndex: 0, hash: f.hash });
+  let state = await response.json();
+  assert.equal(response.status, 200, state.error);
+  const id = state.id;
+  for (let attempt = 0; state.status !== "complete" && attempt < 100; attempt++) {
+    assert.notEqual(state.status, "error", state.error);
+    if (state.prompt) {
+      const answer = await post(`/api/submit/${id}/answer`, { promptId: state.prompt.id, answer: false });
+      assert.equal(answer.status, 200);
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+    state = await (await fetch(new URL(`/api/submit/${id}?token=test`, server.url))).json();
+  }
+  assert.equal(state.status, "complete", state.error);
+  assert.equal(uploaded, true);
+  assert.equal(git(f.comm, "for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads"), refsBefore);
+  assert.deepEqual(treePaths(), treesBefore);
+});
+
+test("review cleanup removes both worktrees and only its own branches", async t => {
+  const f = await fixture(t);
+  const session = f.manager.configure({ id: "cleanup-review" }, "review");
+  await f.manager.prepare(session, { commRevision: f.hash, cloneBranches: true });
+  const other = f.manager.configure({ id: "other-review" }, "review");
+  await f.manager.prepare(other, { commRevision: f.hash, cloneBranches: true });
+  await writeFile(path.join(session.graph.path, "scratch.js"), "review scratch\n");
+  await writeFile(path.join(session.graph.path, "patch.js"), "review commit\n");
+  git(session.graph.path, "commit", "-am", "Review experiment");
+  session.currentHash = f.hash;
+  session.status = "review";
+  const store = createPatchSessionStore({ directory: path.join(f.root, "cleanup-sessions") });
+  store.save("review", session);
+  await f.manager.cleanup(session);
+  store.save("review", session);
+  assert.deepEqual(store.list(f.graphs, { includeFinished: true }), []);
+  await f.manager.cleanup(session);
+  assert.equal(git(f.comm, "for-each-ref", "--format=%(refname)", `refs/heads/${session.graph.branchNamespace}`), "");
+  assert.ok(git(f.comm, "for-each-ref", "--format=%(refname)", `refs/heads/${other.graph.branchNamespace}`));
+  assert.equal(git(f.comm, "rev-parse", "Bug123"), f.hash);
+  for (const source of [f.comm, f.gecko]) assert.ok(!git(source, "worktree", "list", "--porcelain").includes(path.dirname(session.graph.path)));
+  await assert.rejects(readFile(path.join(session.graph.path, "scratch.js")), { code: "ENOENT" });
+});
+
+test("other task cleanup retains commits in both repositories and its task branches", async t => {
+  const f = await fixture(t);
+  const session = f.manager.configure({ id: "cleanup-update" }, "verify");
+  await f.manager.prepare(session, { commRevision: f.hash, cloneBranches: true });
+  const hashes = [];
+  for (const cwd of [session.graph.path, path.dirname(session.graph.path)]) {
+    await writeFile(path.join(cwd, "source.js"), "task result\n");
+    git(cwd, "commit", "-am", "Task result");
+    hashes.push(git(cwd, "rev-parse", "HEAD"));
+  }
+  await f.manager.cleanup(session);
+  for (const [index, source] of [f.comm, f.gecko].entries()) {
+    assert.equal(git(source, "rev-parse", `tb-task/${session.graph.taskId}/retained-head`), hashes[index]);
+    assert.ok(!git(source, "worktree", "list", "--porcelain").includes(path.dirname(session.graph.path)));
+  }
+  assert.ok(git(f.comm, "for-each-ref", "--format=%(refname)", `refs/heads/${session.graph.branchNamespace}`));
+  const invalid = { graph: { ...session.graph, path: f.comm }, taskKind: "review" };
+  await assert.rejects(f.manager.cleanup(invalid), /Refusing to remove/);
+});
+
+test("the server keeps a waiting review worktree and removes it when the review is cancelled", async t => {
+  const f = await fixture(t);
+  let review;
+  const server = await startInteractiveGraphServer({ graphs: f.graphs, html: "", token: "test",
+    appConfig: { taskWorktrees: true, ai: { enabled: true } }, runCommand: run, prepareTaskBuild: false,
+    patchSessionDirectory: path.join(f.root, "sessions"), taskWorktreeDirectory: name => path.join(f.root, name),
+    preparePatchReviewSession: async ({ session }) => {
+      review = session;
+      await f.manager.prepare(session, { commRevision: f.hash, cloneBranches: true });
+      session.currentHash = f.hash;
+      session.status = "review";
+    } });
+  t.after(() => new Promise(resolve => server.server.close(resolve)));
+  const post = (url, body) => fetch(new URL(url, server.url), { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "test", ...body }) });
+  const started = await (await post("/api/review", { revision: "D100001", resume: false })).json();
+  for (let attempt = 0; review?.status !== "review" && attempt < 200; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(review.status, "review");
+  await new Promise(resolve => setTimeout(resolve, 2100));
+  assert.ok(await readFile(path.join(review.graph.path, "patch.js")));
+  const cancelled = await (await post(`/api/review/${started.id}/cancel`, {})).json();
+  assert.equal(cancelled.status, "cancelled");
+  for (let attempt = 0; !review.worktreeRemoved && attempt < 200; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(review.worktreeRemoved, true);
+  await assert.rejects(readFile(path.join(review.graph.path, "patch.js")), { code: "ENOENT" });
+  assert.equal(git(f.comm, "for-each-ref", "--format=%(refname)", `refs/heads/${review.graph.branchNamespace}`), "");
+});
+
+test("Try repair cleanup retains its commits and validates its saved directory", async t => {
+  const f = await fixture(t);
+  const storeDirectory = path.join(f.root, "try-store");
+  await mkdir(storeDirectory);
+  const root = path.join(await realpath(storeDirectory), "workspaces", "workflow-0", "gecko");
+  await mkdir(path.dirname(root), { recursive: true });
+  git(f.gecko, "worktree", "add", "--detach", root, "HEAD");
+  const workspace = path.join(root, "comm");
+  git(f.comm, "worktree", "add", "--detach", workspace, f.hash);
+  await writeFile(path.join(workspace, "patch.js"), "Try repair\n");
+  git(workspace, "commit", "-am", "Try repair");
+  const hash = git(workspace, "rev-parse", "HEAD");
+  const state = { id: "workflow", workspace };
+  await f.manager.cleanupTryWorkspace(state, storeDirectory);
+  assert.equal(git(f.comm, "rev-parse", "tb-try-workspace/workflow-0/retained-head"), hash);
+  await assert.rejects(readFile(path.join(workspace, "patch.js")), { code: "ENOENT" });
+  await f.manager.cleanupTryWorkspace(state, storeDirectory);
+  await assert.rejects(f.manager.cleanupTryWorkspace({ id: "wrong", workspace: f.comm }, storeDirectory), /Refusing to remove/);
+});
+
+test("Verify submits an amended detached commit on a new task branch", async t => {
+  const f = await fixture(t);
+  let verify, uploaded = false;
+  const execute = async command => {
+    if (command.cmd === "moz-phab") {
+      assert.equal(command.cwd, verify.graph.path);
+      assert.ok(git(command.cwd, "branch", "--show-current").startsWith(verify.graph.branchNamespace));
+      assert.equal(git(command.cwd, "rev-parse", "HEAD"), verify.currentHash);
+      uploaded = true;
+      return "https://phabricator.services.mozilla.com/D100001";
+    }
+    return run(command);
+  };
+  const server = await startInteractiveGraphServer({ graphs: f.graphs, html: "", token: "test",
+    appConfig: { taskWorktrees: true, ai: { enabled: true } }, runCommand: execute, prepareTaskBuild: false,
+    taskWorktreeDirectory: name => path.join(f.root, name),
+    preparePatchUpdateSession: async ({ session }) => {
+      verify = session;
+      await writeFile(path.join(session.graph.path, "patch.js"), "Verified change\n");
+      git(session.graph.path, "commit", "--amend", "-am", "Bug 123456 - Verified change");
+      session.currentHash = git(session.graph.path, "rev-parse", "HEAD");
+      session.items = []; session.status = "review";
+    } });
+  t.after(() => new Promise(resolve => server.server.close(resolve)));
+  const post = (route, body) => fetch(new URL(route, server.url), { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "test", ...body }) });
+  await post("/api/patch-update", { revision: "D100001", mode: "verify", graphIndex: 0 });
+  for (let attempt = 0; verify?.status !== "review" && attempt < 200; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(verify.status, "review");
+  assert.equal(git(verify.graph.path, "branch", "--show-current"), "");
+  const response = await post("/api/submit", { graphIndex: 0, hash: verify.currentHash, patchUpdateSessionId: verify.id });
+  let state = await response.json();
+  assert.equal(response.status, 200, state.error);
+  for (let attempt = 0; state.status !== "complete" && attempt < 200; attempt++) {
+    assert.notEqual(state.status, "error", state.error);
+    if (state.prompt) await post(`/api/submit/${state.id}/answer`, { promptId: state.prompt.id, answer: false });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    state = await (await fetch(new URL(`/api/submit/${state.id}?token=test`, server.url))).json();
+  }
+  assert.equal(state.status, "complete", state.error);
+  assert.equal(uploaded, true);
+  assert.equal(git(f.comm, "rev-parse", "Bug123"), f.hash);
+  assert.equal(git(f.comm, "rev-parse", "HEAD"), f.hash);
 });

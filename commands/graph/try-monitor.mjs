@@ -1,4 +1,6 @@
 import path from "node:path";
+import { migrateRepositoryPatchIdentities } from "../../lib/patch-identity.mjs";
+import { run } from "../../lib/utils.mjs";
 import { findRustDependencyFailure, checkRustOriginUpdate } from "./try-rust.mjs";
 import { resumeTryFixupSquash } from "./try-fixup.mjs";
 import { randomUUID } from "node:crypto";
@@ -22,13 +24,14 @@ function recordInspection(attempt, inspection, now) {
 }
 
 export function createTryMonitor({ graphs, taskWorktrees = false, store = createTryMonitorStore(), treeherder,
-  repairer, codexCommand, rustOriginCheck = checkRustOriginUpdate, aiEnabled = true, now = Date.now, onError = console.error, tickIntervalMs = 60000 } = {}) {
+  repairer, codexCommand, rustOriginCheck = checkRustOriginUpdate, aiEnabled = true, now = Date.now, onError = console.error, tickIntervalMs = 60000, runCommand = run } = {}) {
   const controller = new AbortController();
   treeherder ||= createTreeherderClient({ signal: controller.signal });
   repairer ||= createTryRepairer({ store, codexCommand, signal: controller.signal });
   let timer;
   let releaseOwner;
   const active = new Map();
+  const migratedRepositories = new Set();
   let stopped = false;
   let stopPromise;
   const aiAllowed = () => aiEnabled && !store.isAutomationPaused?.();
@@ -193,6 +196,15 @@ export function createTryMonitor({ graphs, taskWorktrees = false, store = create
     if (stopped) return;
     const scheduled = [];
     try {
+      let migrated = false;
+      for (const graph of graphs || []) {
+        if (!graph.path || migratedRepositories.has(graph.path)) continue;
+        await migrateRepositoryPatchIdentities({ cwd: graph.path, runCommand,
+          ids: store.list().filter(state => state.path === graph.path || state.repositoryPath === graph.path).map(state => state.tbToolsId) });
+        migratedRepositories.add(graph.path);
+        migrated = true;
+      }
+      if (migrated) store.migrateIdentities?.(new Set(graphs.map(graph => graph.path)));
       const paths = graphs && new Set(graphs.filter(graph => graph.path).map(graph => path.resolve(graph.path)));
       const workflows = store.list().filter(state => !paths || paths.has(path.resolve(state.path)) || taskWorktrees && state.repositoryPath && paths.has(path.resolve(state.repositoryPath)));
       for (const saved of workflows) {

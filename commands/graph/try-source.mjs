@@ -1,16 +1,19 @@
 import { run } from "../../lib/utils.mjs";
 import { getTbToolsIdFromCommitMessage } from "../../lib/commit-message.mjs";
+import { getPatchIdentityAliases, migrateRepositoryPatchIdentities, resolvePatchIdentity } from "../../lib/patch-identity.mjs";
 
 // Fixup refs retain obsolete source commits. Only author branches identify the
 // current patch; commit dates cannot establish which rewrite is authoritative.
 export async function findCurrentTrySource(state, runCommand = run) {
   if (!state.tbToolsId) return state.sourceHash;
+  await migrateRepositoryPatchIdentities({ cwd: state.repositoryPath || state.path, runCommand, ids: [state.tbToolsId] });
+  state.tbToolsId = resolvePatchIdentity(state.tbToolsId);
   const git = async (...args) => String(await runCommand({ cmd: "git", args, cwd: state.path, capture: true, silent: true })).trim();
   const refs = (await git("for-each-ref", "--format=%(refname)", `refs/heads/${state.branchNamespace || ""}`))
     .split("\n").filter(ref => ref && !ref.startsWith("refs/heads/tb-try-fixup/"));
   if (!refs.length) return "";
   const matches = (await git("log", "--format=%H%x00%B%x00", "--fixed-strings", "--regexp-ignore-case",
-    `--grep=TB-Tools-Id: ${state.tbToolsId}`, ...refs, "--")).split("\0");
+    ...getPatchIdentityAliases(state.tbToolsId).map(id => `--grep=${id.startsWith("http") ? "Differential Revision" : "TB-Tools-Id"}: ${id}`), ...refs, "--")).split("\0");
   const candidates = [];
   for (let index = 0; index + 1 < matches.length; index += 2) {
     if (getTbToolsIdFromCommitMessage(matches[index + 1]) === state.tbToolsId) candidates.push(matches[index].trim());

@@ -390,3 +390,72 @@ test("test output keeps selected colored text when polls repeat and append outpu
   assert.equal(result.connected, true);
   assert.equal(result.text, "Failure text with more detail\nNext line");
 });
+
+test("running reviews restore from the server after browser task storage is lost", async t => {
+  const { page, sessions, initialize, posts } = await fixture(t);
+  sessions.set("r1", { ok: true, id: "r1", revision: "D2", aiEnabled: true,
+    status: "reviewing", issues: [], activity: [], output: "" });
+  await page.route("**/api/background-jobs?*", route => route.fulfill({ json: {
+    ok: true, jobs: [
+      { id: "Review:r1", kind: "Review", state: "running", title: "D2" },
+      { id: "Review:finished", kind: "Review", state: "finished", title: "D3" },
+      { id: "Review:handled", kind: "Review", state: "waiting", title: "D4" },
+      { id: "Rebase:old", kind: "Rebase", state: "waiting", title: "Old rebase" },
+    ],
+  } }));
+  await page.evaluate(() => sessionStorage.clear());
+  await page.reload();
+  await initialize();
+  const card = page.locator('[data-task-key="review:r1"]');
+  await card.waitFor({ state: "visible" });
+  assert.equal(await page.locator('[data-task-key="review:finished"]').count(), 0);
+  assert.equal(await page.locator('[data-task-key="review:handled"]').count(), 0);
+  assert.equal(await page.locator('[data-task-key="rebase:old"]').count(), 0);
+  await card.locator(".ai-task-open").click();
+  await page.locator("#patch-review-dialog[open]").waitFor();
+  assert.equal(posts.length, 0, "restoring a review must not start another review");
+});
+
+for (const action of ["close", "escape"]) test(`conflict dialog ${action} dismisses its tray task`, async t => {
+  const { page, initialize } = await fixture(t);
+  const conflict = { id: "close-rebase", type: "conflict", graphIndex: 0, files: [] };
+  await page.route("**/api/rebase/close-rebase?*", route => route.fulfill({ json: {
+    ok: true, id: conflict.id, status: "review", rebaseConflict: conflict,
+  } }));
+  await page.evaluate(async conflict => (await import("/assets/graph-client/rebase-dialog.js")).openRebaseFailureDialog(conflict), conflict);
+  const card = page.locator('[data-task-key="rebase:close-rebase"]');
+  await card.waitFor({ state: "visible" });
+  if (action === "escape") await page.keyboard.press("Escape");
+  else await page.evaluate(async () => (await import("/assets/graph-client/rebase-dialog.js")).closeRebaseDialog());
+  await page.locator("#rebase-dialog[open]").waitFor({ state: "hidden" });
+  await card.waitFor({ state: "detached" });
+  await page.route("**/api/background-jobs?*", route => route.fulfill({ json: {
+    ok: true, jobs: [{ id: "Rebase:close-rebase", kind: "Rebase", state: "waiting", title: "comm" }],
+  } }));
+  const discovery = page.waitForResponse(response => response.url().includes("/api/background-jobs"));
+  await page.reload(); await initialize();
+  await discovery;
+  assert.equal(await card.count(), 0);
+});
+
+test("Verify shows Submit startup errors in its dialog and opens Submit after retry", async t => {
+  const { page, sessions, openUpdate } = await fixture(t);
+  await openUpdate("verify");
+  sessions.get("u1").status = "review";
+  await page.waitForFunction(() => !globalThis.document.querySelector(".patch-update-submit").disabled);
+  let fail = true;
+  await page.route("**/api/submit**", route => route.fulfill({ status: fail ? 409 : 200, json: fail
+    ? { ok: false, error: "Could not prepare the submission branch." }
+    : { ok: true, id: "verify-submit", graphIndex: 0, patchUpdateSessionId: "u1", status: "running", links: [] } }));
+  await page.locator(".patch-update-submit").click();
+  await page.locator("#system-dialog .system-dialog-confirm").click();
+  await page.locator("#patch-update-dialog[open]").getByText("Could not prepare the submission branch.", { exact: true }).waitFor();
+  await page.waitForTimeout(1800);
+  assert.equal(await page.locator("#patch-update-dialog[open]").getByText("Could not prepare the submission branch.", { exact: true }).isVisible(), true);
+  assert.equal(await page.locator("#submit-dialog").getAttribute("open"), null);
+  fail = false;
+  await page.locator(".patch-update-submit").click();
+  await page.locator("#system-dialog .system-dialog-confirm").click();
+  await page.locator("#submit-dialog[open]").waitFor();
+  assert.equal(await page.locator("#patch-update-dialog").getAttribute("open"), null);
+});

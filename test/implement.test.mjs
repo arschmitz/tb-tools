@@ -160,6 +160,10 @@ test("recovers a commit written before its receipt was saved", async t => {
   const state = await f.wait(); f.manager.stop();
   state.phase = "committing"; state.commitHash = ""; f.store.save(state);
   const hash = await f.git("rev-parse", "HEAD");
+  const message = await f.git("show", "-s", "--format=%B");
+  assert.doesNotMatch(message, /Tb-Implement-Step:/i);
+  assert.equal((message.match(/^TB-Tools-Id:/gim) || []).length, 1);
+  assert.ok(state.commitReceipt.tree);
   const resumed = createImplementationManager(f.options); t.after(() => resumed.stop()); await resumed.tick();
   assert.equal(f.store.read(state.id).error, undefined); assert.equal(await f.git("rev-parse", "HEAD"), hash);
   assert.equal(f.pushes(), 1);
@@ -524,4 +528,36 @@ test("a blocked Try releases checkout ownership while active edits and cancellat
   assert.equal(implementationOwnsCheckout({ phase: "implementing", error: "Needs a decision" }), true);
   assert.equal(implementationOwnsCheckout({ phase: "cancelling", cancelRequested: true }), true);
   assert.equal(implementationOwnsCheckout({ phase: "monitoring", tryStatus: "waiting" }), true);
+});
+
+for (const field of ["tree", "parents", "message"]) test(`commit recovery rejects a different ${field} despite a matching TB-Tools-Id`, async t => {
+  const f = await fixture(t);
+  await f.manager.create({ bugId: 123, base: "current", expectedHead: f.head });
+  const state = await f.wait(); f.manager.stop();
+  state.phase = "committing"; state.commitHash = "";
+  if (field === "message") state.commitMessage += "\nUnexpected amendment";
+  else state.commitReceipt[field] = field === "tree" ? await f.git("rev-parse", "main^{tree}") : "";
+  f.store.save(state);
+  const hash = await f.git("rev-parse", "HEAD");
+  const resumed = createImplementationManager(f.options); t.after(() => resumed.stop());
+  await resumed.tick();
+  assert.match(f.store.read(state.id).error, /Unexpected commit while recovering/);
+  assert.equal(await f.git("rev-parse", "HEAD"), hash);
+  assert.equal(f.pushes(), 1);
+});
+
+test("old Implement commit receipts still recover after restart", async t => {
+  const f = await fixture(t);
+  await f.manager.create({ bugId: 123, base: "current", expectedHead: f.head });
+  const state = await f.wait(); f.manager.stop();
+  delete state.commitReceipt;
+  state.commitStep = "legacy-step";
+  state.commitMessage += "\n\nTb-Implement-Step: legacy-step";
+  await f.git("commit", "--amend", "-m", state.commitMessage);
+  state.phase = "committing"; state.commitHash = ""; f.store.save(state);
+  const hash = await f.git("rev-parse", "HEAD");
+  const resumed = createImplementationManager(f.options); t.after(() => resumed.stop());
+  await resumed.tick();
+  assert.equal(f.store.read(state.id).error, undefined);
+  assert.equal(await f.git("rev-parse", "HEAD"), hash);
 });

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { migratePatchIdentityFields, resolvePatchIdentity } from "../../lib/patch-identity.mjs";
 
 export const TRY_STATUS_CHECK_INTERVAL_MS = 60 * 1000;
 export const TRY_CHECK_INTERVAL_MS = 30 * 60 * 1000;
@@ -13,7 +14,7 @@ export function isLatestTryWorkflow(state, workflows) {
   if (own && (own.attempts.at(-1)?.id !== attempt?.id || own.attempts.at(-1)?.url !== attempt?.url)) return false;
   const time = Date.parse(attempt?.createdAt || "") || 0;
   return !workflows.some(other => other.id !== state.id && other.path === state.path &&
-    ((state.tbToolsId && state.tbToolsId === other.tbToolsId) || (state.sourceHash && state.sourceHash === other.sourceHash) || other.relatedWorkflowIds?.includes(state.id)) &&
+    ((state.tbToolsId && resolvePatchIdentity(state.tbToolsId) === resolvePatchIdentity(other.tbToolsId)) || (state.sourceHash && state.sourceHash === other.sourceHash) || other.relatedWorkflowIds?.includes(state.id)) &&
     (Date.parse(other.attempts.at(-1)?.createdAt || "") || 0) > time);
 }
 
@@ -37,7 +38,7 @@ export function createTryMonitorStore(directory = TRY_MONITOR_DIRECTORY) {
     directory,
     isAutomationPaused: () => existsSync(path.join(directory, ".automation-paused")),
     read(id) {
-      const state = JSON.parse(readFileSync(file(id), "utf8"));
+      const state = migratePatchIdentityFields(JSON.parse(readFileSync(file(id), "utf8")));
       return state.evidenceFile && !state.evidence ? attachEvidence(state) : state;
     },
     list() {
@@ -45,7 +46,21 @@ export function createTryMonitorStore(directory = TRY_MONITOR_DIRECTORY) {
       return readdirSync(directory).filter(name => /^[a-zA-Z0-9-]+\.json$/.test(name))
         .map(name => this.read(name.slice(0, -5)));
     },
+    migrateIdentities(paths) {
+      for (const saved of this.list()) {
+        if (paths && !paths.has(saved.repositoryPath || saved.path)) continue;
+        const release = this.lock(saved.id);
+        if (!release) continue;
+        try {
+          const state = JSON.parse(readFileSync(file(saved.id), "utf8"));
+          const before = JSON.stringify(state);
+          migratePatchIdentityFields(state);
+          if (JSON.stringify(state) !== before) this.save(state);
+        } finally { release(); }
+      }
+    },
     save(state) {
+      migratePatchIdentityFields(state);
       mkdirSync(directory, { recursive: true });
       const target = file(state.id);
       if (Object.prototype.propertyIsEnumerable.call(state, "evidence") && state.evidence) {
