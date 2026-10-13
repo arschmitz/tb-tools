@@ -17,6 +17,7 @@ const present = value => typeof value === "string" && value.trim().length > 0;
 const sameIDs = (expected, actual) => Array.isArray(actual) && actual.length === expected.length && new Set(actual).size === actual.length && expected.every(id => actual.includes(id));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const anchored = value => value && present(value.claim || value.explanation) && Array.isArray(value.anchors) && value.anchors.length > 0;
+const contractFile = (producerHash, reviewHash, id) => `${uuid(encode(["contract-export-v2", producerHash, reviewHash, id]))}.md`;
 const uuid = value => { const h = hash(value); return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`; };
 
 async function immutable(file, value) {
@@ -113,7 +114,7 @@ async function resolveContractReferences(directory, response) {
       assert(source, "Original contract evidence is missing.");
       return { repository: source.repository, revision: source.revision, path: source.path, start: source.start, end: source.end, quote: source.quote };
     });
-    resolved.acceptedFrom = { ...reference, noteFile: `${uuid(encode([original, reference.producerHash, reference.reviewHash]))}.md` };
+    resolved.acceptedFrom = { ...reference, noteFile: contractFile(reference.producerHash, reference.reviewHash, contract.id) };
     contracts.push(resolved);
   }
   return { ...response, contracts };
@@ -249,12 +250,13 @@ export async function exportCompactIngestion(directory) {
       const usedContracts = (compact.contracts || []).filter(contract => file.units.some(unit => unit.contractRefs?.includes(contract.id)));
       const contractFiles = new Map();
       for (const contract of usedContracts) {
-        const name = contract.acceptedFrom?.noteFile || `${uuid(encode([contract, group.producerHash, group.reviewHash]))}.md`;
+        const origin = contract.acceptedFrom || { producerHash: group.producerHash, reviewHash: group.reviewHash };
+        const name = contractFile(origin.producerHash, origin.reviewHash, contract.id);
         contractFiles.set(contract.id, name);
         if (contract.acceptedFrom) continue;
-        contracts.set(name, { file: name, markdown: metadataNote({ repository: target.repository, at: compact.finishedAt, paths: [], source: { status: "provisional", producerHash: group.producerHash, reviewHash: group.reviewHash, contractId: contract.id } }, `${contract.id}: shared behavior contract`, `${contract.explanation}\n\nKind: ${contract.kind}. Rule: ${contract.rule || "none"}.\n\nEvidence: ${evidenceLinks(contract)}\n\nThis contract applies only to independently checked member bindings. It does not establish arbitrary same-name or similar-body equivalence.`) });
+        contracts.set(name, { file: name, markdown: metadataNote({ repository: target.repository, at: compact.finishedAt, paths: [], source: { reference: linkFor(anchors.get(anchorKey(contract.anchors[0])), manifest), status: "provisional", producerHash: group.producerHash, reviewHash: group.reviewHash, contractId: contract.id } }, `${contract.id}: shared behavior contract`, `${contract.explanation}\n\nKind: ${contract.kind}. Rule: ${contract.rule || "none"}.\n\nEvidence: ${evidenceLinks(contract)}\n\nThis contract applies only to independently checked member bindings. It does not establish arbitrary same-name or similar-body equivalence.`) });
       }
-      const meta = { repository: target.repository, at: compact.finishedAt, paths: [target.path], source: { reference: linkFor({ ...target, revision: manifest.repositories.find(item => item.id === target.repository).revision, start: 1, end: 1 }, manifest), status: "provisional", coverage: review.decision, producerHash: group.producerHash, reviewHash: group.reviewHash, pairedRevisions: Object.fromEntries(manifest.repositories.map(item => [item.id, item.revision])), priorEvidence: target.priorEvidence || null, reusedContracts: usedContracts.filter(contract => contract.acceptedFrom).map(contract => contract.acceptedFrom), reusedRecordIds: file.reusedRecordIds || [], corrections: file.corrections || [] } };
+      const meta = { repository: target.repository, at: compact.finishedAt, paths: [target.path], source: { reference: linkFor({ ...target, revision: manifest.repositories.find(item => item.id === target.repository).revision, start: 1, end: 1 }, manifest), status: "provisional", coverage: review.decision, producerHash: group.producerHash, reviewHash: group.reviewHash, pairedRevisions: Object.fromEntries(manifest.repositories.map(item => [item.id, item.revision])), priorEvidence: target.priorEvidence || null, reusedContracts: usedContracts.filter(contract => contract.acceptedFrom).map(contract => ({ ...contract.acceptedFrom, noteFile: contractFiles.get(contract.id) })), reusedRecordIds: file.reusedRecordIds || [], corrections: file.corrections || [] } };
       let body = `Coverage: ${review.decision}. Product tests were not run.\n\nSource context: ${JSON.stringify({ language: file.language || target.language || "unknown", runtime: file.runtime || target.runtime || "unknown", role: file.fileRole || target.primaryRole || target.role || "unknown", component: file.component || target.component || "unknown" })}\n\n`;
       for (const unit of file.units) {
         const expected = target.expectedUnits.find(item => item.id === unit.id);
@@ -269,14 +271,14 @@ export async function exportCompactIngestion(directory) {
         body += `\nEvidence: ${evidenceLinks(unit)}\n\n`;
       }
       body += `## Relationships and tests\n\n${JSON.stringify({ needChecks: file.needChecks, relationships: file.relationships || [], tests: file.tests || [] }, null, 2)}\n\nEvidence: ${evidenceLinks([file.needChecks, file.relationships, file.tests])}\n\n## Limits\n\n${review.gaps.length ? review.gaps.map(gap => `- ${gap}`).join("\n") : "No required gap was reported within the frozen target scope. Full transitive repository coverage is not implied."}\n`;
-      const name = `${uuid(encode([target.id, group.producerHash, group.reviewHash]))}.md`;
+      const name = `${uuid(encode(["behavior-export-v2", target.id, group.producerHash, group.reviewHash]))}.md`;
       const markdown = metadataNote(meta, `${target.path}: compact behavior record`, body);
       await immutable(path.join(destination, name), markdown);
       records.push({ targetId: target.id, decision: review.decision, file: name, hash: hash(markdown), producerHash: group.producerHash, reviewHash: group.reviewHash });
     }
   }
   for (const item of [...evidence.values(), ...contracts.values()]) await immutable(path.join(destination, item.file), item.markdown);
-  const result = { version: 1, state: "drafts-not-published", records, evidence: [...evidence.keys()], contracts: [...contracts.keys()], blockedGroups: [...blockedGroups], preparationFailures: status.preparationFailures, pendingGroups: status.groups.filter(group => group.state !== "reviewed").map(group => group.groupId) };
+  const result = { version: 1, exportVersion: 2, state: "drafts-not-published", records, evidence: [...evidence.keys()], contracts: [...contracts.keys()], blockedGroups: [...blockedGroups], preparationFailures: status.preparationFailures, pendingGroups: status.groups.filter(group => group.state !== "reviewed").map(group => group.groupId) };
   await immutable(path.join(destination, `${hash(encode(result))}.manifest.json`), result);
   return result;
 }

@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { parseKnowledgeNote } from "../commands/knowledge/repository.mjs";
 import { initializeCompactIngestion, compactIngestionStatus, submitCompactResponse, exportCompactIngestion } from "../commands/knowledge/ingestion-compact.mjs";
 
 const execute = promisify(execFile);
@@ -268,4 +269,22 @@ test("out-of-order group completion retains identical shared evidence content", 
 
   assert.equal(second.records.length, 2, "A newly completed earlier group should export without rewriting shared evidence.");
   assert.equal(after, before, "Shared evidence content should remain identical regardless of group completion order.");
+});
+
+
+test("every exported note passes the actual shared knowledge consumer", async t => {
+  const f = await contractFixture(t);
+  const pending = await submitCompactResponse(f.directory, f.current);
+  const review = f.review(pending.pendingRequests.find(item => item.groupId === "other"));
+  review.files[0].targetId = "other";
+  review.files[0].checkedReuseUnitIds = ["first"];
+  await submitCompactResponse(f.directory, review);
+  const exported = await exportCompactIngestion(f.directory);
+  const files = [...exported.records.map(item => item.file), ...exported.contracts, ...exported.evidence];
+
+  for (const file of files) {
+    const text = await readFile(path.join(f.directory, "compact-exports", file), "utf8");
+    assert.doesNotThrow(() => parseKnowledgeNote(text), `The exported note ${file} should satisfy the shared consumer schema.`);
+  }
+  assert.equal(exported.exportVersion, 2, "Corrected drafts should identify their export format separately from immutable producer objects.");
 });
