@@ -176,11 +176,11 @@ test("Windows installer batch preserves spaced paths and the runner exit code", 
   const plan = terminalPlan({ directory, node: process.execPath, runner, stateFile, useMozillaBuild: false });
   let result;
   await launchTerminal(plan, { openPath: async file => {
-    result = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${file}"`],
+    result = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `""${file}""`],
       { windowsVerbatimArguments: true, input: "\r\n", encoding: "utf8", timeout: 10000 });
     return "";
   } });
   assert.equal(result.error, undefined, "The batch should start without a process error.");
-  assert.equal(result.status, 7, "The batch should preserve the runner failure after the pause.");
+  assert.equal(result.status, 7, `The batch should preserve the runner failure after the pause.\n${result.stdout}\n${result.stderr}`);
   assert.equal(fs.readFileSync(stateFile, "utf8"), "started", "The runner should receive the full state path with spaces.");
 });
