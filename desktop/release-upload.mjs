@@ -65,7 +65,7 @@ export async function updateDraft({ action, tag, version, repository, root = pat
       `- Windows x64: run the EXE installer.\n` +
       `- Linux x64: make the AppImage executable, then open it.\n\n` +
       `Each download includes its own SHA-256 checksum file.\n\n` +
-      `These builds are unsigned and are not notarized. macOS or Windows may block them or show a security prompt.\n` +
+      `The Mac app has an ad-hoc signature for bundle integrity, but no Apple Developer ID signature or notarization. Windows builds are unsigned. macOS or Windows may block them or show a security prompt.\n` +
       `The app bundles Node.js. Developing Thunderbird still requires Git, Python 3, and the platform prerequisites shown by setup.\n\n` +
       `Validation covers packaging, bundled native vector search, and first-run UI startup. It does not run a full Thunderbird checkout download, bootstrap, or build.\n`);
     await gh(["release", "edit", tag, "--title", `${branding.APP_NAME} ${tag}`, "--notes-file", notes]);

@@ -82,6 +82,12 @@ for (const target of targets) {
       electronVersion,
       out: process.env.TB_DESKTOP_PACKAGE_OUT || path.join(root, "dist"),
       overwrite: true,
+      // Rebuild the signature after changing Electron's bundle and resources.
+      osxSign: platform === "darwin"
+        ? { identity: "-", identityValidation: false, continueOnError: false,
+          // Ad-hoc binaries have no Team ID for loading their frameworks and native addons.
+          optionsForFile: () => ({ entitlements: path.join(root, "desktop", "mac-entitlements.plist") }) }
+        : undefined,
       // The standalone backend needs ordinary files, including its dependencies.
       asar: { unpack: "**/*" },
       extraResource: [nodeRuntime],

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, symlink } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { buildRelease, releasePlan, releaseTargets, releaseAsset, checksum } from "../desktop/release.mjs";
+import { buildRelease, releasePlan, releaseTargets, releaseAsset, checksum, verifyMacInstaller } from "../desktop/release.mjs";
 import { updateDraft, validateReleaseTag } from "../desktop/release-upload.mjs";
 
 async function temporary(t) {
@@ -48,18 +48,43 @@ test("download staging follows successful packaging and startup and includes a c
   const calls = [];
   const download = await buildRelease({ root, run: async (_executable, args, options) => {
     calls.push(args);
-    assert.equal(options.env.CSC_IDENTITY_AUTO_DISCOVERY, "false", "Unsigned builds should not discover a local signing identity.");
+    if (options) assert.equal(options.env.CSC_IDENTITY_AUTO_DISCOVERY, "false", "Release builds should not discover a local signing identity.");
     if (args.includes("--prepackaged")) {
       await mkdir(plan.output, { recursive: true });
       await writeFile(path.join(plan.output, plan.asset), "installer bytes");
     }
   } });
-  assert.equal(calls.length, 3, "A release should package, create an installer, and test startup.");
-  assert.ok(calls[2][0].endsWith("release-smoke.mjs"), "The last step before staging should exercise packaged startup.");
+  assert.equal(calls.length, process.platform === "darwin" ? 7 : 3, "A release should complete all packaging and validation steps.");
+  assert.ok(calls.at(-1)[0].endsWith("release-smoke.mjs"), "The last step before staging should exercise packaged startup.");
   assert.equal(await readFile(`${download}.sha256`, "utf8"), `${await checksum(download)}  ${plan.asset}\n`,
     "The staged checksum should match the download bytes.");
   await assert.rejects(buildRelease({ root, run: async () => { throw new Error("package failed"); } }), /package failed/,
     "A packaging failure should stop the release build.");
+});
+
+test("a damaged Mac installer fails verification and releases its temporary mount", async () => {
+  const calls = [];
+  let mount;
+  await assert.rejects(verifyMacInstaller("/fixture/download.dmg", { run: async (command, args) => {
+    calls.push([command, args]);
+    if (args[0] === "attach") mount = args.at(-1);
+    if (command === "codesign") throw new Error("invalid bundle signature");
+  } }), /invalid bundle signature/, "An invalid signature should reject the installer check.");
+  assert.deepEqual(calls.at(-1), ["hdiutil", ["detach", mount]], "A failed signature check should detach the disk image.");
+  await assert.rejects(readFile(mount), { code: "ENOENT" }, "A detached verification mount should be removed.");
+});
+
+test("an invalid Mac bundle signature stops the release before installer creation", { skip: process.platform !== "darwin" }, async t => {
+  const root = await temporary(t);
+  await writeFile(path.join(root, "package.json"), JSON.stringify({ version }));
+  const calls = [];
+  await assert.rejects(buildRelease({ root, run: async (command, args) => {
+    calls.push([command, args]);
+    if (command === "codesign") throw new Error("invalid bundle signature");
+  } }), /invalid bundle signature/, "An invalid package signature should stop the release.");
+  assert.equal(calls.length, 2, "A failed signature check should prevent installer creation and startup.");
+  await assert.rejects(readFile(path.join(root, "dist", "downloads")), { code: "ENOENT" },
+    "An invalid package should not stage any downloads.");
 });
 
 test("release preparation creates only a draft and refuses published releases", async () => {

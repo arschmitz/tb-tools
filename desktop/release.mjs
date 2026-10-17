@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -60,6 +61,20 @@ export async function checksum(file) {
   return hash.digest("hex");
 }
 
+export async function verifyMacInstaller(installer, { run = runProcess } = {}) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "tb-dmg-verify-"));
+  let mounted = false;
+  try {
+    await run("hdiutil", ["attach", installer, "-readonly", "-nobrowse", "-mountpoint", directory]);
+    mounted = true;
+    await run("codesign", ["--verify", "--deep", "--strict", "--verbose=2",
+      path.join(directory, `${branding.APP_NAME}.app`)]);
+  } finally {
+    if (mounted) await run("hdiutil", ["detach", directory]);
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 export async function buildRelease({ root = path.resolve(import.meta.dirname, ".."),
   platform = process.platform, arch = process.arch, run = runProcess } = {}) {
   if (platform !== process.platform || arch !== process.arch) {
@@ -73,11 +88,15 @@ export async function buildRelease({ root = path.resolve(import.meta.dirname, ".
   const env = { ...process.env, TB_DESKTOP_PACKAGE_OUT: plan.directory,
     CSC_IDENTITY_AUTO_DISCOVERY: "false" };
   await run(process.execPath, [path.join(root, "desktop", "package.mjs"), `${platform}:${arch}`], { cwd: root, env });
+  if (platform === "darwin") {
+    await run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", plan.prepackaged], { cwd: root, env });
+  }
   const require = createRequire(path.join(root, "package.json"));
   await run(process.execPath, [require.resolve("electron-builder/cli.js"),
     ...plan.builderArgs, "--config", config], { cwd: root, env });
   const installer = path.join(plan.output, plan.asset);
   await access(installer);
+  if (platform === "darwin") await verifyMacInstaller(installer, { run });
   // Test the packaged app before staging a download for upload.
   await run(process.execPath, [path.join(root, "desktop", "release-smoke.mjs"), plan.packaged], { cwd: root, env });
   await mkdir(plan.downloads, { recursive: true });

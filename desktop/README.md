@@ -134,7 +134,8 @@ window controls, and tray persistence. Run `npm run desktop:package:all` to
 build macOS arm64, Windows x64, and Linux x64 bundles from one checkout. You can
 also pass targets such as `win32:arm64` or `linux:arm64` to
 `npm run desktop:package -- <target>`. Run the smoke test on each target system
-before distribution. Packages are not signed or notarized.
+before distribution. Mac packages have an ad-hoc signature for bundle integrity.
+They do not have an Apple Developer ID signature or notarization. Windows packages are unsigned.
 
 `npm run desktop:release` builds a downloadable installer for the current machine:
 macOS Apple Silicon (arm64) gets a DMG, Windows x64 gets an EXE installer, and Linux x64
@@ -167,8 +168,10 @@ each asset must be smaller than 2 GiB. See
 [Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
 and [release limits](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
 
-These first downloads are unsigned and are not notarized. macOS and Windows may
-block them or show security prompts. Trusted signing and notarization need a
+Mac downloads have an ad-hoc signature for bundle integrity. The release build
+verifies the signature before creating the DMG and checks the app inside the final DMG.
+The Mac app has no Apple Developer ID signature or notarization. Windows downloads
+are unsigned. macOS and Windows may block them or show security prompts. Trusted signing and notarization need a
 separate credential setup. Native startup checks cover the setup screen; they
 do not download Thunderbird, install its toolchain, or compile Thunderbird.
 Intel Mac, Linux ARM64, and Windows ARM64 downloads are not included in this release matrix.
