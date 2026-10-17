@@ -17,9 +17,9 @@ const version = "1.2.3";
 const tag = `v${version}`;
 const repository = "example/dashboard";
 
-test("release formats cover both Mac architectures, Windows, and Linux without implicit publishing", () => {
+test("release formats cover Apple Silicon, Windows, and Linux without implicit publishing", () => {
   const names = releaseTargets.map(target => releaseAsset({ ...target, version }));
-  assert.equal(new Set(names).size, 4, "Each target should have a unique download name.");
+  assert.equal(new Set(names).size, 3, "Each target should have a unique download name.");
   for (const target of releaseTargets) {
     const plan = releasePlan({ ...target, root: "/project", version });
     assert.ok(plan.builderArgs.includes("never"), "The installer builder should never publish downloads itself.");
@@ -30,6 +30,7 @@ test("release formats cover both Mac architectures, Windows, and Linux without i
       "The target should produce its native download format.");
   }
   assert.throws(() => releaseAsset({ platform: "linux", arch: "arm64", version }), /Unsupported/, "Unsupported architectures should fail explicitly.");
+  assert.throws(() => releaseAsset({ platform: "darwin", arch: "x64", version }), /Unsupported/, "Intel Macs should be excluded from this release.");
 });
 
 test("tag and version checks reject mismatches and shell metacharacters", () => {
@@ -136,7 +137,8 @@ test("workflow uses standard native runners and draft uploads without Actions ar
   const require = createRequire(import.meta.url);
   const yaml = require("js-yaml");
   const workflow = yaml.load(await readFile(new URL("../.github/workflows/desktop-release.yml", import.meta.url), "utf8"));
-  assert.equal(workflow.jobs.build.strategy.matrix.include.length, 4, "The workflow should build all four native targets.");
+  assert.deepEqual(workflow.jobs.build.strategy.matrix.include.map(({ platform, arch }) => `${platform}:${arch}`),
+    ["darwin:arm64", "win32:x64", "linux:x64"], "The workflow should build the three supported native targets.");
   assert.ok(workflow.jobs.finish.needs.includes("build"), "The ready state should require every matrix job to succeed.");
   assert.equal(workflow.jobs.prepare.steps[0].with.ref, "refs/tags/${{ env.RELEASE_TAG }}", "Preparation should check out a tag rather than a same-named branch.");
   assert.equal(workflow.jobs.build.steps[0].with.ref, "${{ needs.prepare.outputs.source }}", "All platform builds should use the same pinned source commit.");

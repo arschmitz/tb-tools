@@ -137,7 +137,7 @@ also pass targets such as `win32:arm64` or `linux:arm64` to
 before distribution. Packages are not signed or notarized.
 
 `npm run desktop:release` builds a downloadable installer for the current machine:
-macOS arm64 or x64 gets a DMG, Windows x64 gets an EXE installer, and Linux x64
+macOS Apple Silicon (arm64) gets a DMG, Windows x64 gets an EXE installer, and Linux x64
 gets an AppImage. Downloads and their SHA-256 checksum files go in
 `dist/downloads`. The command first creates the existing package, checks its
 bundled native dependencies, then opens the shipped app with a temporary profile
@@ -147,14 +147,14 @@ to install Node or clone this tools repository to launch it.
 
 The **Desktop downloads** GitHub Actions workflow runs each build on a standard
 GitHub-hosted machine with the same operating system and architecture. You can
-control all four builds from a Mac. It runs when a `v*` tag is pushed, or from
+control all three builds from a Mac. It runs when a `v*` tag is pushed, or from
 **Actions > Desktop downloads > Run workflow** with an existing version tag.
 The tag must match the version in `package.json`, such as `v1.0.0` for `1.0.0`.
 The workflow must be present on the default branch for the manual button to appear.
 
 The workflow creates a draft release labeled **building**, uploads each tested
 download directly to that draft, and marks it **ready for review** only after
-all four jobs pass. Failed jobs leave an incomplete draft. Retry the failed jobs,
+all three jobs pass. Failed jobs leave an incomplete draft. Retry the failed jobs,
 check all results, then publish the draft from GitHub Releases. Published releases
 cannot be replaced by this workflow; use a new version instead. No downloads are
 published automatically. The workflow needs repository Actions enabled and its
@@ -171,7 +171,7 @@ These first downloads are unsigned and are not notarized. macOS and Windows may
 block them or show security prompts. Trusted signing and notarization need a
 separate credential setup. Native startup checks cover the setup screen; they
 do not download Thunderbird, install its toolchain, or compile Thunderbird.
-Linux and Windows ARM64 downloads are not included in this release matrix.
+Intel Mac, Linux ARM64, and Windows ARM64 downloads are not included in this release matrix.
 
 `npm run desktop:worktree:smoke -- /path/to/comm` creates two real task worktrees,
 builds each, runs `test_mailServices.js` in each, and checks that the author's

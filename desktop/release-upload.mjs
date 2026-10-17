@@ -31,11 +31,11 @@ export async function updateDraft({ action, tag, version, repository, root = pat
     } catch (error) {
       if (!/release not found|HTTP 404/i.test(error.stderr || error.message)) throw error;
       await gh(["release", "create", tag, "--draft", "--verify-tag", "--title", `${branding.APP_NAME} ${tag} — building`,
-        "--notes", "Build incomplete. Do not publish this draft until all four platform builds and startup checks pass."]);
+        "--notes", "Build incomplete. Do not publish this draft until all three platform builds and startup checks pass."]);
       return;
     }
     await gh(["release", "edit", tag, "--title", `${branding.APP_NAME} ${tag} — building`,
-      "--notes", "Build incomplete. A rebuild is in progress. Do not publish until all four platform checks pass."]);
+      "--notes", "Build incomplete. A rebuild is in progress. Do not publish until all three platform checks pass."]);
     return;
   }
   if (action === "upload") {
@@ -59,9 +59,9 @@ export async function updateDraft({ action, tag, version, repository, root = pat
   const temporary = await mkdtemp(path.join(os.tmpdir(), "tb-release-notes-"));
   try {
     const notes = path.join(temporary, "notes.txt");
-    await writeFile(notes, `All four native package builds and first-run startup checks passed. Ready for review.\n\n` +
+    await writeFile(notes, `All three native package builds and first-run startup checks passed. Ready for review.\n\n` +
       `Downloads\n\n` +
-      `- macOS: choose arm64 for Apple Silicon or x64 for Intel. Open the DMG and drag the app to Applications.\n` +
+      `- macOS Apple Silicon (arm64): open the DMG and drag the app to Applications. Intel Macs are not supported by this release.\n` +
       `- Windows x64: run the EXE installer.\n` +
       `- Linux x64: make the AppImage executable, then open it.\n\n` +
       `Each download includes its own SHA-256 checksum file.\n\n` +

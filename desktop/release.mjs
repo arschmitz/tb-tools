@@ -9,7 +9,6 @@ import branding from "./branding.cjs";
 
 export const releaseTargets = [
   { platform: "darwin", arch: "arm64", os: "macos", format: "dmg" },
-  { platform: "darwin", arch: "x64", os: "macos", format: "dmg" },
   { platform: "win32", arch: "x64", os: "windows", format: "nsis" },
   { platform: "linux", arch: "x64", os: "linux", format: "AppImage" },
 ];
