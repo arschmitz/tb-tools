@@ -2,6 +2,8 @@ export function getCodexRunStatus({ busy, error, status, silenceSeconds = 0 }) {
   if (status === "paused") return { label: "Paused — see the next step below", state: "waiting" };
   if (status === "input-required") return { label: "Waiting for your answer", state: "waiting" };
   if (error || status === "error") return { label: "Failed - see the error below", state: "error" };
+  if (status === "recovering-build") return { label: "Recovering the task build", state: "working" };
+  if (status === "monitoring") return { label: "Monitoring Try — no AI turn is running", state: "working" };
   if (busy) return {
     label: silenceSeconds >= 30
       ? `Working - no new output for ${silenceSeconds}s`

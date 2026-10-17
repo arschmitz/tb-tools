@@ -1,8 +1,18 @@
 const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, WebContentsView, shell, clipboard,
   ipcMain } = require("electron");
 const { randomUUID } = require("node:crypto");
-const fs = require("node:fs");
 const path = require("node:path");
+const { createDesktopBackend, backendNodeExecutable } = require("./backend-client.cjs");
+const { toolEnvironment } = require("./setup-environment.cjs");
+Object.assign(process.env, toolEnvironment());
+const { chooseCheckout } = require("./setup.cjs");
+const { APP_NAME, APP_ID } = require("./branding.cjs");
+
+// Keep saved checkout, sign-in, and phone data in the existing directory.
+app.setPath("userData", path.join(app.getPath("appData"), "thunderbird-cli"));
+app.setName(APP_NAME);
+process.title = APP_NAME;
+if (process.platform === "win32") app.setAppUserModelId(APP_ID);
 
 // sccache 0.18 can reuse stale headers across worktrees in direct mode.
 process.env.SCCACHE_DIRECT = "false";
@@ -18,7 +28,7 @@ let consoleServer;
 let mobileGateway;
 let mobileAddress;
 let remoteAccess;
-let dailyBuild;
+let backend;
 let tray;
 let quitting = false;
 let restarting = false;
@@ -42,39 +52,6 @@ function createStandardWindow(options) {
   });
   if (process.platform === "darwin") window.setWindowButtonVisibility(true);
   return window;
-}
-
-function savedCheckoutPath() {
-  const file = path.join(app.getPath("userData"), "checkout.json");
-  try { return JSON.parse(fs.readFileSync(file, "utf8")).commPath; }
-  catch { return ""; }
-}
-
-function validCommPath(candidate) {
-  return Boolean(candidate && fs.existsSync(path.join(candidate, ".git")) &&
-    fs.existsSync(path.join(path.dirname(candidate), "mach")));
-}
-
-function rememberCheckout(commPath) {
-  commPath = fs.realpathSync(commPath);
-  fs.mkdirSync(app.getPath("userData"), { recursive: true });
-  fs.writeFileSync(path.join(app.getPath("userData"), "checkout.json"),
-    JSON.stringify({ commPath }), { mode: 0o600 });
-  return commPath;
-}
-
-async function chooseCheckout() {
-  const option = process.argv.find(argument => argument.startsWith("--comm="))?.slice(7);
-  const configured = option || process.env.TB_COMM_PATH || savedCheckoutPath();
-  if (validCommPath(configured)) return rememberCheckout(path.resolve(configured));
-  if (validCommPath(process.cwd())) return rememberCheckout(process.cwd());
-  const selected = await dialog.showOpenDialog({ title: "Choose the Thunderbird comm checkout",
-    properties: ["openDirectory"] });
-  const commPath = selected.filePaths[0];
-  if (selected.canceled || !validCommPath(commPath)) {
-    throw new Error("Choose a comm checkout inside a Firefox source checkout with mach.");
-  }
-  return rememberCheckout(commPath);
 }
 
 function webAddress(address) {
@@ -147,7 +124,7 @@ function sendBrowserState() {
 
 function layoutBrowser() {
   if (!consoleWindow || consoleWindow.isDestroyed()) return;
-  const [width, height] = consoleWindow.getContentSize();
+  const { width, height } = consoleWindow.contentView.getBounds();
   consoleView?.setBounds({ x: 0, y: 0, width, height });
   if (activeView === consoleView) return;
   activeView?.setVisible(!consoleDialogOpen);
@@ -221,6 +198,10 @@ function handleBrowserAction(event, { action, tabId } = {}) {
 }
 
 ipcMain.on("commands-browser-action", handleBrowserAction);
+ipcMain.on("commands-browser-focus", event => {
+  if (event.sender !== consoleView?.webContents) return;
+  showConsole();
+});
 ipcMain.on("commands-browser-ready", event => {
   if (event.sender === consoleView?.webContents) sendBrowserState();
 });
@@ -240,7 +221,7 @@ function showConsole() {
   if (!consoleServer) return;
   if (!consoleWindow || consoleWindow.isDestroyed()) {
     consoleWindow = createStandardWindow({ width: 1500, height: 980, minWidth: 780,
-      title: "Thunderbird Commands", show: false,
+      title: APP_NAME, show: false,
       webPreferences: { preload: path.join(__dirname, "browser-preload.cjs"),
         contextIsolation: true, nodeIntegration: false, sandbox: true } });
     consoleWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -251,6 +232,9 @@ function showConsole() {
     installPageCommands(consoleWindow.webContents);
     consoleWindow.on("focus", focusActivePage);
     consoleWindow.on("resize", layoutBrowser);
+    consoleWindow.contentView.on("bounds-changed", layoutBrowser);
+    consoleWindow.on("enter-full-screen", layoutBrowser);
+    consoleWindow.on("leave-full-screen", layoutBrowser);
     consoleWindow.on("closed", () => {
       consoleView?.webContents.close();
       for (const tab of browserTabs.values()) tab.view.webContents.close();
@@ -277,19 +261,40 @@ function showConsole() {
     consoleWindow.contentView.addChildView(consoleView);
     consoleView.webContents.on("did-finish-load", sendBrowserState);
     activateTab("console");
-    if (process.env.TB_DESKTOP_TEST !== "1") {
-      consoleWindow.once("ready-to-show", () => { consoleWindow.show(); focusActivePage(); });
-    }
     void consoleWindow.loadURL("about:blank");
-    void consoleView.webContents.loadURL(consoleServer.url);
+    const window = consoleWindow;
+    const view = consoleView;
+    void view.webContents.loadURL(consoleServer.url).then(() => {
+      if (window.isDestroyed()) return;
+      layoutBrowser();
+      if (process.env.TB_DESKTOP_TEST !== "1") {
+        window.show();
+        focusActivePage();
+      }
+    }).catch(error => {
+      if (window.isDestroyed()) return;
+      console.error("Could not load the dashboard:", error);
+      void dialog.showMessageBox({ type: "error", message: "Could not load the dashboard",
+        detail: error.message });
+    });
   } else {
+    if (consoleWindow.isMinimized()) consoleWindow.restore();
+    activateTab("console");
     consoleWindow.show();
     consoleWindow.focus();
-    activateTab("console");
   }
 }
 
 function openManagedPage(address, { newTab = false } = {}) {
+  try {
+    const external = new URL(address);
+    if (external.protocol === "vscode:" && external.hostname === "file") {
+      void shell.openExternal(external.href);
+      return;
+    }
+  } catch {
+    return;
+  }
   const url = webAddress(address);
   if (!url) return;
   if (!consoleWindow || consoleWindow.isDestroyed()) showConsole();
@@ -346,7 +351,7 @@ function restoreAppWindow() {
 }
 
 async function pairPhone() {
-  if (!remoteAccess.status().address) {
+  if (!(await remoteAccess.status()).address) {
     try { await remoteAccess.enable(); }
     catch (error) {
       const result = await dialog.showMessageBox({ type: "warning", title: "Phone access needs Tailscale",
@@ -357,8 +362,8 @@ async function pairPhone() {
       return;
     }
   }
-  const { code } = mobileGateway.issuePairCode();
-  const address = remoteAccess.status().address;
+  const { code } = await mobileGateway.issuePairCode();
+  const address = (await remoteAccess.status()).address;
   const result = await dialog.showMessageBox({ type: "info", title: "Pair phone",
     message: `Pairing code: ${code}`,
     detail: `Open ${address} on your phone. The code expires in 10 minutes. Add the page to your home screen for an app icon.`,
@@ -376,7 +381,9 @@ function restartApp() {
 function installMenu() {
   const selectedPage = () => browserTabs.get(activeTabId);
   const menu = Menu.buildFromTemplate([
-    { label: "Commands", submenu: [
+    { label: APP_NAME, submenu: [
+      { role: "about" },
+      { type: "separator" },
       { label: "Show Console", click: showConsole },
       { label: "Pair Phone", click: () => { void pairPhone(); } },
       { label: "Disable Phone Access", click: () => { void remoteAccess.disable().catch(error => {
@@ -404,13 +411,26 @@ function installMenu() {
       } },
     ] },
     { label: "Window", submenu: [{ role: "minimize" }, { role: "zoom" },
-      { role: "togglefullscreen" }, { role: "close" }] },
+      { role: "togglefullscreen" },
+      ...(process.platform === "darwin" ? [{ label: "Fill Entire Display", id: "fill-entire-display",
+        accelerator: "Control+Command+Shift+F", click: () => {
+          const window = BrowserWindow.getFocusedWindow() || consoleWindow;
+          if (!window || window.isDestroyed()) return;
+          const fill = () => {
+            if (!window.isDestroyed()) window.setSimpleFullScreen(!window.isSimpleFullScreen());
+          };
+          if (window.isFullScreen()) {
+            window.once("leave-full-screen", fill);
+            window.setFullScreen(false);
+          } else fill();
+        } }] : []),
+      { role: "close" }] },
   ]);
   Menu.setApplicationMenu(menu);
   const icon = nativeImage.createFromPath(appIconPath)
     .resize({ width: 18, height: 18 });
   tray = new Tray(icon);
-  tray.setToolTip("Thunderbird Commands");
+  tray.setToolTip(APP_NAME);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Show Console", click: showConsole },
     { label: "Pair Phone", click: () => { void pairPhone(); } },
@@ -424,55 +444,40 @@ function installMenu() {
 }
 
 async function start() {
-  const commPath = await chooseCheckout();
-  const [{ createGraphCommand }, { startInteractiveGraphServer },
-    { createDailyBuildService }, { createMobileGateway }, { createRemoteAccessService },
-    { default: savedConfig }] = await Promise.all([
-    import("../commands/graph.mjs"), import("../commands/graph/server.mjs"),
-    import("../commands/graph/daily-build.mjs"), import("./mobile-gateway.mjs"),
-    import("./remote-access.mjs"),
-    import("../lib/config.mjs"),
-  ]);
-  const appConfig = { ...savedConfig, taskWorktrees: true };
-  dailyBuild = createDailyBuildService({ geckoSource: path.dirname(commPath), commSource: commPath,
-    ...(process.env.TB_DESKTOP_TEST === "1" ? { directory: path.join(app.getPath("userData"), "daily-build") } : {}),
-    onSettingsSaved: async settings => {
-      if (process.env.TB_DESKTOP_TEST !== "1" && app.isPackaged && !process.argv.includes("--smoke-test") &&
-          ["darwin", "win32"].includes(process.platform)) {
-        app.setLoginItemSettings({ openAtLogin: settings.enabled });
-        return app.getLoginItemSettings().status ||
-          (app.getLoginItemSettings().openAtLogin ? "enabled" : "not-enabled");
-      }
-      return "app-must-stay-open";
-    } });
-  await dailyBuild.start();
-  const token = randomUUID();
-  let consoleHtml;
-  const graphCommand = createGraphCommand({ cwd: commPath, forceInteractive: true, appConfig,
-    makeToken: () => token, waitForClose: async () => "",
-    startServer: async options => {
-      consoleHtml = options.html;
-      consoleServer = await startInteractiveGraphServer({ ...options, dailyBuild,
-        ...(process.env.TB_DESKTOP_TEST === "1" ? { implementationManager: null, tryMonitor: null,
-          patchSessionDirectory: path.join(app.getPath("userData"), "patch-sessions") } : {}) });
-      return consoleServer;
-    } });
-  await graphCommand({ open: false, port: 0, closeTabs: false });
-  mobileGateway = createMobileGateway({ targetUrl: consoleServer.url, desktopToken: token,
-    html: consoleHtml, stateFile: path.join(app.getPath("userData"), "mobile-sessions.json") });
-  mobileAddress = await mobileGateway.start();
-  remoteAccess = createRemoteAccessService({ gatewayUrl: mobileAddress.url,
-    stateFile: path.join(app.getPath("userData"), "remote-access.json") });
-  await remoteAccess.start();
+  const commPath = await chooseCheckout({ app, BrowserWindow, dialog, ipcMain, shell,
+    nodeExecutable: backendNodeExecutable,
+    option: process.argv.find(argument => argument.startsWith("--comm="))?.slice(7) });
+  if (!commPath) { app.quit(); return; }
+  backend = createDesktopBackend({
+    onMainRequest: async (action, value) => {
+      if (action !== "login") throw new Error("Unknown main process request.");
+      app.setLoginItemSettings({ openAtLogin: value });
+      return app.getLoginItemSettings().status || (app.getLoginItemSettings().openAtLogin ? "enabled" : "not-enabled");
+    },
+    onExit: () => {
+      if (quitting) return;
+      console.error("Dashboard service stopped. Window controls remain available.");
+      void dialog.showMessageBox({ type: "error", message: "Dashboard service stopped",
+        detail: "The window is still available. Use Restart to reconnect to saved tasks." });
+    },
+  });
+  const ready = await backend.call("start", { commPath, userData: app.getPath("userData"), packaged: app.isPackaged });
+  consoleServer = { url: ready.url };
+  mobileAddress = ready.mobileAddress;
+  const token = ready.token;
+  remoteAccess = { status: () => backend.call("status"), enable: () => backend.call("enable"), disable: () => backend.call("disable") };
+  mobileGateway = { issuePairCode: () => backend.call("pair"), revokeAll: () => backend.call("revoke") };
   if (process.argv.includes("--smoke-test")) {
     const page = await fetch(consoleServer.url);
     const status = await fetch(new URL(`/api/daily-build?token=${token}`, consoleServer.url));
     if (!page.ok || !status.ok) throw new Error("Desktop smoke test could not reach the console and daily build API.");
     process.stdout.write(`${JSON.stringify({ ok: true, taskWorktrees: true,
-      console: consoleServer.url, mobile: mobileAddress.url })}\n`);
+      console: consoleServer.url, mobile: mobileAddress.url,
+      mainPid: process.pid, backendPid: ready.pid, runtime: ready.runtime })}\n`);
     app.quit();
     return;
   }
+  app.setAboutPanelOptions({ applicationName: APP_NAME, applicationVersion: require("../package.json").version, iconPath: appIconPath });
   installMenu();
   showConsole();
 }
@@ -488,16 +493,14 @@ else {
     quitting = true;
     void (async () => {
       try {
-        await dailyBuild?.stop();
-        await mobileGateway?.close();
-        consoleServer?.server.shutdown?.(0, "desktop app quit");
+        await backend?.stop();
       } catch (error) {
         console.error("Could not finish desktop shutdown:", error);
       } finally { app.quit(); }
     })();
   });
   app.whenReady().then(start).catch(async error => {
-    await dialog.showMessageBox({ type: "error", message: "Commands could not start", detail: error.message });
+    await dialog.showMessageBox({ type: "error", message: `${APP_NAME} could not start`, detail: error.message });
     app.quit();
   });
 }

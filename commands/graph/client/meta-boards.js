@@ -1,4 +1,5 @@
 import { INTERACTIVE } from "./config.js";
+import { isAbandonedBoardPatch, isClosedBoardBug } from "./meta-board-visibility.js";
 import {
   createColorAssignments,
   getAccessibleAssigneePillStyle,
@@ -274,9 +275,10 @@ function createPatchLink(patch) {
   return link;
 }
 
-function createCardPatchLinks(patches = []) {
+function createCardPatchLinks(patches = [], { includeAbandoned = false } = {}) {
   const container = document.createElement("div");
-  const visiblePatches = patches.filter((patch) => patch.id && patch.url);
+  const visiblePatches = patches.filter((patch) => patch.id && patch.url &&
+    (includeAbandoned || !isAbandonedBoardPatch(patch)));
 
   if (!visiblePatches.length) {
     return null;
@@ -335,7 +337,9 @@ function createCard(card) {
   const title = document.createElement("h4");
   const meta = document.createElement("div");
   const parent = document.createElement("div");
-  const patches = createCardPatchLinks(card.patches || []);
+  const patches = createCardPatchLinks(card.patches || [], {
+    includeAbandoned: card.column === "complete",
+  });
 
   element.className = "meta-board-card";
   element.tabIndex = 0;
@@ -399,6 +403,7 @@ function getFilteredCards(column) {
   const meta = metaFilter?.value || "";
 
   return cards.filter((card) => (
+    (column === "complete" || !isClosedBoardBug(card)) &&
     (!assignee || card.assignee?.email === assignee) &&
     (!meta || card.parentMeta.id === meta)
   ));

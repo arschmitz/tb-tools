@@ -6,25 +6,25 @@ import path from "node:path";
 const consoleScreenshots = [
   {
     path: "/images/console-overview.png",
-    alt: "Thunderbird Desktop Console showing a selected commit, integration badges, and a GitHub-style diff",
+    alt: "Thunderbird Development Dashboard showing a selected commit, integration badges, and a GitHub-style diff",
     caption:
       "The main console view keeps the comm graph, checkout state, Bugzilla and Phabricator status, tracked try runs, and a syntax-highlighted diff in one place.",
   },
   {
     path: "/images/console-try.png",
-    alt: "Thunderbird Desktop Console try run dialog",
+    alt: "Thunderbird Development Dashboard try run dialog",
     caption:
       "The try dialog exposes the normal `mach try` selectors, presets, task regexes, artifact builds, and optional Phabricator comments without leaving the browser flow.",
   },
   {
     path: "/images/console-land.png",
-    alt: "Thunderbird Desktop Console land patches dialog",
+    alt: "Thunderbird Development Dashboard land patches dialog",
     caption:
       "The Land Patches flow brings the `tb land` sheriff workflow into the console, showing accepted checkin-needed patches, related links, prompts, and Lando output.",
   },
   {
     path: "/images/console-test-output.png",
-    alt: "Thunderbird Desktop Console parsed test output",
+    alt: "Thunderbird Development Dashboard parsed test output",
     caption:
       "Test runs preserve colored output and add parsed summaries, failed-file actions, rerun controls, copy buttons, and VS Code links.",
   },
@@ -32,7 +32,7 @@ const consoleScreenshots = [
 
 function pushConsoleSection(lines) {
   lines.push(
-    "## Thunderbird Desktop Console",
+    "## Thunderbird Development Dashboard",
     "",
     "`tb console` starts a local browser-based control surface for Thunderbird patch work. The standalone desktop app runs the same console in a persistent window and creates its own Review worktrees. See the desktop app section below.",
     "",
@@ -79,9 +79,11 @@ function pushDesktopSection(lines) {
     "",
     "Run `npm ci`, then `npm run desktop -- --comm=/path/to/firefox/comm`. Run `npm run desktop:package` to make a native app for the current system. The app keeps running in the tray after its console window closes. Links open in app-owned windows. Pages from the same site reuse a window. The Pages menu can go back, go forward, reload, or close those windows.",
     "",
-    "The desktop app creates paired Review worktrees in `~/.tb-tools/worktrees`. Each revision under review gets its own pair, so different reviews can run together. Each active worktree has its own writable object directory. Completed artifact snapshots live in `~/.tb-tools/build-cache`. When sccache is installed, its compiler-result storage is shared; cache hits across worktrees depend on the active sccache server's base paths. The app turns off sccache direct mode to avoid stale headers across worktrees. A new worktree can build without copying another live object directory. Try repair worktrees also get a Thunderbird build config with a private object directory. Windows builds need Visual Studio C++ tools, MozillaBuild's `bin` directory on PATH, and native Python.",
+    "On macOS, use **Window \u2192 Fill Entire Display** (Control-Command-Shift-F) to remove the black strip above the app on displays with a camera cutout. This mode stays on the current desktop. The standard fullscreen action uses a separate macOS Space and keeps the reserved top strip.",
     "",
-    "In Settings, set one or more local times in `HH:MM` format and enable Daily source pull and build. The app fetches both `origin/main` branches, updates its own detached worktree in `~/.tb-tools/daily-build`, and runs `./mach build` there. It never switches the Working checkout. Build now, Cancel build, and View log are available in the same section. If the app starts after a scheduled time, it runs one catch-up build that day. Enabling the schedule also asks the packaged app to start at login on macOS or Windows; operating system approval may still be needed.",
+    "The desktop app creates paired Review worktrees in `~/.tb-tools/worktrees`. Each revision under review gets its own pair, so different reviews can run together. Each active worktree has its own writable object directory. Command-line, manual, Review, landing, task, and scheduled builds use the same build flow. It checks completed local binaries first, then uses Mach to check its download cache and available Thunderbird CI artifacts on Treeherder/Taskcluster. New artifact worktrees try `mach build faster` first and use a complete artifact build if generated files are missing. Native changes use an incremental native build unless matching completed local binaries are available. Completed artifact snapshots live in `~/.tb-tools/build-cache`. Scheduled builds keep their private object directory for the next run. When sccache is installed, its compiler-result storage is shared; cache hits across worktrees depend on the active sccache server's base paths. The app turns off sccache direct mode to avoid stale headers across worktrees. A new worktree can build without copying another live object directory. Try repair worktrees also get a Thunderbird build config with a private object directory. Windows builds need Visual Studio C++ tools, MozillaBuild's `bin` directory on PATH, and native Python.",
+    "",
+    "In Settings, set one or more local times in `HH:MM` format and enable Daily source pull and build. The app fetches both `origin/main` branches, updates its own detached worktree in `~/.tb-tools/daily-build`, and uses the shared build flow there. It keeps the private object directory for later incremental builds. It never switches the Working checkout. Build now, Cancel build, and View log are available in the same section. If the app starts after a scheduled time, it runs one catch-up build that day. Enabling the schedule also asks the packaged app to start at login on macOS or Windows; operating system approval may still be needed.",
     "",
     "For phone access over cellular, install Tailscale on the computer and phone and sign in to the same private network. Choose Pair Phone in the desktop app. It configures Tailscale Serve on private HTTPS port 8443 and shows the phone URL and a one-time code. Open the URL on the phone, enter the code, then add the page to the home screen. The phone uses the same console and actions through a separate paired gateway. Disable Phone Access and Revoke Paired Phones are in the app menu. The original local console stays bound to loopback.",
     "",

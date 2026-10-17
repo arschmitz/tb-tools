@@ -1,4 +1,5 @@
 import { INTERACTIVE } from "./config.js";
+import { renderGapEvaluations } from "./knowledge-gap-review.js";
 
 export function getBackgroundJobPhaseLabel(job) {
   if (job.kind === "Try repair" && ["analyzing", "needs-evidence"].includes(job.phase)) {
@@ -19,10 +20,11 @@ export function initializeBackgroundJobs() {
   dialog.setAttribute("aria-labelledby", "background-jobs-title");
   dialog.innerHTML = `<header><h2 id="background-jobs-title">Background jobs</h2><button type="button" class="jobs-close">Close</button></header>
     <p class="jobs-summary" role="status"></p><p class="jobs-error" role="alert" hidden></p>
-    <div class="jobs-controls"><label><input type="checkbox" class="jobs-finished"> Show finished jobs</label><button type="button" class="jobs-refresh">Refresh</button></div>
+    <div class="jobs-controls"><label><input type="checkbox" class="jobs-finished"> Show finished jobs and history</label><button type="button" class="jobs-refresh">Refresh</button></div>
     <div class="jobs-list"></div>`;
   document.body.append(dialog);
   let timer, busy = false, snapshot;
+  const knowledgeReviewDrafts = new Map();
   const list = dialog.querySelector(".jobs-list");
   const summary = dialog.querySelector(".jobs-summary");
   const error = dialog.querySelector(".jobs-error");
@@ -56,6 +58,23 @@ export function initializeBackgroundJobs() {
           }
         } catch { /* Invalid saved links do not prevent viewing the job. */ }
       }
+      if (job.knowledgeWork?.length) {
+        const details = document.createElement("details");
+        const label = document.createElement("summary"); label.textContent = "Confirmed knowledge gaps"; details.append(label);
+        for (const work of job.knowledgeWork) {
+          const item = document.createElement("section");
+          const question = document.createElement("h4"); question.textContent = work.question;
+          const explanation = document.createElement("p"); explanation.textContent = work.explanation;
+          const scope = document.createElement("p"); scope.textContent = `${work.repository}: ${work.paths.join(", ") || "Scope needs verification"}`;
+          const next = document.createElement("p"); next.textContent = "Source checked. A checked evaluation is required before this gap can be marked resolved.";
+          item.append(question, explanation, scope, next); details.append(item);
+        }
+        card.append(details);
+      }
+      if (job.knowledgeEvaluations?.length) card.append(renderGapEvaluations(job.knowledgeEvaluations, {
+        token: INTERACTIVE.token, drafts: knowledgeReviewDrafts, refresh,
+        onError: failure => { error.textContent = failure.message; error.hidden = false; },
+      }));
       if (job.cancelUrl) {
         const cancel = document.createElement("button");
         cancel.type = "button";

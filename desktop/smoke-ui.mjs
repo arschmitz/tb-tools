@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { _electron } from "playwright";
+import branding from "./branding.cjs";
 import { checkClipboard } from "./clipboard-smoke.mjs";
 
 const commPath = process.argv[2] || process.env.TB_COMM_PATH;
@@ -26,10 +27,8 @@ await Promise.all([
 ]);
 const address = `http://127.0.0.1:${site.address().port}/`;
 const otherAddress = `http://127.0.0.1:${otherSite.address().port}/`;
-const executablePath = process.env.TB_DESKTOP_EXECUTABLE || path.resolve("dist",
-  `Thunderbird-Commands-${process.platform}-${process.arch}`,
-  process.platform === "darwin" ? "Thunderbird-Commands.app/Contents/MacOS/Thunderbird-Commands"
-    : process.platform === "win32" ? "Thunderbird-Commands.exe" : "Thunderbird-Commands");
+const executablePath = process.env.TB_DESKTOP_EXECUTABLE || branding.packagedExecutable(path.resolve("dist",
+  `${branding.APP_NAME}-${process.platform}-${process.arch}`));
 const testUserData = await fs.mkdtemp(path.join(os.tmpdir(), "tb-desktop-smoke-"));
 let electron;
 try {
@@ -53,7 +52,7 @@ try {
   for (let attempt = 0; attempt < 100; attempt++) {
     consoleAddress = await electron.evaluate(({ webContents }) =>
       webContents.getAllWebContents().find(contents =>
-        contents.getTitle() === "Thunderbird Desktop Console")?.getURL());
+        contents.getTitle() === "Thunderbird Development Dashboard")?.getURL());
     if (consoleAddress) break;
     await shell.waitForTimeout(100);
   }
@@ -71,7 +70,7 @@ try {
       await fs.readFile(new URL(`../assets/branding/${file}`, import.meta.url)));
   }
   const logoLoaded = await electron.evaluate(({ webContents }) =>
-    webContents.getAllWebContents().find(contents => contents.getTitle() === "Thunderbird Desktop Console")
+    webContents.getAllWebContents().find(contents => contents.getTitle() === "Thunderbird Development Dashboard")
       .executeJavaScript(`(async () => {
         const logo = document.querySelector('h1 img[alt="Thunderbird Development Dashboard"]');
         await logo.decode();
@@ -79,7 +78,7 @@ try {
       })()`));
   assert.equal(logoLoaded, true);
   const repositoryUi = await electron.evaluate(({ webContents }) =>
-    webContents.getAllWebContents().find(contents => contents.getTitle() === "Thunderbird Desktop Console")
+    webContents.getAllWebContents().find(contents => contents.getTitle() === "Thunderbird Development Dashboard")
       .executeJavaScript(`import("/assets/graph-client/config.js").then(({ GRAPHS }) => ({
         graphs: GRAPHS.map(({ checkout, repository, path }) => ({ checkout, repository, path })),
         syncButtons: document.querySelectorAll('[data-menu-action="review-sync"]').length
@@ -187,7 +186,7 @@ try {
 
   const openFromConsole = url => electron.evaluate(({ webContents }, target) => {
     const contents = webContents.getAllWebContents().find(item =>
-      item.getTitle() === "Thunderbird Desktop Console");
+      item.getTitle() === "Thunderbird Development Dashboard");
     return contents.executeJavaScript(`(() => {
       const link = document.createElement("a");
       link.href = ${JSON.stringify(target)};
@@ -229,7 +228,7 @@ try {
     };
     try {
       for (const contents of webContents.getAllWebContents().filter(item =>
-        item.getURL() === url || item.getTitle() === "Thunderbird Desktop Console")) {
+        item.getURL() === url || item.getTitle() === "Thunderbird Development Dashboard")) {
         contents.emit("context-menu", {}, { linkURL: url });
       }
     } finally { Menu.buildFromTemplate = original; }
@@ -283,7 +282,7 @@ try {
     `${address}second`);
   await electron.evaluate(({ webContents, Menu }, url) => {
     const contents = webContents.getAllWebContents().find(item =>
-      item.getTitle() === "Thunderbird Desktop Console");
+      item.getTitle() === "Thunderbird Development Dashboard");
     const original = Menu.buildFromTemplate;
     Menu.buildFromTemplate = items => ({ popup() {
       items.find(item => item.label === "Open in New Tab").click();
@@ -342,7 +341,7 @@ try {
   address), 0);
   await electron.evaluate(({ webContents }, url) => {
     const contents = webContents.getAllWebContents().find(item =>
-      item.getTitle() === "Thunderbird Desktop Console");
+      item.getTitle() === "Thunderbird Development Dashboard");
     return contents.executeJavaScript(`(() => {
       const link = document.createElement("a");
       link.href = ${JSON.stringify(url)};
@@ -376,7 +375,7 @@ try {
   assert.equal(await electron.evaluate(({ app }) => app.isReady()), true);
   assert.equal((await fetch(consoleAddress)).ok, true);
   await electron.evaluate(({ Menu }) => {
-    Menu.getApplicationMenu().items.find(item => item.label === "Commands")
+    Menu.getApplicationMenu().items.find(item => item.label === "Thunderbird Development Dashboard")
       .submenu.items.find(item => item.label === "Show Console").click();
   });
   const reopened = await waitForShellWindow();

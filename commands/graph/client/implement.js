@@ -41,6 +41,7 @@ function ensureDialog() {
       <label>Instructions <textarea class="patch-update-steer-input" data-implement="instructions" maxlength="32000" rows="5" placeholder="Scope, requirements, and test instructions"></textarea></label>
       <p>Uses the newest available full model with medium reasoning.</p>
       <button class="patch-update-steer-submit" type="submit">Start Implement</button>
+      <p data-implement="starting" role="status" hidden></p>
     </form>
     <section data-implement="workspace" class="patch-update-workspace" hidden>
       <section class="implement-context" aria-label="Progress and feedback">
@@ -81,15 +82,32 @@ function ensureDialog() {
   runStatus = createCodexRunStatus(dialog);
   task = registerAiTaskDialog({ kind: "implement", dialog, title: run => `Bug ${run.bugId} Implement`,
     endpoint: run => `/api/implement/${encodeURIComponent(run.id)}`,
-    restore: value => openRun(value.id), recover: value => openRun(value.id), onUpdate: run => { if (selected?.id === run.id) updateRun(run); } });
+    restore: value => openRun(value.id, value), recover: value => openRun(value.id), onUpdate: run => { if (selected?.id === run.id) updateRun(run); } });
   field("setup").addEventListener("submit", async event => {
     event.preventDefault();
     const button = event.submitter; button.disabled = true;
+    const pending = { id: `starting-${crypto.randomUUID()}`, bugId, phase: "preparing" };
+    dialog.dataset.setup = "false";
+    field("starting").hidden = false;
+    field("starting").textContent = "Starting Implement. Preparing the checkout and worktree. You can minimize this window while it starts.";
+    field("setup").setAttribute("aria-busy", "true");
+    button.textContent = "Starting…";
+    trackAiTask({ kind: "implement", session: pending, title: `Bug ${bugId} Implement`,
+      busy: true, open: () => { if (!dialog.open) dialog.showModal(); } });
     try {
       const result = await request("", { bugId, base: field("base").value, expectedHead: currentHash, instructions: field("instructions").value });
       updateRun(result.run); void refreshImplementations();
-    } catch (error) { showError(error.message); }
-    finally { button.disabled = false; }
+    } catch (error) {
+      showError(error.message);
+      dialog.dataset.setup = "true";
+      if (!dialog.open) dialog.showModal();
+    } finally {
+      trackAiTask({ kind: "implement", session: { ...pending, phase: "cancelled" } });
+      field("starting").hidden = true;
+      field("setup").removeAttribute("aria-busy");
+      button.textContent = "Start Implement";
+      button.disabled = false;
+    }
   });
   for (const button of dialog.querySelectorAll("[data-activity-filter]")) button.addEventListener("click", () => {
     activityFilter = button.dataset.activityFilter;
@@ -103,7 +121,7 @@ function ensureDialog() {
       const { run } = await request(`/${encodeURIComponent(id)}/feedback`, { text });
       if (selected?.id !== id) return false;
       updateRun(run);
-      field("delivery").textContent = "Feedback saved. The agent will check it before committing or posting Try.";
+      field("delivery").textContent = "Feedback saved. The agent will apply it before the next commit or Try run.";
       return true;
     },
   });
@@ -209,9 +227,9 @@ function updateRun(run) {
   field("setup").hidden = true; field("workspace").hidden = false;
   field("phase").textContent = run.error ? (run.errorKind === "input-required" ? "Waiting for your answer" : "Paused") : run.phase;
   const tryActivity = ({ waiting: "Pending", analyzing: "Evaluating failures", "needs-evidence": "Evaluating failures",
-    repairing: "Fixing patch failures", "rust-blocked": "Failed due to Rust; waiting for origin update", "needs-rebase": "Needs a compatible current base", "ready-to-submit": "Posting another Try", submitting: "Posting another Try", passed: "Passed" })[run.tryStatus] || run.tryStatus;
+    repairing: "Fixing patch failures", "build-blocked": "Builds failed; tests could not validate this patch", "rust-blocked": "Failed due to Rust; waiting for origin update", "needs-rebase": "Needs a compatible current base", "ready-to-submit": "Posting another Try", submitting: "Posting another Try", passed: "Passed" })[run.tryStatus] || run.tryStatus;
   const tryResult = run.tryResultStatus === "failed"
-    ? `Try complete — ${Number.isInteger(run.tryFailedJobCount) ? `${run.tryFailedJobCount} failed jobs` : "jobs failed"}; ${tryActivity}`
+    ? `${run.phase === "monitoring" ? "Try complete" : "Previous Try"} — ${Number.isInteger(run.tryFailedJobCount) ? `${run.tryFailedJobCount} failed jobs` : "jobs failed"}; ${tryActivity}`
     : run.tryStatus && `Try: ${tryActivity}`;
   field("meta").textContent = [run.branch, run.model, tryResult].filter(Boolean).join(" · ");
   const reportInvalid = run.errorKind === "report-invalid" || /^The agent has not confirmed all /.test(run.error || "");
@@ -221,7 +239,8 @@ function updateRun(run) {
     : reportInvalid && !run.reportRecoveryVersion
       ? `${run.error}\n\nThe report needs reconciliation, not a decision from you. The workflow will check its saved evidence automatically when it resumes.`
       : run.error || run.tryError);
-  const entries = run.activities || (run.activity && !/^\s*(?:\[|\{)/.test(run.activity) ? [{ id: "legacy", kind: "note", title: "Codex note", detail: run.activity }] : []);
+  const entries = [...(run.activities || (run.activity && !/^\s*(?:\[|\{)/.test(run.activity) ? [{ id: "legacy", kind: "note", title: "Codex note", detail: run.activity }] : [])),
+    ...(run.localBuildOutput ? [{ id: "console-build", kind: "command", title: "Console build", detail: run.localBuildOutput }] : [])];
   const activityKey = JSON.stringify([run.id, entries, activityFilter]);
   if (activityKey !== renderedActivity) {
     renderedActivity = activityKey;
@@ -241,7 +260,7 @@ function updateRun(run) {
   field("history").replaceChildren(...(run.instructions || []).map(item => {
     const row = document.createElement("div"); renderMarkdown(row, item.text); return row;
   }));
-  const canFeedback = ["preparing", "implementing", "verifying"].includes(run.phase);
+  const canFeedback = !["complete", "cancelled"].includes(run.phase) && !run.cancelRequested;
   field("feedback").hidden = !canFeedback;
   field("actions").hidden = false;
   const finished = ["complete", "cancelled"].includes(run.phase);
@@ -259,9 +278,9 @@ function updateRun(run) {
   void refreshDiff();
 }
 
-async function openRun(id) {
+async function openRun(id, cachedRun) {
   ensureDialog();
-  const run = await request(`/${encodeURIComponent(id)}`);
+  const run = cachedRun || await request(`/${encodeURIComponent(id)}`);
   if (selected?.id !== id) {
     field("message").value = ""; field("delivery").textContent = "";
     diffContent.delete(field("working")); diffContent.delete(field("committed"));
@@ -269,6 +288,10 @@ async function openRun(id) {
   }
   if (!dialog.open) dialog.showModal();
   updateRun(run);
+}
+
+export function initializeImplementDialog() {
+  if (INTERACTIVE.enabled && INTERACTIVE.aiEnabled) ensureDialog();
 }
 
 export function createImplementButton(bug) {

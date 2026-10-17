@@ -9,10 +9,22 @@ import { access, realpath } from "node:fs/promises";
 import { openKnowledgeStore, searchKnowledge, digest, atomicWrite } from "./store.mjs";
 import { importLegacyKnowledge } from "./import.mjs";
 import { createLocalEmbeddings } from "./embeddings.mjs";
+import { VECTOR_SEARCH_VERSION } from "./vector-search.mjs";
 import { learnKnowledge, writeComponentGuides } from "./learning.mjs";
 import { syncKnowledge, saveLocalKnowledgeHistory, withKnowledgeLock } from "./sync.mjs";
 import { publishProjectLessons } from "./publication.mjs";
 import { classifyLearningQueue } from "./claims.mjs";
+import { captureSavedTaskOutcomes } from "./task-outcomes.mjs";
+import { followUpOptions, runKnowledgeFollowUp } from "./follow-up.mjs";
+import { createFollowUpSources } from "./follow-up-sources.mjs";
+
+import { captureQueryObservation, captureQueryOutcome } from "./query-gaps.mjs";
+import { normalizeKnowledgeRequest, taskQueryParts } from "./task-query.mjs";
+
+import { queryGapScheduleOptions, runQueryGapSchedule, queryGapScheduleStatus } from "./query-gap-scheduler.mjs";
+
+import { runQueryGapEvaluations, gapEvaluationStatus, reviewGapAnswer } from "./query-gap-evaluation.mjs";
+import { createKnowledgeAnswerProvider } from "./answer-provider.mjs";
 
 const execute = promisify(execFile);
 const git = async (cwd, args) => (await execute("git", args, { cwd, timeout: 3000, maxBuffer: 100_000 })).stdout.trim();
@@ -30,6 +42,8 @@ export function knowledgeOptions(config = {}) {
     maxContextChars: Math.max(1000, Math.min(24_000, Number(options.maxContextChars) || 10_000)),
     command: config.ai?.command, repositories: options.repositories || {},
     shareRepositories: Array.isArray(options.shareRepositories) ? options.shareRepositories : [],
+    followUp: followUpOptions(options.followUp),
+    queryGaps: queryGapScheduleOptions(options.queryGaps),
   };
 }
 
@@ -59,7 +73,7 @@ export async function repositoryContext(cwd, repositories = {}) {
   return { repository, revision, paths, root };
 }
 
-export async function createKnowledgeService(options, { generate, embeddings, warn = message => console.warn(message) } = {}) {
+export async function createKnowledgeService(options, { generate, embeddings, followUpDependencies = createFollowUpSources(), warn = message => console.warn(message) } = {}) {
   options = { maxContextChars: 10_000, maxCallsPerDay: 4, shareRepositories: [], repositories: {}, ...options };
   options.maxContextChars = Math.max(1000, Math.min(24_000, Number(options.maxContextChars) || 10_000));
   const store = await openKnowledgeStore(options.directory);
@@ -76,11 +90,41 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
     },
     onReady: () => { store.setting("semanticError", null); },
   }) : null);
-  let timer, running = false, stopped = false, activeAbort, activeJob;
+  let timer, vectorTimer, vectorJob, lastVectorError, running = false, stopped = false, activeAbort, activeJob, followUpAbort, queryGapAbort, queryGapEvaluationAbort;
   const error = (stage, failure) => {
     store.setting("lastError", { stage, message: failure.message, at: new Date().toISOString() });
     warn(`Knowledge ${stage}: ${failure.message}`);
   };
+  function scheduleVectorMaintenance(delay = 0) {
+    if (stopped || vectorTimer || !(options.semantic || embeddings)) return;
+    vectorTimer = setTimeout(() => {
+      vectorTimer = null;
+      void maintainVectorIndex().catch(failure => error("vector-index", failure));
+    }, delay);
+    vectorTimer.unref();
+  }
+  function maintainVectorIndex() {
+    if (stopped || !(options.semantic || embeddings)) return Promise.resolve();
+    if (vectorJob) return vectorJob;
+    vectorJob = (async () => {
+      let status;
+      try { status = await store.vectorIndex.maintain({ limit: 16 }); }
+      catch (failure) { status = { ready: false, pending: false, error: failure.message }; }
+      if (stopped) return status;
+      const previous = store.setting("vectorIndexStatus");
+      if (JSON.stringify({ ...previous, ms: undefined }) !== JSON.stringify({ ...status, ms: undefined })) {
+        store.setting("vectorIndexStatus", status);
+      }
+      const failure = status.error || (status.reason === "native-unavailable"
+        ? "The native vector index is unavailable. Exact semantic search remains available." : null);
+      if (failure && failure !== lastVectorError) error("vector-index", new Error(failure));
+      lastVectorError = failure;
+      if (status.pending && !status.error) scheduleVectorMaintenance(25);
+      else { clearTimeout(vectorTimer); vectorTimer = null; }
+      return status;
+    })().finally(() => { vectorJob = null; });
+    return vectorJob;
+  }
   async function generateLessons(prompt) {
     activeAbort = new AbortController();
     try {
@@ -90,25 +134,73 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
     } finally { activeAbort = null; }
   }
   async function indexEmbeddings() {
-    if (!semantic?.ready) return;
+    if (!semantic?.ready) return 0;
     store.setting("semanticError", null);
-    const missing = store.db.prepare("SELECT r.id,r.body FROM records r LEFT JOIN vectors v ON r.id=v.id AND v.model=? WHERE v.id IS NULL LIMIT 32").all(semantic.model);
-    if (!missing.length) return;
+    const missing = store.db.prepare("SELECT s.id,s.body FROM sections s LEFT JOIN section_vectors v ON s.id=v.id AND v.model=? WHERE v.id IS NULL LIMIT 32").all(semantic.model);
+    if (!missing.length) return 0;
     const vectors = await semantic.embed(missing.map(row => {
       const record = JSON.parse(row.body);
-      return `${record.title || ""}\n${record.component || ""}\n${record.text}`;
+      return record.input;
     }), 30_000);
-    if (!vectors) return;
+    if (!vectors) return 0;
+    if (!Array.isArray(vectors) || vectors.length !== missing.length ||
+        vectors.some(vector => !Array.isArray(vector) || !vector.length || vector.some(value => !Number.isFinite(value)))) {
+      throw new Error("Invalid local embedding.");
+    }
     for (let i = 0; i < missing.length; i++) {
       if (!Array.isArray(vectors[i]) || vectors[i].some(n => !Number.isFinite(n))) throw new Error("Invalid local embedding.");
-      store.db.prepare("INSERT OR REPLACE INTO vectors VALUES (?, ?, ?)").run(missing[i].id, semantic.model, JSON.stringify(vectors[i]));
+      // Cleanup can remove a section while its embedding is being computed.
+      store.db.prepare(`INSERT OR REPLACE INTO section_vectors (id,model,vector)
+        SELECT id,?,? FROM sections WHERE id=?`).run(semantic.model, JSON.stringify(vectors[i]), missing[i].id);
     }
     store.setting("semanticError", null);
+    return missing.length;
   }
   const service = {
     store,
-    async indexSemantic() { await indexEmbeddings(); },
+    queryGapStatus() {
+      return { ...queryGapScheduleStatus(store, { ...options.queryGaps, totalMaxCallsPerDay: options.maxCallsPerDay }),
+        evaluations: gapEvaluationStatus(store) };
+    },
+    reviewGapAnswer(key, review) { return reviewGapAnswer(store, key, review); },
+    async evaluateQueryGaps() {
+      queryGapEvaluationAbort = new AbortController();
+      try {
+        return await runQueryGapEvaluations(store, options.queryGaps, {
+          provider: createKnowledgeAnswerProvider({ generate: generate || generateKnowledge, command: options.command, directory: options.directory }),
+          embed: semantic?.ready ? (texts, timeout) => semantic.embed(texts, timeout) : null, model: semantic?.model,
+          maxCallsPerDay: options.maxCallsPerDay, signal: queryGapEvaluationAbort.signal,
+          codeFingerprint: digest({ search: searchKnowledge.toString(), feedback: runQueryGapEvaluations.toString(), vectorSearch: VECTOR_SEARCH_VERSION }),
+        });
+      } finally { queryGapEvaluationAbort = null; }
+    },
+    async checkQueryGaps() {
+      queryGapAbort = new AbortController();
+      try {
+        return await runQueryGapSchedule(store, options.queryGaps, {
+          generate: (prompt, runOptions) => (generate || generateKnowledge)(prompt, {
+            ...runOptions, command: options.command }),
+          repositories: options.repositories, maxCallsPerDay: options.maxCallsPerDay,
+          shareRepositories: options.shareRepositories,
+          signal: queryGapAbort.signal,
+        });
+      } finally { queryGapAbort = null; }
+    },
+    async followUp({ force = false } = {}) {
+      if (options.followUp?.enabled === false) return { disabled: true };
+      followUpAbort = new AbortController();
+      try {
+        store.setting("lastTaskCapture", await captureSavedTaskOutcomes(store, options.followUp));
+        return await runKnowledgeFollowUp(store, options.followUp, { ...followUpDependencies, force, signal: followUpAbort.signal });
+      } finally { followUpAbort = null; }
+    },
+    async indexSemantic() {
+      const count = await indexEmbeddings();
+      await maintainVectorIndex();
+      return count;
+    },
     get semanticReady() { return semantic?.ready === true; },
+    get semanticModel() { return semantic?.model || null; },
     async captureSource({ cwd, title, text, paths = [], revision, type = "source", context: suppliedContext }) {
       const context = suppliedContext || await repositoryContext(cwd, options.repositories);
       const source = { type, revision: revision || context.revision };
@@ -119,15 +211,19 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
         visibility: options.shareRepositories?.includes(context.repository) ? "shared" : "private" });
       store.setting(key, record.id);
     },
-    async beforeTurn({ cwd, prompt, task }) {
+    async beforeTurn({ cwd, prompt, task, filters, knowledgeRequest }) {
       const started = Date.now();
       const context = await repositoryContext(cwd, options.repositories);
-      // Prefer paths, symbols, and the actual request over repeated prompt boilerplate.
-      const query = `${context.paths.slice(0, 20).join(" ")} ${task || ""} ${prompt.slice(-6000)}`;
+      const request = normalizeKnowledgeRequest(knowledgeRequest, { question: prompt, taskType: task, revision: context.revision });
+      request.filters = { ...request.filters, ...filters };
+      const queryParts = taskQueryParts(request);
+      const query = queryParts.map(part => part.query).join("\n");
+      context.paths = request.paths;
+      context.knowledgeRequest = request;
       const vectors = await semantic?.embed([query], 300).catch(failure => {
         store.setting("semanticError", failure.message); return null;
       });
-      const result = searchKnowledge(store, { query, repository: context.repository,
+      const result = searchKnowledge(store, { query, queryParts, question: request.question, filters: request.filters, repository: context.repository,
         vector: vectors?.[0], model: semantic?.model, maxChars: options.maxContextChars - Math.min(1600, options.maxContextChars / 4) });
       const applicability = [];
       for (const id of result.ids.slice(0, 6)) {
@@ -151,15 +247,21 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
       }
       store.setting("lastRetrieval", { at: new Date().toISOString(), milliseconds: Date.now() - started,
         characters: result.text.length, ids: result.ids, repository: context.repository });
-      return { ...result, context };
+      const queryObservationId = captureQueryObservation(store, { question: request.question, knowledgeRequest: request, query, queryParts, text: result.text, ...context, filters: request.filters,
+        ids: result.ids, applicability, retrieval: result.retrieval,
+        maxContextChars: options.maxContextChars - Math.min(1600, options.maxContextChars / 4), mode: vectors?.[0] ? "hybrid" : "exact",
+        model: vectors?.[0] ? semantic?.model : null });
+      return { ...result, context: { ...context, queryObservationId } };
     },
-    async capture({ context, prompt, message, task, threadId, turnId, status, events = [], truncated = false }) {
+    async capture({ context, prompt, message, task, threadId, turnId, status, retrievalIds = [], events = [], truncated = false }) {
       if (!context) return;
-      const text = JSON.stringify({ request: prompt, response: message, events, truncated });
-      await store.put({ kind: "evidence", repository: context.repository, paths: context.paths,
+      const text = JSON.stringify({ request: prompt, response: message, retrievalIds, events, truncated });
+      const record = await store.put({ kind: "evidence", repository: context.repository, paths: context.paths,
         at: new Date().toISOString(), title: `${task || "AI"} task: ${status || "unknown"}`,
         text: text.slice(0, 1_900_000), source: { type: "agent-turn", revision: context.revision,
           threadId, turnId, status, personal: true, truncated: truncated || text.length > 1_900_000 } });
+      if (context.queryObservationId) captureQueryOutcome(store, context.queryObservationId,
+        { status, threadId, turnId, evidenceId: record.id });
     },
     async captureReview({ event, session }) {
       if (!session.graph?.path) return;
@@ -190,6 +292,9 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
           try { await importLegacyKnowledge(store, options.memoryDirectory); } catch (failure) { error("import", failure); }
         }
         if (stopped) return;
+        try { store.setting("lastFollowUp", { ...await this.followUp(), at: new Date().toISOString() }); }
+        catch (failure) { error("follow-up", failure); }
+        if (stopped) return;
         const syncDue = Date.now() - (store.setting("lastSyncAttempt") || 0) > 300_000;
         if (syncDue) {
           store.setting("lastSyncAttempt", Date.now());
@@ -197,7 +302,11 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
           catch (failure) { error("history", failure); }
         }
         if (stopped) return;
-        try { await indexEmbeddings(); } catch (failure) { error("embedding", failure); }
+        try { await this.indexSemantic(); } catch (failure) { error("embedding", failure); }
+        if (stopped) return;
+        try { await this.checkQueryGaps(); } catch (failure) { error("query-gap-check", failure); }
+        if (stopped) return;
+        try { await this.evaluateQueryGaps(); } catch (failure) { error("query-gap-evaluation", failure); }
         if (stopped) return;
         try { store.setting("lastLearning", { ...await learnKnowledge(store, { generate: generateLessons,
           maxCallsPerDay: options.maxCallsPerDay }), at: new Date().toISOString() }); }
@@ -219,6 +328,7 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
       // Capture/retrieval is immediate; maintenance runs separately from task completion.
       timer = setInterval(() => { void this.tick().catch(failure => error("maintenance", failure)); }, 30_000);
       timer.unref();
+      scheduleVectorMaintenance();
     },
     async initialize() {
       await withKnowledgeLock(options.directory, "initialize", async () => {
@@ -232,7 +342,13 @@ export async function createKnowledgeService(options, { generate, embeddings, wa
       this.start();
       return this;
     },
-    async close() { stopped = true; clearInterval(timer); activeAbort?.abort(); await activeJob; await semantic?.close(); store.close(); },
+    async close() {
+      stopped = true;
+      clearInterval(timer); clearTimeout(vectorTimer);
+      activeAbort?.abort(); followUpAbort?.abort(); queryGapAbort?.abort(); queryGapEvaluationAbort?.abort();
+      await activeJob; await vectorJob; await semantic?.close();
+      store.close();
+    },
   };
   return service;
 }

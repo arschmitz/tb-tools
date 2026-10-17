@@ -1,4 +1,4 @@
-import { setLiveText, replaceChangedChildren, hasSelectedText } from "./live-text.js";
+import { setDialogCommitTitle, setLiveText, replaceChangedChildren, hasSelectedText } from "./live-text.js";
 import { createReviewHandledButton } from "./review-handled.js";
 import { registerAiTaskDialog, enableTaskNotifications } from "./ai-task-tray.js";
 import { createReviewAttentionScroller } from "./review-attention.js";
@@ -7,6 +7,7 @@ import { startOrResumePatchSession } from "./patch-session-resume.js";
 import { createCodexRunStatus } from "./codex-run-status.js";
 import { applyGraphSnapshot, getLoadedGitCommitLimit } from "./command-sessions.js";
 import { appendInlineReviewComment, findReviewLine } from "./review-viewer.js";
+import { openRebaseFailureDialog } from "./rebase-dialog.js";
 
 const dialog = document.getElementById("patch-review-dialog");
 const runStatus = createCodexRunStatus(dialog);
@@ -51,6 +52,43 @@ function renderReviewLinks(value, reset = false) {
   if (/^\d+$/.test(reviewLinkContext.bugId || "")) append(`Bug ${reviewLinkContext.bugId}`, `https://bugzilla.mozilla.org/show_bug.cgi?id=${reviewLinkContext.bugId}`);
 }
 const status = dialog?.querySelector(".patch-review-status");
+const actionNotice = document.createElement("p");
+actionNotice.className = "patch-review-action-notice";
+actionNotice.setAttribute("role", "status");
+actionNotice.hidden = true;
+status?.after(actionNotice);
+const applyConflictSection = document.createElement("section");
+applyConflictSection.hidden = true;
+applyConflictSection.className = "patch-review-apply-conflict";
+const applyConflictMessage = document.createElement("p");
+applyConflictMessage.textContent = "This patch stack does not apply cleanly to current main. Resolve the conflicts locally, try only this patch, or ask the author to rebase.";
+const resolveApplyConflict = document.createElement("button");
+resolveApplyConflict.type = "button";
+resolveApplyConflict.textContent = "Resolve conflicts locally";
+resolveApplyConflict.addEventListener("click", async () => {
+  const result = await runAction("resolve-conflicts");
+  if (result?.rebaseConflict) openRebaseFailureDialog(result.rebaseConflict);
+});
+const applySinglePatch = document.createElement("button");
+applySinglePatch.type = "button";
+applySinglePatch.textContent = "Try applying only this patch";
+applySinglePatch.addEventListener("click", async () => {
+  const result = await runAction("apply-single");
+  if (result?.rebaseConflict) openRebaseFailureDialog(result.rebaseConflict);
+});
+const singlePatchNotice = document.createElement("p");
+singlePatchNotice.textContent = "This review applies only the selected patch on main. Parent patches are omitted.";
+singlePatchNotice.hidden = true;
+const rebaseRequestInput = document.createElement("textarea");
+rebaseRequestInput.rows = 3;
+rebaseRequestInput.setAttribute("aria-label", "Comment asking the author to rebase");
+const requestRebase = document.createElement("button");
+requestRebase.type = "button";
+requestRebase.textContent = "Post comment asking for a rebase";
+requestRebase.addEventListener("click", () => void runAction("request-rebase", { message: rebaseRequestInput.value }));
+applyConflictSection.append(applyConflictMessage, resolveApplyConflict, applySinglePatch, rebaseRequestInput, requestRebase);
+dialog?.querySelector(".patch-review-sidebar")?.prepend(applyConflictSection);
+dialog?.querySelector(".patch-review-sidebar")?.prepend(singlePatchNotice);
 const close = dialog?.querySelector(".patch-review-close");
 const activityProgress = dialog?.querySelector(".patch-review-progress");
 const activity = dialog?.querySelector(".patch-review-activity");
@@ -518,7 +556,7 @@ function createSuggestedDiffLine({ content, lineNumber, type }) {
   line.className = `diff-line ${type} patch-review-suggested-diff-line`;
   oldLine.className = "line-number old-line";
   newLine.className = "line-number new-line";
-  source.className = "line-source";
+  source.className = "line-code";
   marker.className = "line-marker";
   text.className = "line-content";
   marker.textContent = type === "delete" ? "-" : "+";
@@ -544,13 +582,13 @@ function renderSuggestedSourceDiff(container, {
   const replacementLines = replacement ? String(replacement).split(/\r?\n/) : [];
 
   table.className = "diff-table patch-review-suggested-diff-table";
-  if (currentSource) {
+  String(currentSource).split(/\r?\n/).forEach((line, index) => {
     body.append(createSuggestedDiffLine({
-      content: currentSource,
-      lineNumber,
+      content: line,
+      lineNumber: Number(lineNumber) + index,
       type: "delete",
     }));
-  }
+  });
   replacementLines.forEach((line, index) => {
     body.append(createSuggestedDiffLine({
       content: line,
@@ -560,6 +598,91 @@ function renderSuggestedSourceDiff(container, {
   });
   table.append(body);
   container.append(table);
+}
+
+function createSuggestionEditor({ currentSource, lineNumber, replacement, label = "Suggested code replacement" }) {
+  const section = document.createElement("section");
+  section.className = "patch-review-code-editor";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "patch-review-suggestion-toggle";
+  toggle.textContent = replacement === undefined ? "Add code suggestion" : "Edit code suggestion";
+  const field = document.createElement("label");
+  field.className = "patch-review-inline-field";
+  field.append(label);
+  field.hidden = true;
+  const surface = document.createElement("div");
+  surface.className = "patch-review-code-surface";
+  const gutter = document.createElement("pre");
+  gutter.className = "patch-review-code-gutter";
+  gutter.setAttribute("aria-hidden", "true");
+  const input = document.createElement("textarea");
+  input.className = "patch-review-inline-suggestion-input";
+  input.rows = 5;
+  input.spellcheck = false;
+  input.wrap = "off";
+  input.value = replacement ?? currentSource;
+  surface.append(gutter, input);
+  field.append(surface);
+  const done = document.createElement("button");
+  done.type = "button";
+  done.className = "patch-review-suggestion-done";
+  done.textContent = "Done";
+  done.hidden = true;
+  const preview = document.createElement("section");
+  preview.className = "patch-review-inline-suggested-diff";
+  preview.hidden = replacement === undefined;
+  const heading = document.createElement("h4");
+  heading.textContent = "Suggested source update";
+  const diff = document.createElement("div");
+  diff.className = "patch-review-inline-suggested-diff-content";
+  preview.append(heading, diff);
+  const update = () => {
+    gutter.textContent = input.value.split(/\r?\n/).map((_, index) => Number(lineNumber) + index).join("\n");
+    input.rows = Math.min(18, Math.max(5, input.value.split(/\r?\n/).length));
+    renderSuggestedSourceDiff(diff, { currentSource, lineNumber, replacement: input.value });
+  };
+  toggle.addEventListener("click", () => {
+    section.dataset.enabled = "true";
+    toggle.hidden = true;
+    preview.hidden = true;
+    field.hidden = false;
+    done.hidden = false;
+    update();
+    input.focus();
+  });
+  done.addEventListener("click", () => {
+    update();
+    field.hidden = true;
+    done.hidden = true;
+    preview.hidden = false;
+    toggle.hidden = false;
+    toggle.textContent = "Edit code suggestion";
+    toggle.focus();
+  });
+  input.addEventListener("input", () => { input.dataset.edited = "true"; update(); });
+  input.addEventListener("scroll", () => { gutter.scrollTop = input.scrollTop; });
+  input.addEventListener("keydown", event => {
+    if (event.key !== "Tab") return;
+    event.preventDefault();
+    input.setRangeText("  ", input.selectionStart, input.selectionEnd, "end");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  section.dataset.enabled = String(replacement !== undefined);
+  section.append(toggle, field, done, preview);
+  update();
+  return { section, input, setSource(source, start) {
+    currentSource = source;
+    lineNumber = start;
+    if (!input.dataset.edited) input.value = source;
+    update();
+  } };
+}
+
+function getReviewRangeSource(file, start, end) {
+  return Array.from(file.querySelectorAll(".diff-line[data-new-line]"))
+    .filter(line => Number(line.dataset.newLine) >= start && Number(line.dataset.newLine) <= end)
+    .map(line => line.querySelector(".line-content")?.textContent || "").join("\n");
 }
 
 function createInlineFindingButton(action, text) {
@@ -619,6 +742,16 @@ function updateInlineFindingActions(issue) {
     disabled: actionPending,
     text: pendingAction === "skip" ? "Skipping..." : "Skip Finding",
   });
+  for (const rating of ["up", "down"]) {
+    const button = finding.querySelector(`[data-review-inline-action="feedback-${rating}"]`);
+    if (button) {
+      button.disabled = actionPending;
+      button.setAttribute("aria-pressed", String(issue.feedback?.rating === rating));
+    }
+  }
+  const feedbackStatus = finding.querySelector(".patch-review-feedback-status");
+  if (feedbackStatus) feedbackStatus.textContent = issue.feedback?.rating
+    ? `Saved thumbs ${issue.feedback.rating}.` : "No rating yet.";
 }
 
 function createInlineFinding(issue, {
@@ -667,31 +800,10 @@ function createInlineFinding(issue, {
   finding.append(commentLabel);
 
   if (issue.codeSuggestion || issue.isDeletion) {
-    const suggestionLabel = document.createElement("label");
-    const suggestionInput = document.createElement("textarea");
-    const suggestionDiff = document.createElement("section");
-    const suggestionHeading = document.createElement("h4");
-
-    suggestionLabel.className = "patch-review-inline-field";
-    suggestionLabel.append("Suggested code replacement");
-    suggestionInput.className = "patch-review-inline-suggestion-input";
-    suggestionInput.rows = 4;
-    suggestionInput.spellcheck = false;
-    suggestionInput.value = issue.codeSuggestion;
-    suggestionLabel.append(suggestionInput);
-    suggestionDiff.className = "patch-review-inline-suggested-diff";
-    suggestionHeading.textContent = "Suggested source update";
-    suggestionDiff.append(suggestionHeading);
-    const suggestionDiffContent = document.createElement("div");
-
-    suggestionDiffContent.className = "patch-review-inline-suggested-diff-content";
-    suggestionDiff.append(suggestionDiffContent);
-    renderSuggestedSourceDiff(suggestionDiffContent, {
-      currentSource,
-      lineNumber,
-      replacement: issue.codeSuggestion,
+    const suggestion = createSuggestionEditor({
+      currentSource, lineNumber, replacement: issue.codeSuggestion || "",
     });
-    finding.append(suggestionLabel, suggestionDiff);
+    finding.append(suggestion.section);
   }
 
   actions.className = "patch-review-inline-actions";
@@ -702,7 +814,56 @@ function createInlineFinding(issue, {
     createInlineFindingButton("skip", "Skip Finding"),
   );
   finding.append(actions);
+  finding.append(createFindingFeedback(issue));
   return finding;
+}
+
+function createFindingFeedback(issue) {
+  const feedback = document.createElement("div");
+  feedback.className = "patch-review-finding-feedback";
+  feedback.setAttribute("role", "group");
+  feedback.setAttribute("aria-label", "Rate this review finding");
+  const up = createInlineFindingButton("feedback-up", "👍 Useful finding");
+  const down = createInlineFindingButton("feedback-down", "👎 Poor finding");
+  up.setAttribute("aria-pressed", String(issue.feedback?.rating === "up"));
+  down.setAttribute("aria-pressed", String(issue.feedback?.rating === "down"));
+  const feedbackLabel = document.createElement("label");
+  feedbackLabel.textContent = "Reason (optional) ";
+  const reason = document.createElement("input");
+  reason.className = "patch-review-feedback-reason";
+  reason.maxLength = 2000;
+  reason.value = issue.feedback?.reason || "";
+  feedbackLabel.append(reason);
+  const feedbackStatus = document.createElement("span");
+  feedbackStatus.className = "patch-review-feedback-status";
+  feedbackStatus.setAttribute("role", "status");
+  feedbackStatus.textContent = issue.feedback?.rating ? `Saved thumbs ${issue.feedback.rating}.` : "No rating yet.";
+  feedback.append(up, down, feedbackLabel, feedbackStatus);
+  return feedback;
+}
+
+function appendEarlierFindingFeedback(currentIssue) {
+  const earlier = (session?.issues || []).filter(issue => issue.id !== currentIssue?.id &&
+    ["pending", "posted", "skipped"].includes(issue.state));
+  if (!earlier.length) return;
+  const section = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = `Rate earlier findings (${earlier.length})`;
+  section.append(summary);
+  for (const issue of earlier) {
+    const article = document.createElement("article");
+    article.className = "patch-review-inline-finding";
+    article.dataset.issueId = issue.id;
+    const title = document.createElement("h3");
+    title.textContent = issue.title || "Review finding";
+    const comment = document.createElement("p");
+    comment.textContent = issue.originalSuggestion?.comment
+      ? `Generated comment: ${issue.originalSuggestion.comment}`
+      : "This older session did not retain the original suggestion.";
+    article.append(title, comment, createFindingFeedback(issue));
+    section.append(article);
+  }
+  patchDiffContent.append(section);
 }
 
 function appendInlineFinding(row, issue) {
@@ -720,7 +881,8 @@ function appendInlineFinding(row, issue) {
   }
 
   const finding = createInlineFinding(issue, {
-    currentSource: row.querySelector(".line-content")?.textContent || "",
+    currentSource: getReviewRangeSource(row.closest(".pretty-file"), issue.lineNumber,
+      issue.lineNumber + (issue.lineLength || 1) - 1),
   });
 
   thread.firstElementChild.append(finding);
@@ -824,7 +986,23 @@ function enableAdditionalReviewComments() {
   }
 }
 
-function openAdditionalReviewComment(row, extend = false) {
+function highlightReviewRange(file, start, end) {
+  for (const line of file.querySelectorAll(".diff-line[data-new-line]")) {
+    const number = Number(line.dataset.newLine);
+    line.classList.toggle("patch-review-context-line", number >= start && number <= end);
+  }
+}
+
+function updateManualReviewRange(editor, file) {
+  const start = Number(editor.dataset.startLine);
+  const end = Number(editor.dataset.endLine);
+  editor.querySelector("h3").textContent = start === end
+    ? `Add comment on line ${start}` : `Add comment on lines ${start}–${end}`;
+  highlightReviewRange(file, start, end);
+  editor.reviewSuggestion.setSource(getReviewRangeSource(file, start, end), start);
+}
+
+function openAdditionalReviewComment(row, extend = false, endRow = row) {
   if (pendingAction || session.status !== "review" || getCurrentIssue()) return;
   const existing = patchDiffContent.querySelector(".patch-review-manual-comment");
   if (existing) {
@@ -834,11 +1012,7 @@ function openAdditionalReviewComment(row, extend = false) {
       existing.dataset.startLine = String(Math.min(first, last));
       existing.dataset.endLine = String(Math.max(first, last));
       existing.querySelector("h3").textContent = `Add comment on lines ${existing.dataset.startLine}–${existing.dataset.endLine}`;
-      for (const line of row.closest(".pretty-file").querySelectorAll(".diff-line")) {
-        const selected = Number(line.dataset.newLine) >= Number(existing.dataset.startLine) &&
-          Number(line.dataset.newLine) <= Number(existing.dataset.endLine);
-        line.classList.toggle("patch-review-context-line", selected);
-      }
+      updateManualReviewRange(existing, row.closest(".pretty-file"));
     }
     return;
   }
@@ -846,8 +1020,8 @@ function openAdditionalReviewComment(row, extend = false) {
   editor.className = "patch-review-manual-comment patch-review-inline-finding";
   editor.dataset.filePath = row.closest(".pretty-file").dataset.filePath;
   editor.dataset.firstLine = row.dataset.newLine;
-  editor.dataset.startLine = row.dataset.newLine;
-  editor.dataset.endLine = row.dataset.newLine;
+  editor.dataset.startLine = String(Math.min(Number(row.dataset.newLine), Number(endRow.dataset.newLine)));
+  editor.dataset.endLine = String(Math.max(Number(row.dataset.newLine), Number(endRow.dataset.newLine)));
   const heading = document.createElement("h3");
   heading.textContent = `Add comment on line ${row.dataset.newLine}`;
   const commentLabel = document.createElement("label");
@@ -855,14 +1029,14 @@ function openAdditionalReviewComment(row, extend = false) {
   commentLabel.append("Comment");
   const comment = document.createElement("textarea");
   comment.rows = 4;
+  comment.className = "patch-review-inline-comment-input";
   commentLabel.append(comment);
-  const replacementLabel = document.createElement("label");
-  replacementLabel.className = "patch-review-inline-field";
-  replacementLabel.append("Code replacement (optional)");
-  const replacement = document.createElement("textarea");
-  replacement.rows = 4;
-  replacement.spellcheck = false;
-  replacementLabel.append(replacement);
+  const suggestion = createSuggestionEditor({
+    currentSource: getReviewRangeSource(row.closest(".pretty-file"), Number(editor.dataset.startLine), Number(editor.dataset.endLine)),
+    lineNumber: Number(editor.dataset.startLine), label: "Code replacement (optional)",
+  });
+  editor.reviewSuggestion = suggestion;
+  const replacement = suggestion.input;
   const save = document.createElement("button");
   save.type = "button";
   save.textContent = "Save Additional Inline Draft";
@@ -872,9 +1046,9 @@ function openAdditionalReviewComment(row, extend = false) {
     save.disabled = true;
     await runAction("inline", {
       anchor: { filePath: editor.dataset.filePath, lineNumber: Number(editor.dataset.startLine), lineLength: Number(editor.dataset.endLine) - Number(editor.dataset.startLine) + 1 },
-      kind: replacement.value ? "suggestion" : "comment",
+      kind: suggestion.section.dataset.enabled === "true" && replacement.value ? "suggestion" : "comment",
       message: comment.value,
-      codeSuggestion: replacement.value,
+      codeSuggestion: suggestion.section.dataset.enabled === "true" ? replacement.value : "",
     });
     if (editor.isConnected) save.disabled = false;
   });
@@ -887,8 +1061,11 @@ function openAdditionalReviewComment(row, extend = false) {
     renderSession(session);
   });
   const help = document.createElement("p");
-  help.textContent = "Shift-click another line to select a range for this comment or replacement.";
-  editor.append(heading, help, commentLabel, replacementLabel, save, cancel);
+  help.textContent = "Drag across lines or Shift-click another line to select a range.";
+  const actions = document.createElement("div");
+  actions.className = "patch-review-inline-actions";
+  actions.append(save, cancel);
+  editor.append(heading, help, commentLabel, suggestion.section, actions);
   let thread = row.nextElementSibling;
   if (!thread?.classList.contains("review-inline-thread")) {
     thread = document.createElement("tr");
@@ -900,7 +1077,7 @@ function openAdditionalReviewComment(row, extend = false) {
   }
   thread.firstElementChild.append(editor);
   row.closest(".diff-table").classList.add("has-review-comments");
-  row.classList.add("patch-review-context-line");
+  updateManualReviewRange(editor, row.closest(".pretty-file"));
   finalButtons?.forEach(button => { button.disabled = true; });
   comment.focus();
 }
@@ -962,6 +1139,7 @@ function setPatchDiff(issue) {
   patchDiffContent.innerHTML = reviewContext.rawPatchHtml;
   appendExistingInlineComments();
   appendCurrentIssue(issue);
+  appendEarlierFindingFeedback(issue);
   appendReviewCheckoutDiff();
   enableAdditionalReviewComments();
   renderDiscussion(reviewContext.reviewDiscussion);
@@ -1060,6 +1238,7 @@ function getActionStatus() {
     cancel: "Cancelling Review checkout pull...",
     inline: "Saving inline comment draft...",
     skip: "Skipping review finding...",
+    feedback: "Saving finding feedback...",
     steer: "Sending guidance to Codex...",
     submit: "Posting the Phabricator review...",
   };
@@ -1084,6 +1263,15 @@ function renderSession(value) {
   const issue = getCurrentIssue();
   const completeReview = session.aiEnabled && session.status === "review" && !issue;
   const actionPending = Boolean(pendingAction);
+  applyConflictSection.hidden = !session.applyConflict || session.status !== "paused";
+  if (rebaseRequestInput.dataset.sessionId !== session.id || session.applyConflict && !rebaseRequestInput.value) {
+    rebaseRequestInput.dataset.sessionId = session.id;
+    rebaseRequestInput.value = session.rebaseRequestMessage || "";
+  }
+  resolveApplyConflict.disabled = actionPending;
+  applySinglePatch.disabled = actionPending || Boolean(session.rebaseConflict);
+  singlePatchNotice.hidden = !session.singlePatchOnly;
+  requestRebase.disabled = actionPending;
   const visibleOutput = getPatchReviewOutput(session);
   const hasOutput = Boolean(visibleOutput);
 
@@ -1097,9 +1285,13 @@ function renderSession(value) {
   }
 
   title.textContent = `${session.revision} review`;
+  if (session.commitTitle) setDialogCommitTitle(title, session.commitTitle);
   renderReviewLinks(session);
-  setLiveText(status, getActionStatus() || actionError || session.error || session.message || "");
-  status.classList.toggle("error", Boolean(actionError) || session.status === "error");
+  const separateActionError = Boolean(session.error && actionError);
+  setLiveText(status, getActionStatus() || session.error || actionError || session.message || "");
+  status.classList.toggle("error", session.status === "error" || Boolean(actionError && !session.error));
+  actionNotice.hidden = !separateActionError;
+  setLiveText(actionNotice, separateActionError ? `The request was not accepted: ${actionError}` : "");
   setLiveText(output, visibleOutput);
   output.hidden = !outputVisible || !hasOutput;
   outputToggle.hidden = !hasOutput;
@@ -1115,10 +1307,11 @@ function renderSession(value) {
   setPatchDiff(issue);
   renderCoverage(session.coverage);
   if (completeReview && finalSection.hidden) coverage.open = true;
-  updateInlineFindingActions(issue);
+  for (const finding of session.issues || []) updateInlineFindingActions(finding);
 
   const canSteer = session.aiEnabled && (
     session.status === "review" ||
+    (session.status === "error" && session.canRetry) ||
     (session.status === "reviewing" && Boolean(session.codexTurnId))
   );
 
@@ -1127,7 +1320,7 @@ function renderSession(value) {
   }
   if (steerSubmit) {
     steerSubmit.disabled = actionPending || !steerInput?.value.trim();
-    steerSubmit.textContent = pendingAction === "steer" ? "Sending..." : "Send";
+    steerSubmit.textContent = pendingAction === "steer" ? "Sending..." : session.status === "error" ? "Resume" : "Send";
   }
 
   finalSection.hidden = !completeReview;
@@ -1220,7 +1413,7 @@ async function runAction(action, body = {}) {
       steerInput.value = "";
     }
     renderSession(result);
-    if (action === "submit" && result.status === "complete") await closePatchReview();
+    if (["submit", "request-rebase"].includes(action) && result.status === "complete") await closePatchReview();
     if (isBusy(result)) {
       schedulePoll();
     }
@@ -1266,6 +1459,7 @@ function resetPatchReviewDialog(patch) {
   expandedActivityCommandIds.clear();
   window.clearTimeout(pollTimer);
   title.textContent = `${patch.id} review`;
+  setDialogCommitTitle(title, patch.title);
   renderReviewLinks(patch, true);
   status.classList.remove("error");
   status.textContent = "Preparing review...";
@@ -1372,8 +1566,9 @@ export function initializePatchReviewDialog() {
     void closePatchReview();
   });
   dialog.addEventListener("close", () => {
+    if (dialog.open) return;
     window.clearTimeout(pollTimer);
-    if (!dialog.open) setPageScrollLocked(false);
+    setPageScrollLocked(false);
   });
   activityList?.addEventListener("scroll", updateActivityFollowState);
   activityFilters?.forEach((button) => {
@@ -1416,25 +1611,82 @@ export function initializePatchReviewDialog() {
     }
     updateInlineFindingActions(issue);
   });
+  let lineDrag = null;
+  let suppressLineClickUntil = 0;
+  patchDiffContent?.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || event.pointerType === "touch" || pendingAction) return;
+    const button = event.target.closest("[data-review-add-comment]");
+    if (!button && event.target.closest("button, a, textarea, input, label")) return;
+    const row = event.target.closest(".diff-line[data-new-line]");
+    if (!row?.querySelector("[data-review-add-comment]")) return;
+    const file = row.closest(".pretty-file");
+    const existing = patchDiffContent.querySelector(".patch-review-manual-comment");
+    if (existing && existing.dataset.filePath !== file.dataset.filePath) return;
+    lineDrag = { row, last: row, file, pointerId: event.pointerId, extend: event.shiftKey, gutter: Boolean(button) };
+    patchDiffContent.setPointerCapture(event.pointerId);
+    if (button) event.preventDefault();
+  });
+  patchDiffContent?.addEventListener("pointermove", event => {
+    if (!lineDrag || event.pointerId !== lineDrag.pointerId) return;
+    const row = document.elementFromPoint(event.clientX, event.clientY)?.closest(".diff-line[data-new-line]");
+    if (!row?.querySelector("[data-review-add-comment]") || row.closest(".pretty-file") !== lineDrag.file) return;
+    lineDrag.last = row;
+    highlightReviewRange(lineDrag.file,
+      Math.min(Number(lineDrag.row.dataset.newLine), Number(row.dataset.newLine)),
+      Math.max(Number(lineDrag.row.dataset.newLine), Number(row.dataset.newLine)));
+  });
+  patchDiffContent?.addEventListener("pointerup", event => {
+    if (!lineDrag || event.pointerId !== lineDrag.pointerId) return;
+    const { row, last, file, extend, gutter } = lineDrag;
+    lineDrag = null;
+    patchDiffContent.releasePointerCapture(event.pointerId);
+    if (!gutter && row === last && hasSelectedText(patchDiffContent)) return;
+    if (row !== last) window.getSelection()?.removeAllRanges();
+    suppressLineClickUntil = performance.now() + 200;
+    const existing = patchDiffContent.querySelector(".patch-review-manual-comment");
+    if (existing && row !== last) {
+      const first = extend ? Number(existing.dataset.firstLine) : Number(row.dataset.newLine);
+      existing.dataset.firstLine = String(first);
+      existing.dataset.startLine = String(Math.min(first, Number(last.dataset.newLine)));
+      existing.dataset.endLine = String(Math.max(first, Number(last.dataset.newLine)));
+      updateManualReviewRange(existing, file);
+    } else {
+      openAdditionalReviewComment(row, extend, last);
+    }
+  });
+  patchDiffContent?.addEventListener("pointercancel", () => {
+    lineDrag = null;
+    patchDiffContent.querySelectorAll(".patch-review-context-line").forEach(line => line.classList.remove("patch-review-context-line"));
+    const existing = patchDiffContent.querySelector(".patch-review-manual-comment");
+    if (existing) updateManualReviewRange(existing, Array.from(patchDiffContent.querySelectorAll(".pretty-file"))
+      .find(file => file.dataset.filePath === existing.dataset.filePath));
+  });
   patchDiffContent?.addEventListener("click", (event) => {
     const lineButton = event.target.closest("[data-review-add-comment]");
     const row = event.target.closest(".diff-line[data-new-line]");
+    if (row && event.detail > 0 && performance.now() < suppressLineClickUntil) return;
     if (lineButton || (row && !event.target.closest("button, a") && !hasSelectedText(patchDiffContent))) {
       if (row?.querySelector("[data-review-add-comment]")) openAdditionalReviewComment(row, event.shiftKey);
       return;
     }
     const button = event.target.closest("[data-review-inline-action]");
-    const issue = getCurrentIssue();
+    const issue = session?.issues?.find(issue => issue.id === button?.closest(".patch-review-inline-finding")?.dataset.issueId);
 
     if (!button || !issue || button.closest(".patch-review-inline-finding")?.dataset.issueId !== issue.id) {
       return;
     }
 
     const finding = button.closest(".patch-review-inline-finding");
+    if (!button.dataset.reviewInlineAction.startsWith("feedback-") && issue.id !== getCurrentIssue()?.id) return;
     const commentInput = finding?.querySelector(".patch-review-inline-comment-input");
     const suggestionInput = finding?.querySelector(".patch-review-inline-suggestion-input");
 
-    if (button.dataset.reviewInlineAction === "apply") {
+    if (button.dataset.reviewInlineAction.startsWith("feedback-")) {
+      const rating = button.dataset.reviewInlineAction.slice("feedback-".length);
+      void runAction("feedback", { itemId: issue.id,
+        rating: issue.feedback?.rating === rating ? "" : rating,
+        reason: finding.querySelector(".patch-review-feedback-reason")?.value || "" });
+    } else if (button.dataset.reviewInlineAction === "apply") {
       void runAction("apply", { itemId: issue.id });
     } else if (button.dataset.reviewInlineAction === "inline-comment") {
       void runAction("inline", {

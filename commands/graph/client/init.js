@@ -171,7 +171,7 @@ import {
   updateInteractiveRebaseRange,
 } from "./interactive-rebase-dialog.js";
 import { handleDiffContextClick } from "./diff-context.js";
-import { markBugForCheckin } from "./diff-viewer.js";
+import { handleDiffFileClick, handleDiffLineContextMenu, hideDiffLineMenu, markBugForCheckin } from "./diff-viewer.js";
 import { hideCommitContextMenu } from "./lane-renderer.js";
 import { clearConsoleRoute, getConsoleRoute } from "./view-router.js";
 
@@ -378,6 +378,10 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (handleDiffFileClick(event)) {
+    return;
+  }
+
   if (handleDiffContextClick(event)) {
     return;
   }
@@ -575,7 +579,7 @@ uiState.loadObserver = INTERACTIVE.enabled
     })
   : null;
 
-export function trackScrollDirection() {
+export function trackScrollDirection(event) {
   if (!INTERACTIVE.enabled) {
     return;
   }
@@ -592,11 +596,16 @@ export function trackScrollDirection() {
 
   const state = graphStates[index];
 
-  if (window.scrollY > state.lastScrollY) {
+  const pane = activePanel.querySelector(".graph");
+  const paneScroll = event?.target === pane;
+  const position = paneScroll ? pane.scrollTop : window.scrollY;
+  const previous = paneScroll ? state.lastGraphScrollTop || 0 : state.lastScrollY;
+  if (position > previous) {
     state.scrolledTowardBottom = true;
   }
 
-  state.lastScrollY = window.scrollY;
+  if (paneScroll) state.lastGraphScrollTop = position;
+  else state.lastScrollY = position;
 }
 
 export function renderGraph(index) {
@@ -837,6 +846,9 @@ document.querySelectorAll(".pane-resizer").forEach((resizer) => {
 });
 
 window.addEventListener("scroll", trackScrollDirection, { passive: true });
+for (const pane of document.querySelectorAll(".graph")) {
+  pane.addEventListener("scroll", trackScrollDirection, { passive: true });
+}
 window.addEventListener("tb-phab-authenticated", () => {
   graphStates.forEach((state, index) => {
     const commit = state.commits.find((item) => item.hash === state.selectedHash);
@@ -928,7 +940,7 @@ if (INTERACTIVE.enabled) {
   }
 
   function showServerStopped(reason = "") {
-    document.title = "Thunderbird Desktop Console stopped";
+    document.title = "Thunderbird Development Dashboard stopped";
     document.body.classList.add("server-stopped");
     document.body.replaceChildren();
 
@@ -936,7 +948,7 @@ if (INTERACTIVE.enabled) {
     const title = document.createElement("h1");
     const detail = document.createElement("p");
 
-    title.textContent = "Thunderbird Desktop Console stopped";
+    title.textContent = "Thunderbird Development Dashboard stopped";
     detail.textContent = reason || "The local console server has shut down.";
     message.className = "server-stopped-message";
     message.append(title, detail);
@@ -1004,3 +1016,23 @@ renderGraph(0);
 
 initializeBackgroundJobs();
 initializeDesktopBrowserTabs();
+
+const consoleHeader = document.querySelector("body > header");
+if (consoleHeader) {
+  new ResizeObserver(() => {
+    document.documentElement.style.setProperty(
+      "--console-header-height",
+      `${Math.ceil(consoleHeader.getBoundingClientRect().height)}px`,
+    );
+  }).observe(consoleHeader);
+}
+
+document.addEventListener("contextmenu", handleDiffLineContextMenu);
+document.addEventListener("pointerdown", event => {
+  if (!event.target.closest(".diff-line-menu")) hideDiffLineMenu();
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") hideDiffLineMenu();
+});
+document.addEventListener("scroll", hideDiffLineMenu, true);
+window.addEventListener("resize", hideDiffLineMenu);

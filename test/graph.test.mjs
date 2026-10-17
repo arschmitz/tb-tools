@@ -89,6 +89,7 @@ import {
 import { createConsoleCommand } from "../commands/console.mjs";
 import {
   formatPrettyDiffHtml,
+  formatDiffFileSummaryHtml,
   splitPrettyDiffFiles,
 } from "../commands/graph/diff-renderer.mjs";
 import { expandDiffContext } from "../commands/graph/client/diff-context.js";
@@ -1717,7 +1718,9 @@ test("truncateDiff caps embedded diff size", () => {
         "+new",
         "+extra",
       ].join("\n"),
-      html: formatPrettyDiffHtml(
+      html: formatDiffFileSummaryHtml([
+        "diff --git a/file.txt b/file.txt", "@@ -1,2 +1,3 @@", " unchanged", "-old", "+new", "+extra",
+      ].join("\n")) + formatPrettyDiffHtml(
         [
           "diff --git a/file.txt b/file.txt",
           "@@ -1,2 +1,3 @@",
@@ -1857,7 +1860,7 @@ test("runGraphMachActionSession keeps run active when mach exits but the process
   assert.equal(session.message, "Thunderbird running.");
   assert.equal(session.childPid, 4321);
   assert.deepEqual(killChecks, [[-4321, 0]]);
-  assert.match(session.output, /\$ \.\.\/mach build/);
+  assert.match(session.output, /\$ \.\/mach build/);
   assert.match(session.output, /\$ \.\.\/mach run/);
 });
 
@@ -8866,344 +8869,69 @@ test("getGraphOriginMainStatus compares local origin main with remote origin mai
   );
 });
 
-test("getGraphRustUpstreamStatus uses the working clone pair when review clones are present", async () => {
+function rustStatusFixture() {
+  const files = { "Cargo.toml": "workspace", "toolkit/library/rust/shared/Cargo.toml": "gkrust",
+    "build/workspace-hack/Cargo.toml": "hack", "Cargo.lock": "lock" };
+  const keys = ["mc_workspace_toml", "mc_gkrust_toml", "mc_hack_toml", "mc_cargo_lock"];
+  const checksums = Object.fromEntries(Object.values(files).map((content, index) =>
+    [keys[index], createHash("sha512").update(content).digest("hex")]));
   const calls = [];
-  const removed = [];
-  const tempDir = path.join(os.tmpdir(), "rust-upstream-check");
-  const remoteFiles = {
-    "Cargo.toml": "workspace\n",
-    "toolkit/library/rust/shared/Cargo.toml": "gkrust\n",
-    "build/workspace-hack/Cargo.toml": "hack\n",
-    "Cargo.lock": "remote lock\n",
+  const revisions = { comm: "c".repeat(40), firefox: "f".repeat(40) };
+  let fail = false;
+  const runCommand = async command => {
+    calls.push(command);
+    const [action, arg] = command.args;
+    if (action === "rev-parse") return command.cwd === "/repo/comm" ? revisions.comm : revisions.firefox;
+    if (action === "show" && fail) throw new Error("Missing local Git object");
+    if (action === "show" && command.cwd === "/repo/comm") return JSON.stringify(checksums);
+    if (action === "show" && command.cwd === "/repo/firefox") return files[arg.slice(arg.indexOf(":") + 1)];
+    throw new Error(`Rust status must not run this command: ${action}`);
   };
-  const checksumData = {
-    mc_workspace_toml: createHash("sha512")
-      .update(remoteFiles["Cargo.toml"])
-      .digest("hex"),
-    mc_gkrust_toml: createHash("sha512")
-      .update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"])
-      .digest("hex"),
-    mc_hack_toml: createHash("sha512")
-      .update(remoteFiles["build/workspace-hack/Cargo.toml"])
-      .digest("hex"),
-    mc_cargo_lock: createHash("sha512").update("old lock\n").digest("hex"),
-  };
+  const graphs = [{ checkout: "working", repository: "comm", path: "/repo/comm" },
+    { checkout: "working", repository: "firefox", path: "/repo/firefox" },
+    { checkout: "review", repository: "comm", path: "/review/comm" },
+    { checkout: "review", repository: "firefox", path: "/review/firefox" }];
+  const status = () => getGraphRustUpstreamStatus({ graphs, runCommand,
+    fetchImpl: async () => assert.fail("Rust status must not make HTTP requests") });
+  return { calls, revisions, checksums, files, status, setFail: value => { fail = value; } };
+}
 
-  const result = await getGraphRustUpstreamStatus({
-    graphs: [
-      {
-        id: "working-comm",
-        checkout: "working",
-        repository: "comm",
-        label: "Working comm",
-        path: "/repo/comm",
-      },
-      {
-        id: "working-firefox",
-        checkout: "working",
-        repository: "firefox",
-        label: "Working firefox",
-        path: "/repo/firefox",
-      },
-      {
-        id: "review-comm",
-        checkout: "review",
-        repository: "comm",
-        label: "Review comm",
-        path: "/repo/review/comm",
-      },
-      {
-        id: "review-firefox",
-        checkout: "review",
-        repository: "firefox",
-        label: "Review firefox",
-        path: "/repo/review",
-      },
-    ],
-    makeTempDir: async (prefix) => {
-      assert.match(prefix, /tb-tools-rust-upstream-/);
-      return tempDir;
-    },
-    removeDir: async (dir, options) => {
-      removed.push([dir, options]);
-    },
-    runCommand: async (command) => {
-      calls.push(command);
+test("getGraphRustUpstreamStatus reads fetched working revisions without network access", async () => {
+  const f = rustStatusFixture();
+  const result = await f.status();
+  assert.equal(result.upToDate, true);
+  assert.equal(result.firefoxRemoteHash, f.revisions.firefox);
+  assert.match(result.message, /fetched Firefox main/);
+  assert.ok(f.calls.every(command => ["rev-parse", "show"].includes(command.args[0])));
+  assert.ok(f.calls.every(command => command.cwd.startsWith("/repo/")));
+  assert.ok(f.calls.filter(command => command.args[0] === "show").every(command =>
+    /^[a-f0-9]{40}:/.test(command.args[1])));
+});
 
-      if (command.cwd === "/repo/comm" && command.args[0] === "rev-parse") {
-        return "cccccccccccccccccccccccccccccccccccccccc\n";
-      }
-
-      if (command.cwd === "/repo/comm" && command.args[0] === "show") {
-        return JSON.stringify(checksumData);
-      }
-
-      if (command.cwd === "/repo/firefox" && command.args[0] === "ls-remote") {
-        return "ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n";
-      }
-
-      if (
-        command.cwd === "/repo/firefox" &&
-        command.args.join(" ") === "remote get-url origin"
-      ) {
-        return "git@example.com:firefox.git\n";
-      }
-
-      if (command.cwd === tempDir && command.args[0] === "init") {
-        return "";
-      }
-
-      if (command.cwd === tempDir && command.args[0] === "fetch") {
-        return "";
-      }
-
-      if (command.cwd === tempDir && command.args[0] === "show") {
-        return remoteFiles[command.args[1].replace(/^FETCH_HEAD:/, "")];
-      }
-
-      throw new Error(`Unexpected command: ${JSON.stringify(command)}`);
-    },
-  });
-
-  assert.equal(result.type, "rust-upstream");
-  assert.equal(result.label, "rust");
-  assert.equal(result.state, "warning");
+test("getGraphRustUpstreamStatus reuses unchanged revisions and detects either revision changing", async () => {
+  const f = rustStatusFixture();
+  await f.status();
+  const shows = () => f.calls.filter(command => command.args[0] === "show").length;
+  assert.equal(shows(), 5);
+  await Promise.all([f.status(), f.status(), f.status()]);
+  assert.equal(shows(), 5);
+  f.revisions.firefox = "e".repeat(40);
+  await Promise.all([f.status(), f.status()]);
+  assert.equal(shows(), 10);
+  f.revisions.comm = "d".repeat(40);
+  f.checksums.mc_cargo_lock = createHash("sha512").update("old lock").digest("hex");
+  const result = await f.status();
+  assert.equal(shows(), 15);
   assert.equal(result.upToDate, false);
-  assert.equal(
-    result.commLocalHash,
-    "cccccccccccccccccccccccccccccccccccccccc",
-  );
-  assert.equal(
-    result.firefoxRemoteHash,
-    "ffffffffffffffffffffffffffffffffffffffff",
-  );
-  assert.deepEqual(
-    result.mismatches.map((item) => item.file),
-    ["Cargo.lock"],
-  );
-  assert.deepEqual(removed, [[tempDir, { recursive: true, force: true }]]);
-  assert.deepEqual(
-    calls.map((call) => [call.cwd, call.args]),
-    [
-      ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-      ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
-      ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
-      ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-      ["/repo/firefox", ["remote", "get-url", "origin"]],
-      [tempDir, ["init"]],
-      [
-        tempDir,
-        [
-          "fetch",
-          "--depth=1",
-          "--no-tags",
-          "git@example.com:firefox.git",
-          "ffffffffffffffffffffffffffffffffffffffff",
-        ],
-      ],
-      [tempDir, ["show", "FETCH_HEAD:Cargo.toml"]],
-      [tempDir, ["show", "FETCH_HEAD:toolkit/library/rust/shared/Cargo.toml"]],
-      [tempDir, ["show", "FETCH_HEAD:build/workspace-hack/Cargo.toml"]],
-      [tempDir, ["show", "FETCH_HEAD:Cargo.lock"]],
-    ],
-  );
-  const fallbackFetch = calls.find(
-    (call) => call.cwd === tempDir && call.args[0] === "fetch",
-  );
-
-  assert.equal(fallbackFetch.timeoutMs, 30_000);
-  assert.equal(fallbackFetch.killProcessGroup, true);
+  assert.deepEqual(result.mismatches.map(item => item.file), ["Cargo.lock"]);
 });
 
-test("getGraphRustUpstreamStatus reads GitHub raw files instead of shallow-fetching Firefox", async () => {
-  const calls = [];
-  const fetchedUrls = [];
-  const remoteFiles = {
-    "Cargo.toml": "workspace\n",
-    "toolkit/library/rust/shared/Cargo.toml": "gkrust\n",
-    "build/workspace-hack/Cargo.toml": "hack\n",
-    "Cargo.lock": "remote lock\n",
-  };
-  const checksumData = {
-    mc_workspace_toml: createHash("sha512")
-      .update(remoteFiles["Cargo.toml"])
-      .digest("hex"),
-    mc_gkrust_toml: createHash("sha512")
-      .update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"])
-      .digest("hex"),
-    mc_hack_toml: createHash("sha512")
-      .update(remoteFiles["build/workspace-hack/Cargo.toml"])
-      .digest("hex"),
-    mc_cargo_lock: createHash("sha512")
-      .update(remoteFiles["Cargo.lock"])
-      .digest("hex"),
-  };
-
-  const result = await getGraphRustUpstreamStatus({
-    graphs: [
-      { label: "comm", path: "/repo/comm" },
-      { label: "firefox", path: "/repo/firefox" },
-    ],
-    makeTempDir: async () => {
-      throw new Error("GitHub raw checks should not create a temp Git repo.");
-    },
-    fetchImpl: async (url) => {
-      fetchedUrls.push(url);
-      const file = new URL(url).pathname
-        .split("/")
-        .slice(4)
-        .map(decodeURIComponent)
-        .join("/");
-
-      return {
-        ok: true,
-        status: 200,
-        statusText: "OK",
-        text: async () => remoteFiles[file],
-      };
-    },
-    runCommand: async (command) => {
-      calls.push(command);
-
-      if (command.cwd === "/repo/comm" && command.args[0] === "rev-parse") {
-        return "cccccccccccccccccccccccccccccccccccccccc\n";
-      }
-
-      if (command.cwd === "/repo/comm" && command.args[0] === "show") {
-        return JSON.stringify(checksumData);
-      }
-
-      if (command.cwd === "/repo/firefox" && command.args[0] === "ls-remote") {
-        return "ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n";
-      }
-
-      if (
-        command.cwd === "/repo/firefox" &&
-        command.args.join(" ") === "remote get-url origin"
-      ) {
-        return "git@github.com:mozilla-firefox/firefox.git\n";
-      }
-
-      if (command.cwd === "/repo/firefox" && command.args[0] === "rev-parse") {
-        return "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n";
-      }
-
-      throw new Error(`Unexpected command: ${JSON.stringify(command)}`);
-    },
-  });
-
-  assert.equal(result.type, "rust-upstream");
-  assert.equal(result.state, "current");
-  assert.equal(result.upToDate, true);
-  assert.deepEqual(result.mismatches, []);
-  assert.deepEqual(
-    fetchedUrls.sort(),
-    [
-      "https://raw.githubusercontent.com/mozilla-firefox/firefox/ffffffffffffffffffffffffffffffffffffffff/Cargo.lock",
-      "https://raw.githubusercontent.com/mozilla-firefox/firefox/ffffffffffffffffffffffffffffffffffffffff/Cargo.toml",
-      "https://raw.githubusercontent.com/mozilla-firefox/firefox/ffffffffffffffffffffffffffffffffffffffff/build/workspace-hack/Cargo.toml",
-      "https://raw.githubusercontent.com/mozilla-firefox/firefox/ffffffffffffffffffffffffffffffffffffffff/toolkit/library/rust/shared/Cargo.toml",
-    ].sort(),
-  );
-  assert.deepEqual(
-    calls.map((call) => [call.cwd, call.args]),
-    [
-      ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-      ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
-      ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
-      ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-      ["/repo/firefox", ["remote", "get-url", "origin"]],
-    ],
-  );
-});
-
-test("getGraphRustUpstreamStatus reads local Firefox origin main when it already matches remote", async () => {
-  const calls = [];
-  const remoteFiles = {
-    "Cargo.toml": "workspace\n",
-    "toolkit/library/rust/shared/Cargo.toml": "gkrust\n",
-    "build/workspace-hack/Cargo.toml": "hack\n",
-    "Cargo.lock": "remote lock\n",
-  };
-  const checksumData = {
-    mc_workspace_toml: createHash("sha512")
-      .update(remoteFiles["Cargo.toml"])
-      .digest("hex"),
-    mc_gkrust_toml: createHash("sha512")
-      .update(remoteFiles["toolkit/library/rust/shared/Cargo.toml"])
-      .digest("hex"),
-    mc_hack_toml: createHash("sha512")
-      .update(remoteFiles["build/workspace-hack/Cargo.toml"])
-      .digest("hex"),
-    mc_cargo_lock: createHash("sha512")
-      .update(remoteFiles["Cargo.lock"])
-      .digest("hex"),
-  };
-
-  const result = await getGraphRustUpstreamStatus({
-    graphs: [
-      { label: "comm", path: "/repo/comm" },
-      { label: "firefox", path: "/repo/firefox" },
-    ],
-    makeTempDir: async () => {
-      throw new Error(
-        "Temp fetch should not run when local Firefox origin/main is current.",
-      );
-    },
-    runCommand: async (command) => {
-      calls.push(command);
-
-      if (command.cwd === "/repo/comm" && command.args[0] === "rev-parse") {
-        return "cccccccccccccccccccccccccccccccccccccccc\n";
-      }
-
-      if (command.cwd === "/repo/comm" && command.args[0] === "show") {
-        return JSON.stringify(checksumData);
-      }
-
-      if (command.cwd === "/repo/firefox" && command.args[0] === "ls-remote") {
-        return "ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n";
-      }
-
-      if (command.cwd === "/repo/firefox" && command.args[0] === "rev-parse") {
-        return "ffffffffffffffffffffffffffffffffffffffff\n";
-      }
-
-      if (command.cwd === "/repo/firefox" && command.args[0] === "show") {
-        return remoteFiles[
-          command.args[1].replace(/^refs\/remotes\/origin\/main:/, "")
-        ];
-      }
-
-      throw new Error(`Unexpected command: ${JSON.stringify(command)}`);
-    },
-  });
-
-  assert.equal(result.state, "current");
-  assert.equal(result.upToDate, true);
-  assert.deepEqual(result.mismatches, []);
-  assert.deepEqual(
-    calls.map((call) => [call.cwd, call.args]),
-    [
-      ["/repo/comm", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-      ["/repo/comm", ["show", "refs/remotes/origin/main:rust/checksums.json"]],
-      ["/repo/firefox", ["ls-remote", "--heads", "origin", "main"]],
-      ["/repo/firefox", ["rev-parse", "--verify", "refs/remotes/origin/main"]],
-      ["/repo/firefox", ["show", "refs/remotes/origin/main:Cargo.toml"]],
-      [
-        "/repo/firefox",
-        [
-          "show",
-          "refs/remotes/origin/main:toolkit/library/rust/shared/Cargo.toml",
-        ],
-      ],
-      [
-        "/repo/firefox",
-        ["show", "refs/remotes/origin/main:build/workspace-hack/Cargo.toml"],
-      ],
-      ["/repo/firefox", ["show", "refs/remotes/origin/main:Cargo.lock"]],
-    ],
-  );
+test("getGraphRustUpstreamStatus can retry missing local objects without a remote request", async () => {
+  const f = rustStatusFixture();
+  f.setFail(true);
+  await assert.rejects(f.status(), /Missing local Git object/);
+  f.setFail(false);
+  assert.equal((await f.status()).upToDate, true);
 });
 
 test("unshelfGraphShelves pops requested graph shelves", async () => {
@@ -10321,7 +10049,7 @@ test("buildGraphHtml creates tabbed lane graph HTML", () => {
   const client = readGraphClientScripts();
   const style = readGraphClientStylesheet();
 
-  assert.match(html, /Thunderbird Desktop Console/);
+  assert.match(html, /Thunderbird Development Dashboard/);
   assert.match(html, /id="graph-config"/);
   assert.match(html, /<link rel="stylesheet" href="graph-client\/style\.css">/);
   assert.match(
@@ -10871,7 +10599,7 @@ test("buildGraphHtml supports interactive loading and checkout callbacks", () =>
   assert.match(client, /const INTERACTIVE = /);
   assert.match(client, /originMainStatusRefreshQueued/);
   assert.match(client, /const checkout = uiState\.checkoutMode/);
-  assert.match(html, /<title>Thunderbird Desktop Console<\/title>/);
+  assert.match(html, /<title>Thunderbird Development Dashboard<\/title>/);
   assert.match(html, /<h1[^>]*><picture>.*alt="Thunderbird Development Dashboard".*<\/picture><\/h1>/);
   assert.match(
     html,
@@ -12682,6 +12410,83 @@ test("interactive graph submit checks out a selected local commit before submitt
   assert.equal(publishedResponse.status, 409);
   assert.match(publishedResult.error, /not already on origin\/main/i);
 });
+
+for (const scenario of [
+  { name: "creates a missing Bug branch", expectedBranch: "Bug-123456" },
+  { name: "uses an unused Bug branch suffix", existingBranches: ["Bug-123456", "Bug-123456_2"], expectedBranch: "Bug-123456_3" },
+  { name: "reuses a branch already at the patch", patchBranch: "Bug-123456", expectedBranch: "Bug-123456" },
+  { name: "rejects a dirty checkout", dirty: true, expectedError: /local changes/ },
+  { name: "rejects a patch without a Bug number", message: "Patch without a bug", expectedError: /No Bugzilla bug number/ },
+]) {
+  test(`interactive graph submit from a detached main checkout ${scenario.name}`, async (t) => {
+    const calls = [];
+    const hash = "abc123";
+    let branch = "";
+    let patchBranch = scenario.patchBranch || "";
+    const serverInfo = await startInteractiveGraphServer({
+      html: "<!doctype html><p>graph</p>",
+      token: "secret",
+      graphs: [{
+        label: "comm", path: "/repo/comm", checkout: "working", repository: "comm",
+        branch: "(detached)", commits: [{ hash, parents: [], refs: [], subject: "Bug 123456 - Patch" }],
+        commitCount: 1, diffs: {},
+      }],
+      runCommand: async (command) => {
+        calls.push(command);
+        const [action, ...args] = command.args || [];
+        if (action === "merge-base") throw new Error("not on origin/main");
+        if (action === "status") return scenario.dirty ? " M file.js\n" : "";
+        if (action === "rev-parse" && args[0] === "HEAD") return `${hash}\n`;
+        if (action === "branch" && args[0] === "--show-current") return `${branch}\n`;
+        if (action === "for-each-ref") {
+          return args.includes("--points-at") ? patchBranch : (scenario.existingBranches || []).join("\n");
+        }
+        if (action === "log" && args.includes("--format=%B")) {
+          return scenario.message || "Bug 123456 - Patch";
+        }
+        if (action === "branch") {
+          patchBranch = args[0];
+          return "";
+        }
+        if (action === "switch") {
+          branch = args[0] === "--detach" ? "" : args[0];
+          return "";
+        }
+        return "";
+      },
+    });
+    t.after(() => serverInfo.server.close());
+
+    const response = await fetch(new URL("api/submit", serverInfo.url), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret", graphIndex: 0, hash }),
+    });
+    const result = await response.json();
+    const branchCommands = calls.filter(command => command.args?.[0] === "branch" &&
+      command.args[1] !== "--show-current");
+
+    if (scenario.expectedError) {
+      assert.equal(response.ok, false, "Submit should reject a checkout that cannot receive a patch branch.");
+      assert.match(result.error, scenario.expectedError, "Submit should explain why branch preparation failed.");
+      assert.equal(branchCommands.length, 0, "Rejected Submit should not create a branch.");
+      assert.equal(branch, "", "Rejected Submit should leave HEAD detached.");
+      return;
+    }
+
+    assert.equal(response.ok, true, `Submit should prepare a named branch in the main checkout: ${result.error || ""}`);
+    assert.equal(typeof result.id, "string", "Submit should start its normal session after preparing the branch.");
+    assert.equal(branch, scenario.expectedBranch, "Submit should check out the expected Bug branch.");
+    assert.deepEqual(branchCommands.map(command => command.args), scenario.patchBranch ? [] :
+      [["branch", scenario.expectedBranch, hash]], "Submit should create only a missing branch without moving existing refs.");
+    assert.equal(calls.every(command => !command.args?.includes("worktree")), true,
+      "Submit should use the selected main checkout.");
+
+    await fetch(new URL(`api/submit/${result.id}/cancel`, serverInfo.url), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret" }),
+    });
+  });
+}
 
 test("interactive graph server streams commits, diffs, checkout responses, and closes", async (t) => {
   const repoPath = await mkdtemp(path.join(os.tmpdir(), "tb-checkin-milestone-"));

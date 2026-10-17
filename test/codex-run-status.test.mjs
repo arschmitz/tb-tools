@@ -15,3 +15,8 @@ test("paused implementation and input requests are not failures", () => {
   assert.equal(getCodexRunStatus({ status: "paused", error: "Resume to clarify" }).state, "waiting");
   assert.equal(getCodexRunStatus({ status: "input-required", error: "Which label?" }).label, "Waiting for your answer");
 });
+
+test("Try monitoring does not report silence as an active AI turn", () => {
+  const status = getCodexRunStatus({ status: "monitoring", busy: true, silenceSeconds: 52000 });
+  assert.equal(status.label, "Monitoring Try — no AI turn is running");
+});

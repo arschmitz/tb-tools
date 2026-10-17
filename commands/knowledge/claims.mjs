@@ -1,4 +1,5 @@
 import { digest } from "./store.mjs";
+import { retrievalArchiveReason } from "./retrieval-policy.mjs";
 
 export const normalizedClaim = text => text.trim().replace(/\s+/g, " ").toLowerCase();
 export const claimKey = record => digest([record.repository, record.component || "general",
@@ -58,6 +59,10 @@ export function claimGroups(records) {
 }
 
 export function learningSkipReason(record, store) {
+  const archived = retrievalArchiveReason(record);
+  if (archived) return archived;
+  if (["ingestion-queue-transition", "ingestion-queue-input"].includes(record.source.type)) return "operational-queue-state";
+  if (record.source.status === "instruction") return "reviewed-instruction";
   if (["historical-lesson-summary", "lesson-publication", "knowledge-publication-audit"].includes(record.source.type)) return "derived-claim";
   if (record.source.type === "shared-note" && (record.source.publicationKey || record.source.recordId ||
       /\.\.\/records\/[a-f0-9]{64}\.json/.test(record.text))) return "lesson-mirror";
@@ -68,9 +73,11 @@ export function learningSkipReason(record, store) {
 
 export function classifyLearningQueue(store) {
   const counts = {};
-  const rows = store.db.prepare("SELECT r.body FROM jobs j JOIN records r ON r.id=j.id WHERE j.state='pending'").all();
+  const rows = store.db.prepare("SELECT id FROM jobs WHERE state='pending'").all();
   for (const row of rows) {
-    const record = JSON.parse(row.body), reason = learningSkipReason(record, store);
+    const record = store.get(row.id);
+    if (!record) continue;
+    const reason = learningSkipReason(record, store);
     if (!reason) continue;
     store.db.prepare("UPDATE jobs SET state='skipped' WHERE id=? AND state='pending'").run(record.id);
     store.setting(`learning-skip:${record.id}`, reason);
@@ -83,7 +90,7 @@ export function existingLessonsFor(store, records, limit = 24) {
   const words = new Set(records.flatMap(r => (r.title + " " + r.paths.join(" ") + " " + r.text.slice(0, 2000))
     .toLowerCase().match(/[a-z_][a-z0-9_-]{3,}/g) || []));
   const paths = new Set(records.flatMap(r => r.paths));
-  const lessons = store.all(records[0].repository).filter(r => r.kind === "lesson");
+  const lessons = [...store.records({ repository: records[0].repository, kind: "lesson" })];
   const groups = claimGroups(lessons), seen = new Set();
   return lessons.map(r => ({ r, score: r.paths.filter(p => paths.has(p)).length * 10 +
     [...new Set((r.title + " " + r.text).toLowerCase().match(/[a-z_][a-z0-9_-]{3,}/g) || [])].filter(w => words.has(w)).length }))

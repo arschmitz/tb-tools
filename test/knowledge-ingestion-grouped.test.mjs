@@ -101,3 +101,21 @@ test("request identity binds revisions even when target bytes are unchanged", as
 
   assert.notEqual(other.pendingRequests[0].id, f.status.pendingRequests[0].id, "Changed source pins should create a different request even when the target bytes match.");
 });
+
+
+test("unprepared targets remain failures and do not become partial publication drafts", async t => {
+  const f = await fixture(t);
+  const target = { ...f.config.groups[0].targets[0], id: "missing", path: "missing.mjs" };
+  const config = { ...f.config, directory: path.join(f.root, "failed-queue"), groups: [{ id: "failure", targets: [target] }] };
+
+  const initial = await initializeGroupedIngestion(config);
+  const producer = f.producer(initial.pendingRequests[0]);
+  Object.assign(producer.files[0], { targetId: "missing", sourceHash: null, complete: false, units: [], needChecks: [], gaps: ["Source is absent."] });
+  const next = await submitGroupedResponse(config.directory, producer);
+  const review = f.review(next.pendingRequests[0], { targetId: "missing", decision: "partial", checkedUnitIds: [], inventoryChecked: false, gaps: ["Preparation failed."] });
+  await submitGroupedResponse(config.directory, review);
+  const result = await exportGroupedIngestion(config.directory);
+
+  assert.equal(result.records.length, 0, "An unprepared file should not produce a publication draft.");
+  assert.equal(result.preparationFailures.length, 1, "The publication manifest should preserve the preparation failure.");
+});

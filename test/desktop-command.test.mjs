@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import branding from "../desktop/branding.cjs";
 import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
@@ -13,7 +15,9 @@ function fixture(overrides = {}) {
   const child = new EventEmitter(); child.pid = 123; child.unref = () => calls.push("unref");
   const launch = createDesktopCommand({ cwd: "/firefox/comm", projectRoot: "/commands",
     config: {}, exists: () => true, getElectron: () => "/electron",
+    prepareRuntime: async ({ projectRoot, electronExecutable }) => ({ executable: electronExecutable, args: [projectRoot] }),
     env: { PATH: "/bin", ELECTRON_RUN_AS_NODE: "1" }, log: () => {},
+    openLogs: () => ({ stdio: "ignore", close() {} }),
     spawnApp: (...args) => { calls.push(args); queueMicrotask(() => child.emit("spawn")); return child; },
     ...overrides,
   });
@@ -33,6 +37,14 @@ test("desktop accepts explicit paths and uses the configured project", async () 
   await launch({ comm: "../other comm" });
   assert.deepEqual(calls[0][1], ["/desktop commands", "--comm=/firefox/other comm"]);
   assert.equal((await launch({ project: "/override" })).project, "/override");
+});
+
+test("desktop captures native output and closes the parent log handle", async () => {
+  let closed = false;
+  const { launch, calls } = fixture({ openLogs: () => ({ stdio: ["ignore", 42, 42], close: () => { closed = true; } }) });
+  await launch();
+  assert.deepEqual(calls[0][2].stdio, ["ignore", 42, 42]);
+  assert.equal(closed, true);
 });
 
 test("desktop leaves checkout selection to the app outside a comm checkout", async () => {
@@ -65,9 +77,15 @@ test("tb desktop dispatches outside comm and passes paths without shell expansio
   await writeFile(path.join(project, "node_modules", "electron", "index.js"), `module.exports = ${JSON.stringify(process.execPath)};`);
   const run = promisify(execFile);
   const help = await run(process.execPath, [path.resolve(import.meta.dirname, "..", "tb.mjs"), "help"], { cwd: root });
-  assert.match(help.stdout, /Starts the Electron desktop app/);
-  const { stdout } = await run(process.execPath, [path.resolve(import.meta.dirname, "..", "tb.mjs"), "desktop", "--project", project], { cwd: root });
-  assert.match(stdout, /Thunderbird Commands started/);
+  assert.match(help.stdout, /Starts Thunderbird Development Dashboard/);
+  await writeFile(path.join(project, "node_modules", "electron", "package.json"), JSON.stringify({ version: "44.5.1", main: "index.js" }));
+  const cache = path.join(root, "runtime-cache");
+  const key = createHash("sha256").update(JSON.stringify([project, "44.5.1", process.platform, process.arch, branding.APP_NAME, 5, process.version])).digest("hex").slice(0, 20);
+  const executable = branding.packagedExecutable(path.join(cache, key));
+  await mkdir(path.dirname(executable), { recursive: true });
+  await writeFile(executable, `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(output)}, JSON.stringify(process.argv.slice(2)));\n`, { mode: 0o755 });
+  const { stdout } = await run(process.execPath, [path.resolve(import.meta.dirname, "..", "tb.mjs"), "desktop", "--project", project], { cwd: root, env: { ...process.env, TB_DESKTOP_RUNTIME_CACHE: cache } });
+  assert.match(stdout, /Thunderbird Development Dashboard started/);
   let result;
   for (let attempt = 0; attempt < 50; attempt++) {
     try { result = JSON.parse(await readFile(output, "utf8")); break; } catch { await new Promise(resolve => setTimeout(resolve, 20)); }

@@ -3,6 +3,52 @@
 Run `tb desktop` from comm, or `tb desktop --comm=/path/to/firefox/comm`.
 The app starts in its own process and returns the terminal prompt.
 
+On first launch, choose **Use an existing checkout** or **Set up a new environment**.
+An existing checkout can be the Thunderbird `comm` folder or its Firefox parent.
+The app saves its absolute path in `checkout.json` in the app data directory.
+Later launches can start from any directory. `--comm` or `TB_COMM_PATH` overrides
+the saved path. If the saved checkout moves, the setup window opens again.
+
+For a new environment, choose a parent folder and a build type, then select
+**Set up environment**. Setup creates a new `thunderbird` folder, clones Firefox
+from `mozilla-firefox/firefox` and Thunderbird from `thunderbird/thunderbird-desktop`
+on GitHub, and writes a Thunderbird `mozconfig`. Full builds support all source
+changes. Artifact builds download compiled components and suit JavaScript,
+HTML, and CSS changes. Both modes install full desktop bootstrap dependencies,
+as required by the [Thunderbird setup guide](https://developer.thunderbird.net/thunderbird-development/building-thunderbird/linux-build-prerequisites).
+
+Setup opens a native terminal for Git, Python, and `mach bootstrap`. Follow its
+system and password prompts. Git and Python 3 must already be installed. Windows
+also needs MozillaBuild 4 or later at `C:\mozilla-build`, or the location in
+`MOZILLABUILD`. Linux needs `x-terminal-emulator`, `gnome-terminal`, or `xterm`.
+The setup window links to the official platform prerequisites. Choose a source
+path without spaces and allow at least 40 GB of free disk space.
+
+Setup state is saved in `setup.json` beside `checkout.json`. Closing the app
+leaves the terminal running. Reopening the app restores setup progress. Retry
+reuses completed downloads and reruns a failed bootstrap. An interrupted Git
+clone is kept; setup asks for a new location or for the incomplete folder to be
+moved before retrying. Setup never deletes or replaces an existing checkout or
+build configuration. Select **Continue** after setup succeeds to add service keys.
+
+Both checkout paths end with **Connect Phabricator and Bugzilla**. Enter your
+Phabricator username and API token, and your Bugzilla API key. Buttons open the
+services' settings pages in your browser. **Save and open dashboard** merges the
+keys into `~/.tb.json` before the backend starts. Other settings stay unchanged,
+and blank key fields keep existing keys. Keys are masked in the form and stored
+as plain text in an owner-only settings file. Existing keys are not sent back
+to the form. A damaged settings file must be fixed before keys can be saved.
+
+**Skip for now** opens the dashboard without changing service settings. Setup
+remembers this choice for the selected checkout. A configured checkout with
+missing keys shows this final step once, unless it was already completed or
+skipped. Use Build and Run in the dashboard to compile and launch Thunderbird.
+
+Settings also has a **Phabricator and Bugzilla** section. Use **Save service keys**
+to add or replace credentials later. Blank key fields keep saved keys. This section
+works even if the AI model list cannot load. Restart the app or console after
+saving so all API clients and account-specific stores use the new credentials.
+
 `main.cjs` starts the existing console server on loopback and keeps it alive when
 its window closes. The console shows one comm repository and its Firefox parent.
 External links open as tabs inside the main window. Browser tabs sit beside Tree, Dashboard, and Meta Boards. Back, Forward, and
@@ -51,6 +97,22 @@ When sccache is installed, each worktree uses its own server and source base
 path with the common compiler cache. The app disables sccache direct mode because
 [version 0.18 can reuse stale headers across worktrees](https://github.com/mozilla/sccache/issues/2863).
 
+The desktop app checks local and fetched Rust dependencies at startup and every
+five minutes. If dependencies are out of sync, it fetches Firefox and Thunderbird
+`origin/main`. If the new revisions have compatible Rust dependencies, it checks
+and builds that exact pair in detached worktrees. After the build passes, it
+updates both primary checkouts with fast-forward merges and prepares the primary
+checkout build with its existing configuration. Both primary checkouts must stay
+clean and on `main`; patch branches, local edits, and diverged history block the
+update. Source changes during the worktree build also block the update.
+
+The Rust status tooltip shows update progress and failures. Failed or blocked
+updates retry after 30 minutes. Build state, one reusable worktree pair, and the
+latest build log are kept under `~/.tb-tools/dependency-update`, in a directory
+for each source pair. Pending builds resume on a later check after restarting the
+app. If one checkout updates and the next step fails, the status names the updated
+checkout; the app keeps that state for retry. Quitting cancels the active build.
+
 The daily build service stores its schedule and state in `~/.tb-tools/daily-build`.
 Settings accepts one or more local times. The service fetches both `origin/main`
 branches and builds in its own detached worktree. It does not switch the author's
@@ -74,6 +136,43 @@ also pass targets such as `win32:arm64` or `linux:arm64` to
 `npm run desktop:package -- <target>`. Run the smoke test on each target system
 before distribution. Packages are not signed or notarized.
 
+`npm run desktop:release` builds a downloadable installer for the current machine:
+macOS arm64 or x64 gets a DMG, Windows x64 gets an EXE installer, and Linux x64
+gets an AppImage. Downloads and their SHA-256 checksum files go in
+`dist/downloads`. The command first creates the existing package, checks its
+bundled native dependencies, then opens the shipped app with a temporary profile
+to test the first-run screen. Linux needs a display; use `xvfb-run -a npm run
+desktop:release` on a build server. The app includes Node.js. Users do not need
+to install Node or clone this tools repository to launch it.
+
+The **Desktop downloads** GitHub Actions workflow runs each build on a standard
+GitHub-hosted machine with the same operating system and architecture. You can
+control all four builds from a Mac. It runs when a `v*` tag is pushed, or from
+**Actions > Desktop downloads > Run workflow** with an existing version tag.
+The tag must match the version in `package.json`, such as `v1.0.0` for `1.0.0`.
+The workflow must be present on the default branch for the manual button to appear.
+
+The workflow creates a draft release labeled **building**, uploads each tested
+download directly to that draft, and marks it **ready for review** only after
+all four jobs pass. Failed jobs leave an incomplete draft. Retry the failed jobs,
+check all results, then publish the draft from GitHub Releases. Published releases
+cannot be replaced by this workflow; use a new version instead. No downloads are
+published automatically. The workflow needs repository Actions enabled and its
+`GITHUB_TOKEN` needs permission to write releases. No separate token is required.
+
+For this public repository, standard GitHub-hosted build time is free. The workflow
+does not retain Actions artifacts or enable an npm cache. Downloads live in
+GitHub Releases, which has no total release-size or download-bandwidth limit;
+each asset must be smaller than 2 GiB. See
+[Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+and [release limits](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
+
+These first downloads are unsigned and are not notarized. macOS and Windows may
+block them or show security prompts. Trusted signing and notarization need a
+separate credential setup. Native startup checks cover the setup screen; they
+do not download Thunderbird, install its toolchain, or compile Thunderbird.
+Linux and Windows ARM64 downloads are not included in this release matrix.
+
 `npm run desktop:worktree:smoke -- /path/to/comm` creates two real task worktrees,
 builds each, runs `test_mailServices.js` in each, and checks that the author's
 HEAD, status, and unmerged index remain unchanged. `desktop:cache:smoke` checks
@@ -81,3 +180,43 @@ compiler-cache hits across the two source paths and verifies that a changed
 header causes a new compile. Windows Mach commands use Python; Unix commands
 run the executable Mach script. These probes validate the current host. Building
 a Windows or Linux package does not replace running its smoke tests on that OS.
+
+First-time contributor setup checks Git, Python 3.10 or newer, and the platform
+build tools before preparing source files. New source locations also need at
+least 40 GB free. This is a minimum check, not an estimate for every build.
+The **Install missing tools** button opens the system installer in a terminal:
+Apple command line tools and Homebrew on macOS, MozillaBuild on Windows, or
+APT/DNF packages on supported Linux distributions. The user handles password
+and installer prompts. Other Linux distributions link to the manual steps.
+
+Both new and existing checkout setup ask for a Git name and email. Setup fills
+in missing identities with `git config --local` in Firefox and `comm`. It keeps
+existing identities and global Git settings. Existing source files and
+`mozconfig` settings are preserved. The active configuration must select
+`--enable-project=comm/mail`.
+
+Setup runs `mach bootstrap`, then `mach build` from the Firefox root. It only
+marks the environment ready after Thunderbird opens its main window in a new
+profile under the app's `development-profiles` directory. A local Marionette
+connection checks the profile and Thunderbird window. It does not use or copy
+the user's mail profile. Failed launches keep a log in the development profile.
+The verified development instance stays open.
+
+After the service-key step, contributors can optionally install and connect
+`moz-phab`. Setup uses `mach install-moz-phab`, prompts for authentication, and
+uses the read-only `moz-phab list` command to check the account. This connection
+is separate from dashboard API keys. It never submits a patch. Contributors
+can open the dashboard and set up submission later, including after an
+authentication failure.
+
+Windows setup uses the current MozillaBuild installer (version 4 or newer).
+The installer requests administrator approval and setup waits for it to finish.
+Canceling that prompt or failing installation keeps setup incomplete. The build
+runs in the MozillaBuild console so its prompts remain available.
+
+The `Windows initial setup` workflow tests checkout persistence, recovery,
+credentials, the setup window, and native batch launch with paths that contain
+spaces. Installer checks use simulated results. These tests do not complete
+administrator prompts, download source trees, bootstrap a toolchain, or build Thunderbird.
+A full first-run check on Windows must still complete those steps and confirm
+that Thunderbird opens its main window in the separate development profile.

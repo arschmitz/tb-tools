@@ -1,0 +1,118 @@
+name: Desktop downloads
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to build, such as v1.0.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-downloads-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Pin the source for every platform
+        id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Check the version and create an incomplete draft
+        run: node desktop/release-upload.mjs prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build:
+    needs: prepare
+    name: Build ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+          - runner: macos-15-intel
+            platform: darwin
+            arch: x64
+          - runner: windows-2022
+            platform: win32
+            arch: x64
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+      - run: npm ci
+      - name: Test release and contributor setup helpers
+        run: node --test test/desktop-setup.test.mjs test/desktop-release.test.mjs test/desktop-package.test.mjs test/contributor-setup.test.mjs test/setup-launch-check.test.mjs test/desktop-setup-credentials.test.mjs
+      - name: Check the runner architecture
+        shell: bash
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: node -e 'if (process.platform !== process.env.TARGET_PLATFORM || process.arch !== process.env.TARGET_ARCH) process.exit(1)'
+      - name: Install Linux packaging and display tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfuse2t64 xvfb
+      - name: Build and test the native download
+        if: runner.os != 'Linux'
+        run: npm run desktop:release
+      - name: Build and test the Linux download
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run desktop:release
+      - name: Upload tested downloads directly to the draft
+        run: node desktop/release-upload.mjs upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  finish:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Mark the complete draft ready for review
+        run: node desktop/release-upload.mjs finish
+        env:
+          GH_TOKEN: ${{ github.token }}

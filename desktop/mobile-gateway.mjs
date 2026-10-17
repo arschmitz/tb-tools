@@ -155,7 +155,7 @@ export function createMobileGateway({
       if (url.pathname === "/manifest.webmanifest") {
         response.writeHead(200, { "content-type": "application/manifest+json",
           "cache-control": "no-store" });
-        response.end(JSON.stringify({ name: "Thunderbird Commands", short_name: "Commands",
+        response.end(JSON.stringify({ name: "Thunderbird Development Dashboard", short_name: "TB Dashboard",
           start_url: "/", display: "standalone", background_color: "#ffffff",
           theme_color: "#173f70", icons: [
             { src: "/icon.png", sizes: "192x192", type: "image/png" },

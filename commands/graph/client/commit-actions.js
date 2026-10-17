@@ -1,4 +1,4 @@
-import { setLiveText, hasSelectedText } from "./live-text.js";
+import { setDialogCommitTitle, setLiveText, hasSelectedText } from "./live-text.js";
 import { registerAiTaskDialog } from "./ai-task-tray.js";
 import {
   INTERACTIVE,
@@ -71,10 +71,12 @@ function configurePatchUpdateButton(button, { graph, index, commit, message = ""
   }
 
   const revision = getCommitPhabricatorRevision(commit, message);
+  const localAction = button.matches(".patch-verify-commit, .patch-freeform-commit");
+  const target = revision || (localAction && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i.test(commit.hash) ? commit.hash : "");
   const repository = String(graph.repository || graph.label || "").toLowerCase();
   const canUpdate = INTERACTIVE.aiEnabled && repository === "comm" &&
     graph.checkout !== "review" && !isWorkingTreeCommit(commit) &&
-    Boolean(revision);
+    Boolean(target);
 
   button.hidden = !canUpdate;
 
@@ -83,9 +85,9 @@ function configurePatchUpdateButton(button, { graph, index, commit, message = ""
   }
 
   button.dataset.graphIndex = String(index);
-  button.dataset.revision = revision;
+  button.dataset.revision = target;
   button.dataset.title = commit.subject || revision;
-  button.dataset.url = PHABRICATOR_REVISION_URL + revision.slice(1);
+  button.dataset.url = revision ? PHABRICATOR_REVISION_URL + revision.slice(1) : "";
 }
 
 function isCommitReachableFromLoadedOriginMain(index, commit) {
@@ -153,8 +155,9 @@ export async function showDiff(
   checkoutButton.dataset.label = graph.label;
   amendButton.hidden = !INTERACTIVE.enabled;
   amendButton.disabled = false;
-  amendButton.textContent = isWorkingTreeCommit(commit) || commit.tryFixup ? "Amend" : "Amend Message";
-  amendButton.dataset.tryFixup = String(Boolean(commit.tryFixup));
+  const fixup = Boolean(commit.tryFixup) || /^fixup!\s+/.test(commit.subject || "");
+  amendButton.textContent = isWorkingTreeCommit(commit) || fixup ? "Amend" : "Amend Message";
+  amendButton.dataset.tryFixup = String(fixup);
   amendButton.dataset.graphIndex = String(index);
   amendButton.dataset.hash = commit.hash;
   amendButton.dataset.label = graph.label;
@@ -545,7 +548,7 @@ export async function openAmendDialog(button) {
 
   try {
     if (button.dataset.tryFixup === "true") {
-      status.textContent = "Amending the patch with its Try fixup...";
+      status.textContent = "Amending the patch with its fixup...";
       const response = await fetch("/api/amend-try-fixup", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: INTERACTIVE.token, graphIndex, hash,
@@ -577,6 +580,7 @@ export async function openAmendDialog(button) {
     amendDialog.querySelector(".amend-title").textContent = includeChanges
       ? "Amend " + button.dataset.label + " current commit"
       : "Amend " + button.dataset.label + " commit " + hash.substring(0, 12);
+    setDialogCommitTitle(amendDialog.querySelector(".amend-title"), result.message);
     amendMessage.value = result.message || "";
     amendError.textContent = "";
     status.textContent = "";
@@ -817,6 +821,7 @@ export async function openSubmitDialog(button, { patchUpdateSessionId = "", onSt
     };
     onStarted?.();
     submitTitle.textContent = "Submit " + button.dataset.label + " " + commitLabel;
+    setDialogCommitTitle(submitTitle, button.dataset.title || graphStates[graphIndex]?.commits?.find(commit => commit.hash === button.dataset.hash)?.subject);
     submitPrompt.hidden = true;
     submitQuestion.textContent = "";
     submitLinks.hidden = true;

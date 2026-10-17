@@ -3,7 +3,7 @@ import { ensureGraphCommit } from "./commit-access.mjs";
 import { prepareMonitoredTry } from "./try-submission.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { getTbToolsCommandEnvironment, run } from "../../lib/utils.mjs";
@@ -30,8 +30,8 @@ import { getDefaultLintFiles, LINT_DIRS } from "../lint.mjs";
 import { createSubmitCommand } from "../submit.mjs";
 import { createTestCommand } from "../test.mjs";
 import { createTryCommand } from "../try.mjs";
-import { prepareConsoleBuild, executeConsoleArtifactBuild, getConsoleBuildEnvironment, publishCompletedConsoleBuild } from "./build.mjs";
-import { getNextBugBranchName } from "./branches.mjs";
+import { runConsoleBuild, getConsoleBuildEnvironment } from "./build.mjs";
+import { getNextBugBranchName, isPrivateGraphBranch, scopedGraphBranchRefs } from "./branches.mjs";
 import {
   CHECKIN_NEEDED_KEYWORD,
   DEFAULT_SUBMIT_OUTPUT_LIMIT,
@@ -76,8 +76,7 @@ const RUST_UPSTREAM_FILES = {
   mc_hack_toml: "build/workspace-hack/Cargo.toml",
   mc_cargo_lock: "Cargo.lock",
 };
-const RUST_UPSTREAM_FETCH_TIMEOUT_MS = 30_000;
-const RUST_UPSTREAM_RAW_FETCH_TIMEOUT_MS = 10_000;
+const rustStatusCaches = new WeakMap();
 const GRAPH_REBASE_MODE_SELECTED = "selected";
 const GRAPH_REBASE_MODE_CHILDREN = "children";
 const GRAPH_REBASE_MODE_DESCENDANTS = "descendants";
@@ -561,13 +560,13 @@ async function ensureCleanGraph(graph, runCommand) {
 }
 
 async function getLocalBranchesAtCommit(graph, hash, runCommand) {
-  return runCommand({
+  return scopedGraphBranchRefs(graph, await runCommand({
     cmd: "git",
     args: ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--points-at", hash, graph.branchNamespace ? `refs/heads/${graph.branchNamespace}` : "refs/heads"],
     cwd: graph.path,
     capture: true,
     silent: true,
-  });
+  }));
 }
 
 async function getLocalBranchTips(graph, runCommand) {
@@ -594,17 +593,17 @@ async function getLocalBranchTips(graph, runCommand) {
         hash: hash?.trim(),
       };
     })
-    .filter(({ branch, hash }) => branch && hash);
+    .filter(({ branch, hash }) => branch && hash && (graph.branchNamespace || !isPrivateGraphBranch(branch)));
 }
 
 async function getLocalBranchesContainingCommit(graph, hash, runCommand) {
-  return runCommand({
+  return scopedGraphBranchRefs(graph, await runCommand({
     cmd: "git",
     args: ["for-each-ref", "--sort=refname", "--format=%(refname:short)", "--contains", hash, graph.branchNamespace ? `refs/heads/${graph.branchNamespace}` : "refs/heads"],
     cwd: graph.path,
     capture: true,
     silent: true,
-  });
+  }));
 }
 
 function getPatchBranches(refsOutput = "") {
@@ -2128,217 +2127,41 @@ async function getRustFileChecksumsFromRef({ cwd, ref, runCommand = run }) {
   return Object.fromEntries(entries);
 }
 
-function getGithubRawBaseUrl(remoteUrl = "") {
-  const normalizedUrl = String(remoteUrl || "").trim();
-  let owner = "";
-  let repo = "";
-  let match = normalizedUrl.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i);
-
-  if (match) {
-    [, owner, repo] = match;
-  } else {
-    match = normalizedUrl.match(/^(?:https?|git|ssh):\/\/(?:git@)?github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/i);
-
-    if (match) {
-      [, owner, repo] = match;
-    }
-  }
-
-  if (!owner || !repo) {
-    return "";
-  }
-
-  return `https://raw.githubusercontent.com/${owner}/${repo.replace(/\.git$/i, "")}`;
-}
-
-function getGithubRawFileUrl({ remoteUrl, ref, file }) {
-  const rawBaseUrl = getGithubRawBaseUrl(remoteUrl);
-
-  if (!rawBaseUrl) {
-    return "";
-  }
-
-  const encodedRef = encodeURIComponent(ref);
-  const encodedFile = file.split("/").map(encodeURIComponent).join("/");
-
-  return `${rawBaseUrl}/${encodedRef}/${encodedFile}`;
-}
-
-async function fetchTextWithTimeout({
-  url,
-  fetchImpl,
-  timeoutMs,
-}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  timer.unref?.();
-
-  try {
-    const response = await fetchImpl(url, { signal: controller.signal });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} ${response.statusText || ""}`.trim());
-    }
-
-    return await response.text();
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(`Timed out fetching ${url} after ${timeoutMs}ms.`);
-    }
-
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function getRustFileChecksumsFromGithubRaw({
-  remoteUrl,
-  ref,
-  fetchImpl = fetch,
-}) {
-  const urls = Object.fromEntries(
-    Object.entries(RUST_UPSTREAM_FILES).map(([key, file]) => [
-      key,
-      getGithubRawFileUrl({ remoteUrl, ref, file }),
-    ]),
-  );
-
-  if (Object.values(urls).some((url) => !url)) {
-    return null;
-  }
-
-  const entries = await Promise.all(
-    Object.entries(urls).map(async ([key, url]) => {
-      const content = await fetchTextWithTimeout({
-        url,
-        fetchImpl,
-        timeoutMs: RUST_UPSTREAM_RAW_FETCH_TIMEOUT_MS,
-      });
-
-      return [key, getSha512(content)];
-    }),
-  );
-
-  return Object.fromEntries(entries);
-}
-
+// Rust status reads local Git objects. Status polling must not contact a remote.
 export async function getGraphRustUpstreamStatus({
   graphs,
   commGraph = getWorkingGraphByRepository(graphs, "comm"),
   firefoxGraph = getWorkingGraphByRepository(graphs, "firefox"),
   runCommand = run,
-  fetchImpl = fetch,
-  makeTempDir = mkdtemp,
-  removeDir = rm,
+  commRef = `refs/remotes/origin/${DEFAULT_BRANCH}`,
+  firefoxRef = `refs/remotes/origin/${DEFAULT_BRANCH}`,
 }) {
   if (!commGraph || !firefoxGraph) {
-    const error = new Error("Rust dependency status requires both comm and Firefox checkouts.");
-    error.statusCode = 404;
-    throw error;
+    throw Object.assign(new Error("Rust dependency status requires both comm and Firefox checkouts."), { statusCode: 404 });
   }
-
-  const commLocalHash = (await runCommand({
-    cmd: "git",
-    args: ["rev-parse", "--verify", `refs/remotes/origin/${DEFAULT_BRANCH}`],
-    cwd: commGraph.path,
-    capture: true,
-    silent: true,
-  })).trim();
-  const checksumData = parseRustChecksumFile(await runCommand({
-    cmd: "git",
-    args: ["show", `refs/remotes/origin/${DEFAULT_BRANCH}:${RUST_UPSTREAM_CHECKSUMS_PATH}`],
-    cwd: commGraph.path,
-    capture: true,
-    silent: true,
-  }));
-  const firefoxRemoteHash = parseLsRemoteHash(await runCommand({
-    cmd: "git",
-    args: ["ls-remote", "--heads", "origin", DEFAULT_BRANCH],
-    cwd: firefoxGraph.path,
-    capture: true,
-    silent: true,
-  }));
-
-  if (!firefoxRemoteHash) {
-    throw new Error(`Firefox remote origin/${DEFAULT_BRANCH} was not found.`);
-  }
-
-  const firefoxLocalHash = await getOptionalGitRefHash({
-    cwd: firefoxGraph.path,
-    ref: `refs/remotes/origin/${DEFAULT_BRANCH}`,
-    runCommand,
-  });
-  let actualChecksums;
-
-  if (firefoxLocalHash === firefoxRemoteHash) {
-    actualChecksums = await getRustFileChecksumsFromRef({
-      cwd: firefoxGraph.path,
-      ref: `refs/remotes/origin/${DEFAULT_BRANCH}`,
-      runCommand,
-    });
-  } else {
-    const firefoxRemoteUrl = (await runCommand({
-      cmd: "git",
-      args: ["remote", "get-url", "origin"],
-      cwd: firefoxGraph.path,
-      capture: true,
-      silent: true,
-    })).trim();
-    actualChecksums = await getRustFileChecksumsFromGithubRaw({
-      remoteUrl: firefoxRemoteUrl,
-      ref: firefoxRemoteHash,
-      fetchImpl,
-    });
-
-    if (!actualChecksums) {
-      const tempDir = await makeTempDir(path.join(os.tmpdir(), "tb-tools-rust-upstream-"));
-
-      try {
-        await runCommand({
-          cmd: "git",
-          args: ["init"],
-          cwd: tempDir,
-          capture: true,
-          silent: true,
-        });
-        await runCommand({
-          cmd: "git",
-          args: ["fetch", "--depth=1", "--no-tags", firefoxRemoteUrl, firefoxRemoteHash],
-          cwd: tempDir,
-          capture: true,
-          silent: true,
-          timeoutMs: RUST_UPSTREAM_FETCH_TIMEOUT_MS,
-          killProcessGroup: true,
-        });
-
-        actualChecksums = await getRustFileChecksumsFromRef({
-          cwd: tempDir,
-          ref: "FETCH_HEAD",
-          runCommand,
-        });
-      } finally {
-        await removeDir(tempDir, { recursive: true, force: true });
-      }
-    }
-  }
-
-  const mismatches = getRustMismatchDetails(checksumData, actualChecksums);
-  const upToDate = mismatches.length === 0;
-
-  return {
-    type: "rust-upstream",
-    label: "rust",
-    state: upToDate ? "current" : "warning",
-    upToDate,
-    commLocalHash,
-    firefoxRemoteHash,
-    mismatches,
-    message: upToDate
-      ? "Rust dependencies match Firefox remote main."
-      : "Rust dependencies are out of sync with Firefox remote main. Remote builds may fail.",
-  };
+  const git = (cwd, args) => runCommand({ cmd: "git", args, cwd, capture: true, silent: true });
+  const [commLocalHash, firefoxRemoteHash] = await Promise.all(
+    [[commGraph.path, commRef], [firefoxGraph.path, firefoxRef]]
+      .map(async ([cwd, ref]) => String(await git(cwd, ["rev-parse", "--verify", ref])).trim()));
+  let cache = rustStatusCaches.get(runCommand);
+  if (!cache) { cache = new Map(); rustStatusCaches.set(runCommand, cache); }
+  const key = JSON.stringify([commGraph.path, firefoxGraph.path, commLocalHash, firefoxRemoteHash]);
+  if (cache.has(key)) return cache.get(key);
+  const checking = (async () => {
+    // Read the resolved commits so a concurrent fetch cannot mix revisions.
+    const checksumData = parseRustChecksumFile(await git(commGraph.path, ["show", `${commLocalHash}:${RUST_UPSTREAM_CHECKSUMS_PATH}`]));
+    const actualChecksums = await getRustFileChecksumsFromRef({ cwd: firefoxGraph.path, ref: firefoxRemoteHash, runCommand });
+    const mismatches = getRustMismatchDetails(checksumData, actualChecksums);
+    const upToDate = mismatches.length === 0;
+    return { type: "rust-upstream", label: "rust", state: upToDate ? "current" : "warning", upToDate,
+      commLocalHash, firefoxRemoteHash, mismatches,
+      message: upToDate ? "Rust dependencies match fetched Firefox main."
+        : "Rust dependencies are out of sync with fetched Firefox main. Fetch or update the repositories before rebuilding." };
+  })();
+  cache.set(key, checking);
+  if (cache.size > 64) cache.delete(cache.keys().next().value);
+  try { return await checking; }
+  catch (error) { cache.delete(key); throw error; }
 }
 
 function getFirstBugFromResponse(response, bugId) {
@@ -2699,9 +2522,15 @@ export async function runGraphMach({
     capture: true,
   };
 
-  return runCommand === run
+  const execute = command => runCommand === run
     ? runInteractiveSubmitCommand({ command, session })
     : runInjectedSubmitCommand({ command, session, runCommand });
+  if (command.args.length === 1 && command.args[0] === "build") {
+    return runConsoleBuild({ graph, runCommand, execute,
+      log: text => appendSubmitOutput(session, text), canceled: () => session.cancelRequested,
+    });
+  }
+  return execute(command);
 }
 
 export async function runGraphLint({
@@ -2762,6 +2591,7 @@ export function createGraphLintSession({
   const session = {
     id: randomUUID(),
     graphIndex,
+    graph,
     mode: normalizedMode,
     label: graph.label,
     path: graph.path,
@@ -3832,14 +3662,17 @@ export function createGraphTrySession({
   options = {},
   runCommand = run,
   postComment = defaultComment,
+  prepareCheckout,
 }) {
   const session = {
     id: randomUUID(),
     graphIndex,
+    graph,
     label: graph.label,
     path: graph.path,
     status: "running",
-    message: "Starting try run...",
+    phase: prepareCheckout ? "preparing" : "submitting",
+    message: prepareCheckout ? "Preparing Try checkout..." : "Starting try run...",
     output: "",
     error: "",
     result: null,
@@ -3849,6 +3682,15 @@ export function createGraphTrySession({
 
   queueMicrotask(async () => {
     try {
+      if (prepareCheckout) {
+        session.output = "Preparing isolated Try checkout and copying source changes...\n";
+        const prepared = await prepareCheckout({ session });
+        graph = prepared.graph;
+        session.graph = graph;
+        session.path = graph.path;
+      }
+      session.phase = "submitting";
+      session.message = "Submitting Try run...";
       const result = await runGraphTrySubmission({
         graph,
         session,
@@ -3879,6 +3721,7 @@ export function serializeGraphTrySession(session) {
     label: session.label,
     path: session.path,
     status: session.status,
+    phase: session.phase,
     message: session.message,
     output: session.output || "",
     error: session.error,
@@ -4180,31 +4023,10 @@ async function runGraphMachActionSessionUnlocked({
     session.phase = "building";
     session.message = "Building...";
     const log = (text) => appendGraphMachOutput(session, text);
-    const plan = await prepareConsoleBuild({ graph, graphs, runCommand, log });
-    if (!session.cancelRequested) {
-      if (plan) {
-        try {
-          await executeConsoleArtifactBuild({
-            plan,
-            execute: (command) => runGraphMachActionCommand({ command, session, runCommand }),
-            canceled: () => session.cancelRequested,
-            log,
-          });
-        } catch (error) {
-          if (!session.cancelRequested) {
-            log(`Artifact build failed: ${error.message}. Trying a normal build.\n`);
-            await runGraphMachActionCommand({ graph, args: ["build"], session, runCommand });
-          }
-        }
-      } else {
-        await runGraphMachActionCommand({ graph, args: ["build"], session, runCommand });
-      }
-    }
-
-    if (graph.taskWorktree && !session.cancelRequested && !plan) {
-      await publishCompletedConsoleBuild({ graph, runCommand }).catch(error =>
-        log(`Build passed; binary snapshot was not saved: ${error.message}\n`));
-    }
+    await runConsoleBuild({ graph, graphs, runCommand, log,
+      execute: command => runGraphMachActionCommand({ command, session, runCommand }),
+      canceled: () => session.cancelRequested,
+    });
     if (session.cancelRequested) {
       finishCanceledGraphMachSession(session);
       return;
@@ -4263,11 +4085,14 @@ export function createGraphMachSession({
   graphIndex,
   action,
   runCommand = run,
+  prepareCheckout,
 }) {
   const normalizedAction = normalizeGraphMachAction(action);
+  const abortController = new AbortController();
   const session = {
     id: randomUUID(),
     graphIndex,
+    graph,
     action: normalizedAction,
     label: graph.label,
     path: graph.path,
@@ -4286,6 +4111,7 @@ export function createGraphMachSession({
       }
 
       session.cancelRequested = true;
+      abortController.abort();
       session.message = session.phase === "running"
         ? "Closing run..."
         : "Canceling build...";
@@ -4304,6 +4130,21 @@ export function createGraphMachSession({
 
   queueMicrotask(async () => {
     try {
+      if (prepareCheckout) {
+        session.phase = "preparing";
+        session.message = "Preparing build checkout...";
+        session.output = "Preparing build checkout...\n";
+        session.preparationRunning = true;
+        let prepared;
+        try { prepared = await prepareCheckout({ signal: abortController.signal, session }); }
+        finally { session.preparationRunning = false; }
+        if (session.cancelRequested) return;
+        graph = prepared.graph;
+        graphs = prepared.graphs || graphs;
+        session.path = graph.path;
+        session.graph = graph;
+      }
+      if (session.cancelRequested) return;
       await runGraphMachActionSession({
         graph,
         graphs,
@@ -4480,6 +4321,7 @@ async function finishRebaseReplay(session, runCommand) {
   const preservedBranches = [];
 
   for (const anchor of selectedParentAnchors) {
+    if (session.deferBranchUpdates) throw new Error("Deferred replay cannot create parent branches.");
     await runCommand({
       cmd: "git",
       args: ["branch", anchor.branch, anchor.hash],
@@ -4505,7 +4347,7 @@ async function finishRebaseReplay(session, runCommand) {
     }
 
     for (const branchName of branches) {
-      await runCommand({
+      if (!session.deferBranchUpdates) await runCommand({
         cmd: "git",
         args: ["branch", "-f", branchName, rewrittenHash],
         cwd: graph.path,
@@ -4524,7 +4366,7 @@ async function finishRebaseReplay(session, runCommand) {
     base.hash;
 
   if (branch && !branchUpdates.some((update) => update.branch === branch)) {
-    await runCommand({
+    if (!session.deferBranchUpdates) await runCommand({
       cmd: "git",
       args: ["branch", "-f", branch, currentHash],
       cwd: graph.path,
@@ -4537,7 +4379,7 @@ async function finishRebaseReplay(session, runCommand) {
     });
   }
 
-  if (branch) {
+  if (branch && !session.deferBranchUpdates) {
     await runCommand({
       cmd: "git",
       args: ["switch", branch],
@@ -4571,7 +4413,7 @@ async function finishRebaseReplay(session, runCommand) {
     preservedBranches,
     rebasedCount: rewrittenCommits.length,
     currentHash,
-    detached: !branch,
+    detached: !branch || Boolean(session.deferBranchUpdates),
     message: `${graph.label} rebased ${branch ? `branch ${branch}` : hash.slice(0, 12)}${rewrittenCommits.length > 1 ? ` (${rewrittenCommits.length} commits)` : ""} onto ${base.branch || base.hash.slice(0, 12)}${skippedMainCommits.length ? `; skipped ${skippedMainCommits.length} already on origin/${DEFAULT_BRANCH}` : ""}.`,
   };
 }
@@ -5331,6 +5173,11 @@ async function replayRebaseCommits(session, startIndex, runCommand) {
   for (let index = startIndex; index < stackCommits.length; index++) {
     const commit = stackCommits[index];
 
+    if (commit === session.hash && session.replacementHash) {
+      rewrittenCommits.push({ originalHash: commit, hash: session.replacementHash });
+      continue;
+    }
+
     if (session.replayParents) {
       const parent = session.replayParents[commit];
       const target = parent
@@ -5740,6 +5587,8 @@ async function rebaseCommitUnlocked({
   includeSelectedAncestors = false,
   requireLoaded = true,
   rebaseMode = DEFAULT_GRAPH_REBASE_MODE,
+  replacementHash = "",
+  deferBranchUpdates = false,
   runCommand = run,
 }) {
   if (requireLoaded) {
@@ -5756,6 +5605,10 @@ async function rebaseCommitUnlocked({
   await ensureCleanGraph(graph, runCommand);
 
   const base = await getCurrentGraphBase(graph, runCommand);
+
+  if (replacementHash && (!deferBranchUpdates || base.hash !== replacementHash || includeSelectedAncestors)) {
+    throw new Error("Patch replacement requires deferred replay with the replacement checked out and no ancestor replay.");
+  }
 
   if (base.hash === hash) {
     const error = new Error(`Cannot rebase ${hash.slice(0, 12)} because it is already checked out.`);
@@ -5907,6 +5760,8 @@ async function rebaseCommitUnlocked({
     }),
     rewrittenCommits: [],
     skippedReplayedCommits: [],
+    replacementHash,
+    deferBranchUpdates,
   };
   let replayStarted = false;
 

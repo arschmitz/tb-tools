@@ -40,6 +40,15 @@ import { createTreeherderClient } from "../commands/graph/treeherder.mjs";
   assert.equal(await readFile(failure.logs[0].fullLogPath, "utf8"), fullLog);
   assert.equal(requests.filter(value => value === rawUrl).length, 1);
   assert.ok(requests.every(value => new URL(value).pathname.startsWith("/api/")));
+  for (const scan of [result, await client.compare({ repo: "try-comm-central", push: { id: 1 }, failures: [job] })]) {
+    for (const push of scan.baseline) {
+      for (const failed of push.failures) {
+        assert.equal(failed.logs[0].text, undefined);
+        assert.equal(await readFile(failed.logs[0].fullLogPath, "utf8"), fullLog);
+      }
+    }
+    assert.ok(scan.failures[0].logs[0].text, "target failures keep their excerpts");
+  }
 });
 
 
@@ -71,7 +80,16 @@ test("startup profiles are downloaded, decoded and cached for workers without ne
   const profile = { threads: [{ name: "GeckoMain" }] };
   const client = createTreeherderClient({ evidenceDirectory: directory, fetchImpl: async url => {
     if (url.endsWith("live_backing.log")) return { ok: true, text: async () => "TEST-UNEXPECTED-TIMEOUT | startup | application timed out" };
-    if (url.endsWith("profile_0_1.json.gz")) { downloads++; return { ok: true, arrayBuffer: async () => gzipSync(JSON.stringify(profile)) }; }
+    if (url.endsWith("profile_0_1.json.gz")) {
+      downloads++;
+      const bytes = gzipSync(JSON.stringify(profile));
+      return { ok: true, body: new ReadableStream({ start(controller) {
+        // Split the gzip header to check detection across chunk boundaries.
+        controller.enqueue(bytes.subarray(0, 1));
+        controller.enqueue(bytes.subarray(1));
+        controller.close();
+      } }), arrayBuffer: async () => { throw new Error("Profiles must stream to disk"); } };
+    }
     let data = {};
     if (url.endsWith("/jobs/1/")) data = { logs: [{ name: "live_backing_log", url: base + "/public/logs/live_backing.log" }] };
     else if (url.endsWith("bug_suggestions/")) data = [];
@@ -123,7 +141,7 @@ test("completed job evidence survives restart even before its push completes", a
   assert.ok(requests > first, 'a different retry needs fresh evidence');
 });
 
-test("completed evidence stays cached forever, including unavailable logs", async t => {
+test("completed evidence reuses the cache until retention removes it, including unavailable logs", async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "try-partial-cache-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   let calls = 0;

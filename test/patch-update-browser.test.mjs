@@ -150,6 +150,8 @@ test("Patch Update anchors reviewer feedback and working-tree changes in one pat
       }
 
       if (args[0] === "diff") {
+        assert.equal(args.includes("--unified=20"), true,
+          "The amend diff should use normal context around each change.");
         return cwd === "/task/verify/comm" ? currentWorkingTreeDiff : "";
       }
 
@@ -172,7 +174,19 @@ test("Patch Update anchors reviewer feedback and working-tree changes in one pat
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { height: 900, width: 1400 } });
 
-  page.setDefaultTimeout(5000);
+  page.setDefaultTimeout(10000);
+  await page.addInitScript(() => {
+    const nativeFetch = globalThis.fetch.bind(globalThis);
+    let delayed = false;
+
+    globalThis.fetch = async (input, init) => {
+      if (!delayed && String(input).includes("/diff/uncommitted-changes")) {
+        delayed = true;
+        await new Promise(resolve => setTimeout(resolve, 5_200));
+      }
+      return nativeFetch(input, init);
+    };
+  });
   t.after(async () => {
     await browser.close();
     if (serverInfo.server.listening) {
@@ -193,6 +207,8 @@ test("Patch Update anchors reviewer feedback and working-tree changes in one pat
       },
     });
   });
+  await page.getByLabel("Run Review Update in").selectOption("main");
+  await page.getByRole("button", { name: "Start Review Update", exact: true }).click();
 
   const waitForCurrentActions = () => page.waitForFunction(() => {
     const actions = globalThis.document.querySelector(".patch-update-inline-actions");
@@ -242,7 +258,9 @@ test("Patch Update anchors reviewer feedback and working-tree changes in one pat
   assert.match(await finding.innerText(), /Codex source update/);
   assert.match(await finding.innerText(), /Keep the selected state update/);
   assert.match(await diff.innerText(), /Working tree changes/);
-  assert.match(await diff.innerText(), /updatedValue = true/);
+  await diff.getByText("+const updatedValue = true;", { exact: false }).waitFor();
+  assert.match(await diff.innerText(), /updatedValue = true/,
+    "The amend dialog should show a diff that takes longer than five seconds to load.");
   assert.doesNotMatch(await diff.innerText(), /previousValue = false/);
   assert.equal(await finding.getByText("Amend Change").isVisible(), true);
   assert.equal(await finding.getByText("Revert Change").isVisible(), true);
@@ -359,6 +377,8 @@ test("Patch Update anchors reviewer feedback and working-tree changes in one pat
     void import("/assets/graph-client/patch-update-dialog.js").then(({ openPatchUpdateDialog }) =>
       openPatchUpdateDialog({ graphIndex: 0, patch: { id: "D123456", title: "Bug 123456 - Update the example." } }));
   });
+  await page.getByLabel("Run Review Update in").selectOption("main");
+  await page.getByRole("button", { name: "Start Review Update", exact: true }).click();
   await page.getByRole("button", { name: "Resume saved session", exact: true }).click();
   await page.getByText("The new assessment arrived after the diff.", { exact: true }).waitFor({ state: "visible" });
   assert.equal(patchUpdateSession.id, savedSessionId);
@@ -447,10 +467,18 @@ test("Patch Update does not leave a stalled working-tree diff loader on screen",
   await page.addInitScript(() => {
     globalThis.__TB_TOOLS_TEST_WORKING_TREE_DIFF_TIMEOUT_MS__ = 25;
     const nativeFetch = globalThis.fetch.bind(globalThis);
+    let workingDiffRequests = 0;
 
     globalThis.fetch = (input, init = {}) => {
       if (!String(input).includes("/diff/uncommitted-changes")) {
         return nativeFetch(input, init);
+      }
+      workingDiffRequests += 1;
+      if (workingDiffRequests > 1) {
+        return Promise.resolve(new Response(JSON.stringify({
+          ok: true,
+          text: "-const previousValue = false;\n+const selectedItem = true;",
+        }), { headers: { "Content-Type": "application/json" } }));
       }
 
       return new Promise((_resolve, reject) => {
@@ -474,12 +502,20 @@ test("Patch Update does not leave a stalled working-tree diff loader on screen",
       patch: { id: "D123456", title: "Bug 123456 - Update the example." },
     });
   });
+  await page.getByLabel("Run Review Update in").selectOption("main");
+  await page.getByRole("button", { name: "Start Review Update", exact: true }).click();
 
   const workingDiff = page.locator(".patch-update-working-diff");
 
   await workingDiff.getByText(/Could not load the actual uncommitted diff/).waitFor({ state: "visible" });
-  assert.match(await workingDiff.innerText(), /did not finish within 0.025 seconds/);
-  assert.doesNotMatch(await workingDiff.innerText(), /Loading the actual uncommitted diff/);
+  assert.match(await workingDiff.innerText(), /did not finish within 0.025 seconds/,
+    "The stalled request should show its timeout.");
+  assert.doesNotMatch(await workingDiff.innerText(), /Loading the actual uncommitted diff/,
+    "The stalled request should stop showing the loading notice.");
+  await workingDiff.getByRole("button", { name: "Retry loading diff" }).click();
+  await workingDiff.getByText("+const selectedItem = true;", { exact: false }).waitFor();
+  assert.doesNotMatch(await workingDiff.innerText(), /Could not load/,
+    "A successful retry should replace the error with the actual diff.");
 });
 
 test("Patch Update keeps revision-level feedback actionable through submission", async (t) => {
@@ -571,6 +607,8 @@ test("Patch Update keeps revision-level feedback actionable through submission",
       patch: { id: "D123456", title: "Bug 123456 - Update the example." },
     });
   });
+  await page.getByLabel("Run Review Update in").selectOption("main");
+  await page.getByRole("button", { name: "Start Review Update", exact: true }).click();
 
   const diff = page.locator(".patch-update-context-diff-content");
   const finding = diff.locator('[data-item-id="comment:revision-feedback"]');

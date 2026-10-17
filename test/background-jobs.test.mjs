@@ -6,6 +6,11 @@ import { startInteractiveGraphServer } from "../commands/graph/server.mjs";
 import { buildGraphHtml } from "../commands/graph/templates.mjs";
 
 test("job monitor shows actual work and excludes unresolved historical records", () => {
+  assert.equal(summarizeBackgroundJob("Review", { status: "review", dismissed: true }), null);
+  assert.equal(summarizeBackgroundJob("Review", { status: "pulling", restored: true, interrupted: true }).state, "waiting");
+  assert.equal(summarizeBackgroundJob("Review", { status: "pulling", restored: true, interrupted: true, dismissed: true }), null);
+  assert.equal(summarizeBackgroundJob("Review", { status: "review", restored: true, interrupted: false }).state, "finished");
+  assert.equal(summarizeBackgroundJob("Review", { status: "pulling", restored: true, interrupted: true, recoveryFailed: true }).state, "waiting");
   assert.equal(summarizeBackgroundJob("Try repair", { phase: "waiting" }).state, "waiting");
   for (const phase of ["rust-blocked", "waiting-new-try", "paused", "needs-rebase", "error", "unknown"]) {
     assert.equal(summarizeBackgroundJob("Try repair", { phase }), null);
@@ -17,6 +22,17 @@ test("job monitor shows actual work and excludes unresolved historical records",
   assert.equal(preparing.state, "running");
   assert.equal(preparing.aiRunning, false);
   assert.equal(preparing.detail, "Preparing checkout");
+});
+
+test("restored patch sessions are history until a live operation resumes", () => {
+  for (const status of ["preparing", "reviewing", "applying", "amending", "review"]) {
+    const saved = { id: "saved", status, restored: true, interrupted: status !== "review" };
+    const job = summarizeBackgroundJob("Update", saved);
+    assert.equal(job.state, "finished");
+    assert.equal(job.phase, status === "review" ? "saved" : "interrupted");
+    assert.match(job.detail, /No work is running/);
+    assert.equal(summarizeBackgroundJob("Update", { ...saved, status: "preparing", updateOperationRunning: true }).state, "running");
+  }
 });
 
 test("monitor authenticates, scopes saved jobs, and shows live state without starting work", async t => {
@@ -37,7 +53,7 @@ test("monitor authenticates, scopes saved jobs, and shows live state without sta
   t.after(async () => { server.server.closeAllConnections(); await new Promise(resolve => server.server.close(resolve)); });
   assert.equal((await fetch(new URL("/api/background-jobs?token=wrong", server.url))).status, 403);
   const data = await (await fetch(new URL("/api/background-jobs?token=test", server.url))).json();
-  assert.deepEqual(data.jobs.map(job => job.id), ["Try repair:waiting", "Try repair:done"]);
+  assert.deepEqual(data.jobs.map(job => job.id), ["Try repair:waiting", "Try repair:done", "Try repair:old"]);
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
   const page = await browser.newPage(); await page.goto(server.url);
   await page.evaluate(async () => (await import("/assets/graph-client/background-jobs.js")).initializeBackgroundJobs());
@@ -55,7 +71,7 @@ test("monitor authenticates, scopes saved jobs, and shows live state without sta
   assert.equal(await page.locator(".background-job").count(), 1);
   assert.match(await page.locator(".jobs-summary").textContent(), /1 waiting.*0 AI processes running.*paused/);
   await page.getByLabel("Show finished jobs").check();
-  assert.equal(await page.locator(".background-job").count(), 2);
+  assert.equal(await page.locator(".background-job").count(), 3);
   assert.equal(await page.getByRole("heading", { name: "Rust failure", exact: true }).count(), 0);
   assert.doesNotMatch(await page.locator(".jobs-summary").textContent(), /blocked/);
   states[1].phase = "passed";

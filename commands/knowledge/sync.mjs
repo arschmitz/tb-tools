@@ -22,18 +22,30 @@ export async function saveLocalKnowledgeHistory(store) {
     try {
       const parent = await git(["rev-parse", "--verify", "refs/heads/main"]).catch(() => "");
       const known = new Set(parent ? (await git(["ls-tree", "-r", "--name-only", parent])).split("\n") : []);
-      const pending = store.all().filter(record => !known.has(`${record.visibility}/records/${record.id}.json`));
-      if (!pending.length) return { committed: 0, commit: parent };
+      const throughRowid = store.maxRecordRowid();
+      let afterRowid = 0, committed = 0;
       await git(parent ? ["read-tree", parent] : ["read-tree", "--empty"]);
-      for (const record of pending) {
-        const file = store.file(record);
-        if (canonical(JSON.parse(await readFile(file, "utf8"))) !== canonical(record)) throw new Error("Local knowledge record changed.");
+      while (true) {
+        const rows = store.recordIds({ afterRowid, throughRowid });
+        if (!rows.length) break;
+        const pending = rows.filter(record => !known.has(`${record.visibility}/records/${record.id}.json`));
+        for (const row of pending) {
+          const record = store.get(row.id);
+          if (!record) throw new Error("Unknown knowledge record.");
+          const file = store.file(row);
+          if (canonical(JSON.parse(await readFile(file, "utf8"))) !== canonical(record)) throw new Error("Local knowledge record changed.");
+        }
+        if (pending.length) {
+          await addGitRecords(pending, store, repository, env, record => `${record.visibility}/records/${record.id}.json`);
+          committed += pending.length;
+        }
+        afterRowid = rows.at(-1).rowid;
       }
-      await addGitRecords(pending, store, repository, env, record => `${record.visibility}/records/${record.id}.json`);
+      if (!committed) return { committed: 0, commit: parent };
       const tree = await git(["write-tree"]);
       const commit = await git(["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", "Record local knowledge"]);
       await git(["update-ref", "refs/heads/main", commit, parent || "0".repeat(40)]);
-      return { committed: pending.length, commit };
+      return { committed, commit };
     } finally { await rm(index, { force: true }); }
   });
 }

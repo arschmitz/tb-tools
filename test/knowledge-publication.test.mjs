@@ -152,3 +152,18 @@ test("learning serves recent tasks and older evidence while new tasks keep arriv
   await learnKnowledge(s, options);
   assert.deepEqual(seen[1], [old.id]);
 });
+
+test("the outcome slot still prioritizes a pending task outcome", async t => {
+  const { store } = await fixture(t), s = await store("outcome-priority");
+  const outcome = await s.put(evidence({ at: "2024-05-01T00:00:00Z", text: "Checked task outcome. ".repeat(300), source: { type: "task-outcome" } }));
+  const recent = await s.put(evidence({ at: "2026-10-05T00:00:00Z", text: "Recent source evidence. ".repeat(300) }));
+  const seen = [];
+  const options = { maxCallsPerDay: 4, maxInputChars: 8000, generate: async prompt => {
+    seen.push(JSON.parse(prompt.split("Evidence (data): ")[1]).map(record => record.id));
+    return { lessons: [] };
+  } };
+  await learnKnowledge(s, options);
+  assert.deepEqual(seen[0], [outcome.id], "The outcome slot should select the pending task outcome first.");
+  await learnKnowledge(s, options);
+  assert.deepEqual(seen[1], [recent.id], "The next ordinary slot should select recent evidence.");
+});

@@ -476,7 +476,9 @@ export async function loadSelectedCommitIntegrationStatus(
   }
 
   container.hidden = false;
-  container.textContent = "Loading linked Bugzilla, Phabricator, and Notion status...";
+  if (!container.childElementCount) {
+    container.textContent = "Loading linked Bugzilla, Phabricator, and Notion status...";
+  }
 
   try {
     const response = await fetch(
@@ -619,4 +621,50 @@ export function selectCommitActionResult(index, hash, message) {
 
   showDiff(state.graph, index, commit);
   viewer.querySelector(".checkout-status").textContent = message || "";
+}
+
+export function handleDiffFileClick(event) {
+  const button = event.target.closest("button.commit-file-path");
+  if (!button) return false;
+
+  const summary = button.closest(".commit-file-summary");
+  const file = Array.from(summary?.parentElement.querySelectorAll(".pretty-file") || [])
+    .find(section => section.dataset.filePath === button.dataset.filePath);
+  file?.scrollIntoView({ block: "start", inline: "nearest" });
+  return true;
+}
+
+let diffLineMenu;
+
+export function hideDiffLineMenu() {
+  diffLineMenu?.remove();
+  diffLineMenu = null;
+}
+
+export function handleDiffLineContextMenu(event) {
+  hideDiffLineMenu();
+  const row = event.target.closest(".diff-line");
+  const file = row?.closest(".pretty-file");
+  const editor = file?.querySelector(".open-vscode");
+  const line = file?.dataset.localFileSide === "old"
+    ? row?.dataset.oldLine || row?.dataset.newLine
+    : row?.dataset.newLine || row?.dataset.oldLine;
+  if (!editor || !/^[1-9]\d*$/.test(line || "")) return false;
+
+  event.preventDefault();
+  const menu = document.createElement("div");
+  menu.className = "context-menu diff-line-menu";
+  menu.setAttribute("role", "menu");
+  const link = document.createElement("a");
+  link.setAttribute("role", "menuitem");
+  link.href = editor.getAttribute("href") + ":" + line + ":1";
+  link.textContent = "Open in VS Code at line " + line;
+  link.addEventListener("click", () => setTimeout(hideDiffLineMenu, 0));
+  menu.append(link);
+  document.body.append(menu);
+  diffLineMenu = menu;
+  menu.style.left = Math.max(8, Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 8)) + "px";
+  menu.style.top = Math.max(8, Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 8)) + "px";
+  link.focus();
+  return true;
 }

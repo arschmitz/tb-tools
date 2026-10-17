@@ -29,8 +29,15 @@ async function fixture(t, { enabled = true, permission = "granted" } = {}) {
   await page.route("**/api/patch-update**", async route => {
     const url = new URL(route.request().url());
     if (route.request().method() === "POST") {
+      if (url.pathname.endsWith("/steer")) {
+        const value = sessions.get(url.pathname.split("/")[3]);
+        value.status = "reviewing";
+        return route.fulfill({ json: value });
+      }
       const data = route.request().postDataJSON(); posts.push({ url: url.pathname, data });
-      const value = make("u" + (posts.length), data.mode); sessions.set(value.id, value);
+      const value = make("u" + (posts.length), data.mode);
+      if (data.mode === "freeform") value.status = "review";
+      sessions.set(value.id, value);
       return route.fulfill({ json: value });
     }
     const id = url.pathname.split("/")[3];
@@ -48,7 +55,15 @@ async function fixture(t, { enabled = true, permission = "granted" } = {}) {
     (await import("/assets/graph-client/patch-review-dialog.js")).initializePatchReviewDialog();
   });
   await page.goto(info.url); await initialize();
-  const openUpdate = mode => page.evaluate(async mode => (await import("/assets/graph-client/patch-update-dialog.js")).openPatchUpdateDialog({ patch: { id: "D1" }, graphIndex: 0, mode }), mode);
+  const openUpdate = async mode => {
+    await page.evaluate(async mode => (await import("/assets/graph-client/patch-update-dialog.js")).openPatchUpdateDialog({ patch: { id: "D1" }, graphIndex: 0, mode }), mode);
+    if (mode === "freeform") {
+      await page.getByLabel("Run Update in").selectOption("main");
+      await page.locator(".patch-update-steer-input").fill("Check this patch.");
+      await page.locator(".patch-update-steer-submit").click();
+      await page.waitForFunction(() => !globalThis.document.querySelector(".patch-update-steer-input").value);
+    }
+  };
   return { page, sessions, posts, openUpdate, initialize };
 }
 
@@ -249,6 +264,24 @@ for (const action of ["close", "escape"]) test(`Review ${action} cancels and dis
   assert.equal(await page.locator('[data-task-key="review:r1"]').count(), 0);
 });
 
+test("tray dismissal stays visible on save failure and hides only after server confirmation", async t => {
+  const { page, initialize } = await fixture(t);
+  await initialize();
+  let succeeds = false;
+  await page.route("**/api/background-jobs/dismiss", route => route.fulfill({ status: succeeds ? 200 : 503, json: { ok: succeeds } }));
+  await page.evaluate(async () => {
+    const { trackAiTask } = await import("/assets/graph-client/ai-task-tray.js");
+    trackAiTask({ kind: "review", session: { id: "dismiss-test", revision: "D123", status: "review" }, title: "Review save test" });
+  });
+  const card = page.locator('[data-task-key="review:dismiss-test"]');
+  await card.locator(".ai-task-dismiss").click();
+  await page.waitForFunction(() => globalThis.document.querySelector(".ai-task-notification-note")?.textContent?.includes("Could not save"));
+  assert.equal(await card.count(), 1);
+  succeeds = true;
+  await card.locator(".ai-task-dismiss").click();
+  await card.waitFor({ state: "hidden" });
+});
+
 test("a reopened review returns to the tray after it was dismissed", async t => {
   const { page, sessions, initialize, posts } = await fixture(t);
   const openReview = () => page.evaluate(async () =>
@@ -391,29 +424,44 @@ test("test output keeps selected colored text when polls repeat and append outpu
   assert.equal(result.text, "Failure text with more detail\nNext line");
 });
 
-test("running reviews restore from the server after browser task storage is lost", async t => {
+test("running and waiting reviews restore from the server after browser task storage is lost", async t => {
   const { page, sessions, initialize, posts } = await fixture(t);
   sessions.set("r1", { ok: true, id: "r1", revision: "D2", aiEnabled: true,
     status: "reviewing", issues: [], activity: [], output: "" });
+  sessions.set("handled", { ok: true, id: "handled", revision: "D4", aiEnabled: true,
+    status: "review", issues: [], activity: [], output: "" });
+  sessions.set("interrupted", { ok: true, id: "interrupted", revision: "D5", graphIndex: 0, aiEnabled: true,
+    commitTitle: "Bug 123 - Fix the Calendar save flow", updatedAt: "2026-10-10T12:00:00Z",
+    status: "pulling", interrupted: true, restored: true, issues: [], activity: [], output: "" });
   await page.route("**/api/background-jobs?*", route => route.fulfill({ json: {
     ok: true, jobs: [
       { id: "Review:r1", kind: "Review", state: "running", title: "D2" },
       { id: "Review:finished", kind: "Review", state: "finished", title: "D3" },
       { id: "Review:handled", kind: "Review", state: "waiting", title: "D4" },
+      { id: "Review:interrupted", kind: "Review", state: "waiting", phase: "interrupted", title: "D5" },
       { id: "Rebase:old", kind: "Rebase", state: "waiting", title: "Old rebase" },
     ],
   } }));
-  await page.evaluate(() => sessionStorage.clear());
+  await page.evaluate(() => globalThis.sessionStorage.clear());
   await page.reload();
   await initialize();
   const card = page.locator('[data-task-key="review:r1"]');
   await card.waitFor({ state: "visible" });
   assert.equal(await page.locator('[data-task-key="review:finished"]').count(), 0);
-  assert.equal(await page.locator('[data-task-key="review:handled"]').count(), 0);
+  await page.locator('[data-task-key="review:handled"]').waitFor({ state: "visible" });
   assert.equal(await page.locator('[data-task-key="rebase:old"]').count(), 0);
   await card.locator(".ai-task-open").click();
   await page.locator("#patch-review-dialog[open]").waitFor();
   assert.equal(posts.length, 0, "restoring a review must not start another review");
+  const interrupted = page.locator('[data-task-key="review:interrupted"]');
+  await interrupted.waitFor({ state: "visible" });
+  assert.equal(await interrupted.getAttribute("data-state"), "waiting");
+  assert.match(await interrupted.locator(".ai-task-title").innerText(), /Fix the Calendar save flow.*D5/);
+  assert.match(await interrupted.locator(".ai-task-state").innerText(), /Stopped — no work running.*saved/);
+  await page.locator("#patch-review-dialog .ai-task-minimize").click();
+  await interrupted.locator(".ai-task-open").click();
+  await page.waitForFunction(() => globalThis.document.querySelector("#patch-review-dialog[open]"));
+  assert.equal(posts.at(-1).data.revision, "D5");
 });
 
 for (const action of ["close", "escape"]) test(`conflict dialog ${action} dismisses its tray task`, async t => {
@@ -458,4 +506,49 @@ test("Verify shows Submit startup errors in its dialog and opens Submit after re
   await page.locator("#system-dialog .system-dialog-confirm").click();
   await page.locator("#submit-dialog[open]").waitFor();
   assert.equal(await page.locator("#patch-update-dialog").getAttribute("open"), null);
+});
+
+
+test("tray clicks open a known task while its server response is stalled", async t => {
+  const { page, openUpdate, posts } = await fixture(t);
+  await openUpdate("update");
+  await page.locator("#patch-update-dialog .ai-task-minimize").click();
+  await page.evaluate(() => {
+    globalThis.desktopFocusCalls = 0;
+    globalThis.window.commandsBrowser = { focus() { globalThis.desktopFocusCalls++; } };
+  });
+  let release;
+  const stalled = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  await page.route("**/api/patch-update/u1?**", async route => {
+    await stalled;
+    await route.abort().catch(() => {});
+  });
+  await page.locator('[data-task-key="update:u1"] .ai-task-open').click();
+  await page.locator("#patch-update-dialog[open]").waitFor({ timeout: 1500 });
+  assert.equal(await page.evaluate(() => globalThis.desktopFocusCalls), 1);
+  assert.equal(posts.length, 1, "opening must use the existing task");
+  release();
+});
+
+test("Implement opens on the first tray click before the Dashboard creates its dialog", async t => {
+  const { page } = await fixture(t);
+  const run = { ok: true, id: "tree-implement", bugId: 2061214, phase: "implementing", reports: [], instructions: [] };
+  let starts = 0;
+  await page.route("**/api/implement**", route => {
+    if (route.request().method() === "POST") starts++;
+    return route.fulfill({ json: route.request().url().includes("/diff?")
+      ? { ok: true, workingHtml: "", committedHtml: "" } : run });
+  });
+  await page.evaluate(async run => {
+    const { trackAiTask } = await import("/assets/graph-client/ai-task-tray.js");
+    trackAiTask({ kind: "implement", session: run, title: "Save new calendar events Implement", endpoint: "/api/implement/tree-implement" });
+  }, run);
+  assert.equal(await page.locator("#implement-dialog").count(), 0);
+  const card = page.locator('[data-task-key="implement:tree-implement"]');
+  await card.locator(".ai-task-open").click();
+  await page.locator("#implement-dialog[open]").waitFor();
+  assert.equal(await card.getAttribute("data-state"), "thinking");
+  assert.equal(await page.locator('[data-implement="title"]').innerText(), "Implement Bug 2061214");
+  assert.equal(starts, 0, "opening must not start another implementation");
 });

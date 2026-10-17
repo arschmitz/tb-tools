@@ -21,7 +21,7 @@ export async function importRecordedTryRuns({ graphs, store, runCommand = run })
           hash: attempt.hash, sourceHash: attempt.hash, subject: attempt.subject,
           tbToolsId: attempt.tbToolsId, patchId: attempt.patchId,
           geckoPath: path.dirname(graph.path), geckoHash: "", imported: true,
-          phase: "paused", nextCheckAt: null, attempts: [{ ...attempt, status: attempt.status || "unknown" }] };
+          phase: "paused", pauseReason: "Imported history has no saved source selection for automatic repair.", nextCheckAt: null, attempts: [{ ...attempt, status: attempt.status || "unknown" }] };
         store.save(state);
         known.add(attempt.url);
       }

@@ -233,11 +233,13 @@ function publicLink(anchor, repositories) {
 }
 export async function exportGroupedIngestion(directory) {
   const manifest = await readJSON(path.join(directory, "manifest.json")), status = await groupedIngestionStatus(directory), records = [];
+  const failedTargets = new Set(manifest.preparation.failures.map(failure => failure.target.id));
+
   for (const group of status.groups.filter(item => item.state === "reviewed")) {
     const producer = await readJSON(path.join(directory, "objects", `${group.producerHash}.json`));
     for (const file of producer.response.files) {
       const review = group.files.find(item => item.targetId === file.targetId);
-      if (review.decision === "rejected") continue;
+      if (review.decision === "rejected" || failedTargets.has(file.targetId)) continue;
       const target = manifest.groups.find(item => item.id === group.groupId).targets.find(item => item.id === file.targetId);
       const contractIds = new Set(file.units.flatMap(unit => unit.contractRefs || []));
       const contracts = (producer.response.contracts || []).filter(contract => contractIds.has(contract.id));

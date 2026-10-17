@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +23,25 @@ export async function shareGitRepository(first, second, runCommand = run) {
   return await common(first) === await common(second);
 }
 
+export async function recordWorktree({ source, destination, runCommand = run }) {
+  const common = String(await runCommand({ cmd: "git", args: ["rev-parse", "--git-common-dir"],
+    cwd: source, capture: true, silent: true })).trim();
+  const registry = path.join(path.resolve(source, common), "tb-tools-worktrees");
+  const id = createHash("sha256").update(path.resolve(destination)).digest("hex");
+  await mkdir(registry, { recursive: true });
+  await writeFile(path.join(registry, `${id}.json`), JSON.stringify({
+    source: path.resolve(source), destination: path.resolve(destination), ownerPid: process.pid,
+    createdAt: new Date().toISOString(),
+  }));
+}
+
+export async function forgetWorktree({ source, destination, runCommand = run }) {
+  const common = String(await runCommand({ cmd: "git", args: ["rev-parse", "--git-common-dir"],
+    cwd: source, capture: true, silent: true })).trim();
+  const id = createHash("sha256").update(path.resolve(destination)).digest("hex");
+  await rm(path.join(path.resolve(source, common), "tb-tools-worktrees", `${id}.json`), { force: true });
+}
+
 export async function ensureWorktree({ source, destination, revision = "HEAD",
   update = false, runCommand = run }) {
   const git = async (cwd, args) => String(await runCommand({
@@ -31,11 +50,13 @@ export async function ensureWorktree({ source, destination, revision = "HEAD",
   if (!await exists(path.join(destination, ".git"))) {
     if (await exists(destination)) throw new Error(`Worktree path is occupied: ${destination}`);
     await mkdir(path.dirname(destination), { recursive: true });
+    await recordWorktree({ source, destination, runCommand });
     await git(source, ["worktree", "add", "--detach", destination, revision]);
   } else {
     if (!await shareGitRepository(source, destination, runCommand)) {
       throw new Error(`Worktree belongs to a different repository: ${destination}`);
     }
+    await recordWorktree({ source, destination, runCommand });
     if (update) {
       const changed = await git(destination, ["status", "--porcelain", "--untracked-files=no"]);
       if (changed) throw new Error(`Worktree has source changes: ${destination}`);
@@ -56,6 +77,30 @@ export async function ensurePairedWorktrees({ geckoSource, commSource, directory
   return { gecko: geckoTree, comm: commTree };
 }
 
+export async function removePairedWorktrees({ geckoSource, commSource, directory, runCommand = run }) {
+  const root = await realpath(directory).catch(async error => {
+    if (error.code !== "ENOENT") throw error;
+    return path.join(await realpath(path.dirname(directory)).catch(error => { if (error.code === "ENOENT") return path.resolve(path.dirname(directory)); throw error; }), path.basename(directory));
+  });
+  if ([path.resolve(geckoSource), path.resolve(commSource)].includes(root)) throw new Error("Cannot remove a source checkout.");
+  for (const [source, destination] of [[commSource, path.join(root, "comm")], [geckoSource, root]]) {
+    const git = async args => String(await runCommand({ cmd: "git", args, cwd: source, capture: true, silent: true })).trim();
+    const registered = (await git(["worktree", "list", "--porcelain"])).split("\n").includes(`worktree ${destination}`);
+    if (registered) {
+      if (await exists(path.join(destination, ".git"))) {
+        const dirty = String(await runCommand({ cmd: "git", args: ["status", "--porcelain", "--untracked-files=no"], cwd: destination, capture: true, silent: true })).trim();
+        if (dirty) throw new Error(`Build worktree has source changes: ${destination}`);
+      }
+      try { await git(["worktree", "remove", "--force", destination]); }
+      catch (error) {
+        if ((await git(["worktree", "list", "--porcelain"])).split("\n").includes(`worktree ${destination}`)) throw error;
+      }
+    }
+    await forgetWorktree({ source, destination, runCommand });
+  }
+  await rm(root, { recursive: true, force: true });
+}
+
 export async function writeWorktreeBuildConfig({ gecko, name }) {
   const sccache = await getSccacheConfigureOption();
   const cache = path.join(process.env.TB_BUILD_CACHE_PATH || path.join(os.homedir(), ".tb-tools", "build-cache"), "compiler");
@@ -64,7 +109,7 @@ export async function writeWorktreeBuildConfig({ gecko, name }) {
   const server = process.platform === "win32"
     ? `export SCCACHE_SERVER_PORT=${20000 + parseInt(serverId.slice(0, 4), 16) % 40000}`
     : `export SCCACHE_SERVER_UDS=${quote(path.join(os.tmpdir(), `tb-cache-${serverId}.sock`))}`;
-  const text = ["export SCCACHE_DIRECT=false", server, "export SCCACHE_IDLE_TIMEOUT=120", `export SCCACHE_BASEDIRS=${quote(path.resolve(gecko))}`,
+  const text = ["export SCCACHE_DIRECT=false", server, "export SCCACHE_IDLE_TIMEOUT=120", "export SCCACHE_CACHE_SIZE=5G", `export SCCACHE_BASEDIRS=${quote(path.resolve(gecko))}`,
     `export SCCACHE_DIR=${quote(cache)}`, "ac_add_options --enable-project=comm/mail",
     ...(sccache ? [sccache] : []),
     `mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-${name}`, ""].join("\n");
@@ -79,7 +124,7 @@ export async function writeWorktreeBuildConfig({ gecko, name }) {
 }
 
 export function isGeneratedWorktreeBuildConfig(text) {
-  return /^(?:export SCCACHE_(?:DIRECT|BASEDIRS|DIR|SERVER_UDS|SERVER_PORT|IDLE_TIMEOUT)=[^\n]+\n)*ac_add_options --enable-project=comm\/mail\n(?:ac_add_options --with-ccache=[^\n]+\n)?mk_add_options MOZ_OBJDIR=@TOPSRCDIR@\/obj-[a-z0-9-]+\n$/.test(text);
+  return /^(?:export SCCACHE_(?:DIRECT|BASEDIRS|DIR|SERVER_UDS|SERVER_PORT|IDLE_TIMEOUT|CACHE_SIZE)=[^\n]+\n)*ac_add_options --enable-project=comm\/mail\n(?:ac_add_options --with-ccache=[^\n]+\n)?mk_add_options MOZ_OBJDIR=@TOPSRCDIR@\/obj-[a-z0-9-]+\n$/.test(text);
 }
 
 export async function getSccacheConfigureOption() {

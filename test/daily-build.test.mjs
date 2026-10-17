@@ -40,6 +40,10 @@ test("daily build uses detached paired worktrees and does not move either source
     now: () => date,
     build: async options => {
       built.push(options);
+      const marker = path.join(options.cwd, "obj-daily-build", "incremental-output");
+      if (built.length > 1) assert.equal(await readFile(marker, "utf8"), "keep for the next build");
+      await mkdir(path.dirname(marker), { recursive: true });
+      await writeFile(marker, "keep for the next build");
       if (failBuild) throw new Error("Build failed before completion");
       assert.equal(git(options.cwd, "rev-parse", "HEAD"), git(geckoSource, "rev-parse", "origin/main"));
       assert.equal(git(path.join(options.cwd, "comm"), "rev-parse", "HEAD"),
@@ -77,8 +81,9 @@ test("daily build uses detached paired worktrees and does not move either source
   const newSourceHead = git(commSource, "rev-parse", "HEAD");
   await service.runNow();
   await service.wait();
-  assert.equal(built.length, 2);
-  assert.equal(git(path.join(directory, "gecko", "comm"), "rev-parse", "HEAD"), newSourceHead);
+  assert.equal(built.length, 2, JSON.stringify(service.status()));
+  assert.equal(service.status().commRevision, newSourceHead);
+  assert.match(await readFile(path.join(directory, "gecko", ".git"), "utf8"), /gitdir:/);
   assert.equal(git(geckoSource, "rev-parse", "HEAD"), sourceHeads[0]);
   assert.deepEqual(service.status().settings.times, ["09:00", "21:30"]);
   assert.equal(published.length, 2);
@@ -120,5 +125,5 @@ test("a second service keeps a running build and cannot start another one", asyn
   await first.wait();
   await second.runNow();
   await second.wait();
-  assert.equal(builds, 2);
+  assert.equal(builds, 2, JSON.stringify(second.status()));
 });

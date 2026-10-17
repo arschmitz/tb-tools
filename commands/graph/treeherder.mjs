@@ -1,10 +1,12 @@
+import { leaseStorage, pruneStorage, STORAGE_LIMITS } from "./storage-retention.mjs";
+import { compactTryBaseline } from "./try-evidence-memory.mjs";
 import { createReadStream, createWriteStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { gunzipSync } from "node:zlib";
+import { createGunzip } from "node:zlib";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile, access } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, access, utimes, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -16,6 +18,34 @@ const LANDO_INSTANCES = {
   "lando-dev-2025": "https://lando-dev.allizom.org",
 };
 const TASKCLUSTER = "https://firefox-ci-tc.services.mozilla.com";
+
+async function saveProfile(response, file) {
+  const source = response.body ? Readable.fromWeb(response.body)
+    : Readable.from([Buffer.from(await response.arrayBuffer())]);
+  const iterator = source[Symbol.asyncIterator]();
+  const prefix = [];
+  let length = 0;
+  try {
+    while (length < 2) {
+      const next = await iterator.next();
+      if (next.done) break;
+      prefix.push(next.value);
+      length += next.value.length;
+    }
+    const header = Buffer.concat(prefix);
+    const input = Readable.from((async function* () {
+      yield header;
+      for (;;) {
+        const next = await iterator.next();
+        if (next.done) break;
+        yield next.value;
+      }
+    })());
+    const output = createWriteStream(file, { mode: 0o600 });
+    if (header[0] === 0x1f && header[1] === 0x8b) await pipeline(input, createGunzip(), output);
+    else await pipeline(input, output);
+  } finally { source.destroy(); }
+}
 
 export function parseTryUrl(value) {
   const url = new URL(value);
@@ -31,7 +61,23 @@ export function parseTryUrl(value) {
 }
 
 export function createTreeherderClient({ fetchImpl = fetch, signal,
-  evidenceDirectory = path.join(os.homedir(), ".tb-tools", "try-evidence") } = {}) {
+  evidenceDirectory = (process.env.NODE_TEST_CONTEXT || globalThis.__tbToolsBlockExternalApis)
+    ? path.join(os.tmpdir(), `tb-tools-test-evidence-${process.pid}`)
+    : path.join(os.homedir(), ".tb-tools", "try-evidence") } = {}) {
+  let lastPruned = 0;
+  let pruning;
+  async function pruneEvidenceCache() {
+    pruning ||= pruneStorage({ directory: evidenceDirectory, ...STORAGE_LIMITS.tryEvidence }).finally(() => { pruning = null; lastPruned = Date.now(); });
+    return pruning;
+  }
+  async function useCachedEvidence(value) {
+    for (const log of value.logs || []) {
+      if (!log.fullLogPath) continue;
+      try { await utimes(log.fullLogPath, new Date(), new Date()); }
+      catch (error) { if (error.code === "ENOENT") return false; throw error; }
+    }
+    return true;
+  }
   async function get(url, json = true) {
     const response = await fetchImpl(url, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000) });
     if (!response.ok) throw Object.assign(new Error(`Treeherder request failed (${response.status}): ${url}`), { status: response.status });
@@ -54,6 +100,9 @@ export function createTreeherderClient({ fetchImpl = fetch, signal,
     return results;
   }
   async function evidence(repo, job) {
+    if (Date.now() - lastPruned > 600000) await pruneEvidenceCache();
+    const releaseCache = await leaseStorage(evidenceDirectory);
+    try {
     // Completed job IDs identify immutable logs. Include the retry and result
     // so a different execution cannot reuse the wrong evidence.
     const key = createHash("sha256").update(JSON.stringify([repo, job.id, job.task_id, job.retry_id, job.result])).digest("hex");
@@ -62,7 +111,11 @@ export function createTreeherderClient({ fetchImpl = fetch, signal,
     if (cacheable) {
       try {
         const cached = JSON.parse(await readFile(file, "utf8"));
-        return cached.cacheVersion ? cached.evidence : cached;
+        const value = cached.cacheVersion ? cached.evidence : cached;
+        if (await useCachedEvidence(value)) {
+          await utimes(file, new Date(), new Date());
+          return value;
+        }
       }
       catch (error) { if (error.code !== "ENOENT") throw error; }
     }
@@ -74,6 +127,7 @@ export function createTreeherderClient({ fetchImpl = fetch, signal,
       await rename(temporary, file);
     }
     return result;
+    } finally { await releaseCache(); }
   }
 
   async function collectEvidence(repo, job) {
@@ -142,16 +196,16 @@ export function createTreeherderClient({ fetchImpl = fetch, signal,
         const url = `${TASKCLUSTER}/api/queue/v1/task/${job.task_id}/runs/${run}/artifacts/${profile.name}`;
         const fullLogPath = path.join(evidenceDirectory, createHash("sha256").update(url).digest("hex") + ".json");
         try {
-          try { await readFile(fullLogPath); } catch (error) {
+          try { await access(fullLogPath); } catch (error) {
             if (error.code !== "ENOENT") throw error;
             const response = await fetchImpl(url, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000) });
             if (!response.ok) throw new Error(`Diagnostic download failed (${response.status}): ${url}`);
-            const bytes = Buffer.from(await response.arrayBuffer());
-            const decoded = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes;
-            JSON.parse(decoded.toString("utf8"));
+            // Decode directly to disk. Large profiles must not fill the service heap.
             const temporary = `${fullLogPath}.${randomUUID()}.tmp`;
-            await writeFile(temporary, decoded, { mode: 0o600 });
-            await rename(temporary, fullLogPath);
+            try {
+              await saveProfile(response, temporary);
+              await rename(temporary, fullLogPath);
+            } finally { await rm(temporary, { force: true }); }
           }
           output.push({ name: "startup_profile", url, fullLogPath, truncated: false,
             text: "Complete decoded startup profile is available locally. Use a script to inspect relevant thread stacks and markers; do not print the entire JSON." });
@@ -170,7 +224,7 @@ export function createTreeherderClient({ fetchImpl = fetch, signal,
       url: `${TREEHERDER}/jobs?repo=${repo}&selectedJob=${job.id}` };
   }
   return {
-    pushes, jobs, evidence,
+    pushes, jobs, evidence, evidenceDirectory, pruneEvidenceCache,
     async inspect(url) {
       let { repo, revision, landoCommitID, landoInstance } = parseTryUrl(url);
       if (!revision && landoCommitID) {
@@ -231,6 +285,8 @@ export function createTreeherderClient({ fetchImpl = fetch, signal,
 
     },
     async compare(inspection, onProgress = () => {}) {
+      const releaseCache = await leaseStorage(evidenceDirectory);
+      try {
       const failures = [];
       for (const job of inspection.failures) failures.push(await evidence(inspection.repo, job));
       const candidates = [];
@@ -254,8 +310,9 @@ export function createTreeherderClient({ fetchImpl = fetch, signal,
           const checkpoint = path.join(evidenceDirectory, `push-${repo}-${push.id}.json`);
           let cached;
           try { cached = JSON.parse(await readFile(checkpoint, "utf8")); } catch (error) { if (error.code !== "ENOENT") throw error; }
-          if (cached && cached.revision === push.revision) {
-            baseline[index] = cached;
+          if (cached && cached.revision === push.revision && (await Promise.all((cached.failures || []).map(useCachedEvidence))).every(Boolean)) {
+            await utimes(checkpoint, new Date(), new Date());
+            baseline[index] = compactTryBaseline(cached);
             completed++; reused++; progress();
             continue;
           }
@@ -281,9 +338,9 @@ export function createTreeherderClient({ fetchImpl = fetch, signal,
             activity.done = failed.length;
             if (activity.done % 5 === 0 || activity.done === activity.total) progress();
           }
-          baseline[index] = { repo, revision: push.revision, author: push.author || push.who,
-            revisions: push.revisions, jobs: allJobs, failures: failed };
-          // Completed runs are permanent snapshots, including unavailable logs.
+          baseline[index] = compactTryBaseline({ repo, revision: push.revision, author: push.author || push.who,
+            revisions: push.revisions, jobs: allJobs, failures: failed });
+          // Completed runs can reuse cached evidence until retention removes it.
           // Missing comparison evidence must not force another download scan.
           if (allJobs.length && allJobs.every(job => job.state === "completed")) {
             await mkdir(evidenceDirectory, { recursive: true });
@@ -298,6 +355,7 @@ export function createTreeherderClient({ fetchImpl = fetch, signal,
       const failure = results.find(result => result.status === "rejected");
       if (failure) throw failure.reason;
       return { failures, baseline };
+      } finally { await releaseCache(); await pruneEvidenceCache(); }
     },
     async findSubmission(marker, since) {
       // Search all pushes since this intent, including when the server was down.

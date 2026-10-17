@@ -191,13 +191,20 @@ export function handleCommitReviewerPillEvent(event) {
   return true;
 }
 
+function addPendingCommitReviewers() {
+  const values = commitReviewerInput.value.split(",");
+  for (const value of values) {
+    addCommitReviewer(value);
+  }
+}
+
 export function handleCommitReviewerInputKeydown(event) {
   if (event.key !== "Enter" && event.key !== ",") {
     return;
   }
 
   event.preventDefault();
-  addCommitReviewer(commitReviewerInput.value);
+  addPendingCommitReviewers();
 }
 
 function renderCommitMetadata(metadata) {
@@ -277,6 +284,7 @@ export async function submitCommitDialog(event) {
     return;
   }
 
+  addPendingCommitReviewers();
   setCommitDialogBusy(true);
   setCommitStatus("Creating commit...");
   uiState.lastMachSession = null;

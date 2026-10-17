@@ -713,6 +713,55 @@ main {
   position: sticky;
   top: 78px;
 }
+/* Each Tree column owns its scroll area. */
+@media (min-width: 981px) {
+  body.graph-view-active {
+    height: 100dvh;
+    overflow: hidden;
+  }
+  body.graph-view-active main {
+    box-sizing: border-box;
+    height: calc(100dvh - var(--console-header-height, 88px));
+    min-height: 0;
+  }
+  body.graph-view-active .panel.active {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  body.graph-view-active .summary {
+    flex: 0 0 auto;
+  }
+  body.graph-view-active .workspace {
+    align-items: stretch;
+    flex: 1 1 0;
+    min-height: 0;
+  }
+  body.graph-view-active .graph,
+  body.graph-view-active .diff-viewer {
+    min-height: 0;
+    min-width: 0;
+    max-height: none;
+    position: static;
+    overscroll-behavior: contain;
+  }
+  body.graph-view-active .pane-resizer {
+    height: auto;
+    min-height: 0;
+    position: static;
+  }
+}
+.diff-viewer .diff-message,
+.diff-viewer .file-diff,
+.diff-viewer .review-code-block,
+.diff-viewer .review-suggestion {
+  max-height: none;
+  overflow: visible;
+}
+.diff-viewer .pretty-file {
+  overflow: visible;
+}
 .pane-resizer {
   align-items: center;
   align-self: stretch;
@@ -3447,6 +3496,9 @@ body.is-resizing-panes {
 .stat-deletions {
   color: #cf222e;
 }
+.open-vscode {
+  text-decoration: none;
+}
 .copy-path {
   background: var(--diff-header-bg);
   border: 1px solid var(--diff-border);
@@ -3460,6 +3512,65 @@ body.is-resizing-panes {
 .copy-path:focus {
   background: var(--diff-hover-bg);
   outline: none;
+}
+.commit-file-summary {
+  margin-bottom: 16px;
+  border: 1px solid var(--diff-border);
+  border-radius: 6px;
+  background: var(--diff-bg);
+  color: var(--diff-code);
+}
+.commit-file-summary > summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 600;
+  background: var(--diff-header-bg);
+}
+.commit-file-summary > summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+.commit-file-list {
+  list-style: none;
+  padding: 0 12px;
+  margin: 0;
+}
+.commit-file-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--diff-border);
+}
+.commit-file-status {
+  min-width: 64px;
+  font-size: 12px;
+}
+.commit-file-path {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--link-color, #0969da);
+  text-align: left;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: monospace;
+  font-size: 12px;
+}
+.commit-file-path:hover {
+  text-decoration: underline;
+}
+.commit-file-path:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.commit-file-row .file-stats {
+  flex-shrink: 0;
+}
+.commit-file-binary {
+  font-size: 12px;
 }
 .file-diff {
   background: var(--diff-bg);
@@ -3542,6 +3653,25 @@ body.is-resizing-panes {
   vertical-align: top;
   white-space: nowrap;
   width: 44px;
+}
+.patch-review-context-diff-content .line-number button[data-review-add-comment] {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  cursor: pointer;
+  display: block;
+  font: inherit;
+  margin: 0;
+  min-height: 0;
+  padding: 0;
+  text-align: right;
+  width: 100%;
+}
+.patch-review-context-diff-content .line-number button[data-review-add-comment]:focus-visible {
+  outline: 2px solid #0969da;
+  outline-offset: 2px;
 }
 .new-line {
   border-right: 1px solid var(--diff-gutter-border);
@@ -3684,6 +3814,14 @@ body.is-resizing-panes {
 }
 .dashboard-panel[hidden] {
   display: none;
+}
+@media (min-width: 761px) {
+  .desktop-browser-host .dashboard-panel {
+    height: calc(100dvh - var(--console-header-height, 129px) - 24px);
+  }
+  .desktop-browser-host.has-command-status .dashboard-panel {
+    height: calc(100dvh - var(--console-header-height, 129px) - 76px);
+  }
 }
 .phabricator-cache-panel {
   box-sizing: border-box;
@@ -3996,6 +4134,68 @@ body.is-resizing-panes {
 .patch-review-inline-suggestion-input {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+.patch-review-code-editor {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.patch-review-code-editor > button {
+  justify-self: start;
+  background: var(--diff-gutter-bg);
+  border: 1px solid var(--diff-gutter-border);
+  border-radius: 6px;
+  color: var(--diff-code);
+  cursor: pointer;
+  font: 600 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 6px 12px;
+}
+.patch-review-code-editor > button:focus-visible {
+  outline: 2px solid #0969da;
+  outline-offset: 2px;
+}
+.patch-review-code-editor [hidden] {
+  display: none;
+}
+.patch-review-code-surface {
+  background: var(--diff-bg);
+  border: 1px solid var(--diff-gutter-border);
+  border-radius: 8px;
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+}
+.patch-review-code-surface:focus-within {
+  border-color: #0969da;
+  box-shadow: 0 0 0 2px rgb(9 105 218 / 18%);
+}
+.patch-review-code-gutter {
+  background: var(--diff-gutter-bg);
+  border-right: 1px solid var(--diff-gutter-border);
+  box-sizing: border-box;
+  color: var(--diff-muted);
+  flex: 0 0 54px;
+  font: 13px/22px ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: 0;
+  max-height: 420px;
+  overflow: hidden;
+  padding: 12px 10px;
+  text-align: right;
+  user-select: none;
+}
+.patch-review-code-surface .patch-review-inline-suggestion-input {
+  background: var(--diff-bg);
+  border: 0;
+  border-radius: 0;
+  color: var(--diff-code);
+  flex: 1 1 0;
+  font: 13px/22px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 400;
+  max-height: 420px;
+  min-width: 0;
+  outline: none;
+  padding: 12px 14px;
+  tab-size: 2;
+}
 .patch-review-inline-suggested-diff {
   border: 1px solid #b6d7f2;
   border-radius: 4px;
@@ -4048,6 +4248,12 @@ body.is-resizing-panes {
 }
 .patch-review-actions {
   align-items: flex-end;
+}
+.patch-review-actions > button,
+.patch-review-inline-actions > button {
+  flex: 0 0 auto;
+  justify-self: end;
+  width: auto;
 }
 .patch-review-final {
   flex: 1 0 100%;
@@ -4892,6 +5098,19 @@ body.has-command-status .dashboard-panel {
 .patch-review-status {
   margin: 0;
 }
+.patch-review-apply-conflict {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+.patch-review-apply-conflict[hidden] {
+  display: none;
+}
+.patch-review-apply-conflict textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
 .patch-review-status.error {
   color: #cf222e;
 }
@@ -5300,6 +5519,9 @@ body.patch-update-open {
   overflow: auto;
 }
 .patch-update-context-details[hidden] {
+  display: none;
+}
+.patch-update-steer[hidden] {
   display: none;
 }
 .patch-update-context-details > div {
@@ -11030,6 +11252,10 @@ body.patch-review-open {
 .patch-review-final:not([open]) .patch-review-final-details {
   display: none;
 }
+.patch-review-final:not([open]) {
+  flex: 0 0 auto;
+  width: max-content;
+}
 .patch-update-context-diff-content.showing-working-tree {
   display: flex;
   flex-direction: column;
@@ -11267,17 +11493,20 @@ body.patch-review-open {
 .ai-task-list { display: grid; gap: .5rem; max-height: 40vh; overflow: auto; }
 .ai-task-toast { display: flex; align-items: center; background: white; border: 1px solid #b7c2d0; border-left: 4px solid #2674cd; border-radius: 8px; }
 .ai-task-toast[data-state="waiting"] { border-left-color: #9a6700; }
+.ai-task-toast[data-state="error"] { border-left-color: #cf222e; }
 .ai-task-toast[data-state="complete"] { border-left-color: #1a7f37; }
 .ai-task-open { display: grid; gap: .25rem; text-align: left; padding: .65rem; flex: 1; min-width: 0; background: transparent; color: inherit; border: 0; cursor: pointer; }
 .ai-task-title, .ai-task-state { overflow-wrap: anywhere; }
 .ai-task-state { font-size: .85rem; }
 .ai-task-dismiss { margin: .3rem; }
+.dialog-commit-title { margin: 4px 0 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .ai-task-minimize { margin-inline-start: auto; flex-shrink: 0; }
 .ai-task-tray button:focus-visible, .ai-task-minimize:focus-visible { outline: 3px solid #2674cd; outline-offset: 2px; }
 @media (prefers-color-scheme: dark) {
   .ai-task-tray { background: #171c24; color: #e6edf3; border-color: #465366; }
   .ai-task-toast { background: #222a35; border-color: #465366; border-left-color: #70b7ff; }
   .ai-task-toast[data-state="waiting"] { border-left-color: #e3b341; }
+  .ai-task-toast[data-state="error"] { border-left-color: #ff7b72; }
   .ai-task-toast[data-state="complete"] { border-left-color: #56d364; }
 }
 .ai-task-tray.collapsed { width: auto; }
@@ -11466,15 +11695,13 @@ button.dashboard-bug-title {
   border: 1px solid GrayText;
 }
 .console-settings-status { min-height: 1.2em; }
+.service-credentials-settings { border: 1px solid GrayText; border-radius: 6px; padding: 14px; margin: 16px 0; }
+.service-credentials-settings h3 { margin-top: 0; }
+.service-credentials-settings label { display: grid; gap: 4px; margin-top: 12px; }
+.service-credentials-settings input { width: 100%; box-sizing: border-box; padding: 6px; font: inherit; color: FieldText; background: Field; border: 1px solid GrayText; }
+.service-credentials-settings p { font-size: 13px; overflow-wrap: anywhere; }
+.service-credentials-status { min-height: 1.2em; }
 
-.build-status {
-  margin: 8px 16px;
-  padding: 10px;
-  border: 1px solid var(--border, #888);
-  border-radius: 6px;
-}
-.build-status-message { margin-right: 12px; }
-.build-output { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 /* Keep scheduled build controls usable in the desktop app and on a phone. */
 .daily-build-settings { border: 1px solid #aeb7c2; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
 .daily-build-settings label { display: block; margin: .7rem 0; }
@@ -11595,4 +11822,43 @@ button.dashboard-bug-title {
     --browser-tab-active-bg: #365d79;
     --console-tab-border: #485363;
   }
+}
+.patch-review-finding-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.patch-review-finding-feedback button[aria-pressed="true"] {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.diff-line-menu a {
+  display: block;
+  padding: 7px 8px;
+  border-radius: 4px;
+  color: inherit;
+  text-decoration: none;
+}
+.diff-line-menu a:hover,
+.diff-line-menu a:focus-visible {
+  background: rgba(31, 95, 159, 0.1);
+  outline: 2px solid currentColor;
+}
+
+.knowledge-gap-evaluations form {
+  display: grid;
+  gap: 0.75rem;
+  margin-block: 1rem;
+}
+.knowledge-gap-evaluations label {
+  display: grid;
+  gap: 0.25rem;
+}
+.knowledge-gap-evaluations pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

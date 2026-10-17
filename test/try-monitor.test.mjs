@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createTryMonitorStore, monitorRuns, TRY_CHECK_INTERVAL_MS, TRY_STATUS_CHECK_INTERVAL_MS } from "../commands/graph/try-monitor-store.mjs";
+import { createTryMonitorStore, mergeMonitoredTryRuns, monitorRuns, TRY_CHECK_INTERVAL_MS, TRY_STATUS_CHECK_INTERVAL_MS } from "../commands/graph/try-monitor-store.mjs";
 import { createTryMonitor } from "../commands/graph/try-monitor.mjs";
 import { validateTryAssessment, formatTryFixupMessage, getTryRepairActivity } from "../commands/graph/try-repair.mjs";
 import { createTreeherderClient, parseTryUrl } from "../commands/graph/treeherder.mjs";
@@ -22,6 +22,18 @@ async function setup(t, phase = "waiting") {
 const evidence = { failures: [{ id: "job" }], baseline: [] };
 const assessment = cause => ({ failures: [{ id: "job", cause, reason: "Exact error and source evidence", evidence: ["log URL and source lines"] }] });
 const failed = { jobs: [{}], complete: true, failures: [{ id: "job" }] };
+
+test("main tree keeps Try records from removed task checkouts without mixing task trees", () => {
+  const source = "/repo/comm";
+  const make = (id, repositoryPath = source) => ({ id, path: `/removed/task-${id}/comm`, repositoryPath,
+    sourceHash: id, phase: "passed", attempts: [{ id, hash: id, mergedInto: id, url: `https://example.com/${id}`, status: "passed" }] });
+  const monitors = [make("one"), make("two"), make("other", "/other/comm")];
+  const main = mergeMonitoredTryRuns({ path: source }, { runs: [] }, monitors);
+  assert.deepEqual(main.runs.map(run => run.id), ["one", "two"]);
+  assert.deepEqual(main.monitors.map(state => state.id), ["one", "two"]);
+  const task = mergeMonitoredTryRuns({ path: monitors[0].path }, { runs: [] }, monitors);
+  assert.deepEqual(task.runs.map(run => run.id), ["one"]);
+});
 
 test("usage limits stop assessment retries across restart until reset", async t => {
   const { store } = await setup(t);
@@ -749,4 +761,90 @@ test("status snapshots keep comparison evidence outside the workflow record", as
   saved.evidence = { failures: [], baseline: [] };
   store.save(saved);
   assert.deepEqual(store.read('test').evidence, { failures: [], baseline: [] });
+});
+
+test("resumed comparison evidence drops duplicate baseline excerpts but keeps raw log paths", async t => {
+  const { store, state } = await setup(t);
+  const evidenceFile = path.join(store.directory, "legacy-evidence.json");
+  const log = { text: "large excerpt", fullLogPath: "/saved/raw.log" };
+  await writeFile(evidenceFile, JSON.stringify({ failures: [{ logs: [log] }],
+    baseline: [{ failures: [{ logs: [log, { text: "only available evidence" }] }] }] }));
+  state.evidenceFile = evidenceFile;
+  store.save(state);
+  const resumed = store.read(state.id).evidence;
+  assert.equal(resumed.failures[0].logs[0].text, "large excerpt");
+  const logs = resumed.baseline[0].failures[0].logs;
+  assert.equal(logs[0].text, undefined);
+  assert.equal(logs[0].fullLogPath, "/saved/raw.log");
+  assert.equal(logs[1].text, "only available evidence");
+});
+
+for (const phase of ["build-blocked", "rust-blocked"]) test(`${phase} resumes a changed source through full Try submission`, async t => {
+  const { store, state } = await setup(t, phase);
+  Object.assign(state.attempts[0], { status: "build-blocked", buildValidationBlocked: true });
+  if (phase === "rust-blocked") state.attempts[0].rustFailure = { signature: "Rust dependencies are out of sync" };
+  store.save(state);
+  let changed = false, submissions = 0;
+  const monitor = createTryMonitor({ store, now: () => 100,
+    rustOriginCheck: async () => ({ available: false }),
+    repairer: {
+      resumeBlocked: async saved => {
+        if (!changed) return false;
+        saved.sourceHash = "updated";
+        saved.options = { artifact: false };
+        saved.phase = "ready-to-submit";
+        return true;
+      },
+      submit: async saved => {
+        submissions++;
+        assert.equal(saved.options.artifact, false, "The retry should request full builds.");
+        assert.equal(saved.attempts[0].buildValidationBlocked, true, "The old attempt should retain its blocked verdict.");
+        saved.attempts.push({ id: "retry", url: "new-run", createdAt: new Date(100).toISOString() });
+        saved.phase = "waiting";
+      },
+    } });
+  await monitor.tick();
+  assert.equal(submissions, 0, "Unchanged source should not submit another Try.");
+  const saved = store.read(state.id);
+  changed = true;
+  saved.nextCheckAt = 0;
+  store.save(saved);
+  await monitor.tick();
+  assert.equal(submissions, 1, "Updated source should submit one new Try.");
+  assert.equal(store.read(state.id).phase, "waiting", "The resumed workflow should wait for its new Try.");
+});
+
+test("newer Try ownership prevents blocked recovery", async t => {
+  const { store, state } = await setup(t, "build-blocked");
+  store.save({ ...state, id: "newer", phase: "waiting", nextCheckAt: 999999,
+    attempts: [{ id: "new", url: "new-run", createdAt: new Date(100).toISOString() }] });
+  await createTryMonitor({ store, now: () => 0, repairer: {
+    resumeBlocked: () => assert.fail("An older Try should not resume after a newer submission."),
+  } }).tick();
+  assert.equal(store.read(state.id).phase, "superseded", "The older blocked workflow should become superseded.");
+});
+
+test("a newer isolated Try prevents recovery of the main-checkout blocked run", async t => {
+  const { store, state } = await setup(t, "build-blocked");
+  store.save({ ...state, id: "newer-task", path: "/isolated/task/comm", repositoryPath: state.path,
+    sourceHash: state.sourceHash, phase: "waiting", nextCheckAt: 999999,
+    attempts: [{ id: "new", url: "new-run", createdAt: new Date(100).toISOString() }] });
+  await createTryMonitor({ store, now: () => 0, repairer: {
+    resumeBlocked: () => assert.fail("The old checkout should not duplicate the isolated Try."),
+  } }).tick();
+  assert.equal(store.read(state.id).phase, "superseded", "A newer isolated Try should supersede blocked recovery for its source repository.");
+});
+
+test("interrupted submission retry does not start patch repair", async t => {
+  const { store, state } = await setup(t, "repairing");
+  state.attempts[0].status = "submission-failed";
+  state.error = "The current author version was missing during submission recovery.";
+  store.save(state);
+  let submitted = false;
+  await createTryMonitor({ store, repairer: {
+    repair: () => assert.fail("A rejected submission should not require patch repair."),
+    submit: async saved => { submitted = true; saved.phase = "waiting"; },
+  } }).tick();
+  assert.equal(submitted, true, "A rejected submission should resume the existing submission path.");
+  assert.equal(store.read(state.id).phase, "waiting", "The recovered submission should wait for its new result.");
 });

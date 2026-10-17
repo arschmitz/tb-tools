@@ -129,6 +129,23 @@ test("first submit replaces the local trailer and retains the tree and staged ed
   assert.equal(isLatestTryWorkflow(restarted, [restarted, { id: "new", path: root, tbToolsId: "legacy", attempts: [{ createdAt: "2099-01-01" }] }]), false);
 });
 
+test("a copied legacy ID does not fail submission to a new revision", async t => {
+  const { git, runCommand, commit, root } = await setup(t);
+  savePatchIdentityAlias("b4f8070e-4fe8-4de1-ab1d-d2ff9f8922d5", "https://phabricator.services.mozilla.com/D331224");
+  await commit("b4f8070e-4fe8-4de1-ab1d-d2ff9f8922d5", "https://phabricator.services.mozilla.com/D332509");
+  const message = await git("show", "-s", "--format=%B");
+  const tree = await git("rev-parse", "HEAD^{tree}");
+  await writeFile(path.join(root, "staged"), "unrelated staged edit\n");
+  await git("add", "staged");
+  await finishSubmittedPatchIdentity({ message, runCommand });
+  const clean = await git("show", "-s", "--format=%B");
+  assert.equal(getLegacyToolsId(clean), "");
+  assert.equal(getTbToolsIdFromCommitMessage(clean), "https://phabricator.services.mozilla.com/D332509");
+  assert.equal(resolvePatchIdentity("b4f8070e-4fe8-4de1-ab1d-d2ff9f8922d5"), "https://phabricator.services.mozilla.com/D331224");
+  assert.equal(await git("rev-parse", "HEAD^{tree}"), tree);
+  assert.equal(await git("diff", "--cached", "--name-only"), "staged");
+});
+
 test("old repair ownership and locks still apply after the ID changes", async t => {
   const { root, git, runCommand, commit } = await setup(t);
   const sourceHash = await commit("legacy");

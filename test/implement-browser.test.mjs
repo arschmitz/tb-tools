@@ -11,11 +11,11 @@ for (const aiEnabled of [false, true]) test(`Implement cards and base choices re
   const browser = await chromium.launch({ headless: true });
   t.after(async () => { await browser.close(); server.server.closeAllConnections(); await new Promise(resolve => server.server.close(resolve)); });
   const page = await browser.newPage();
-  const calls = []; let runs = [];
+  const calls = []; let runs = []; let releaseStart;
   await page.route("**/api/dashboard?*", route => route.fulfill({ json: { ok: true,
     assignedBugs: [{ id: 123, summary: "Implement keyboard navigation", status: "NEW", hasPatch: false }],
     inProgressBugs: [{ id: 456, summary: "Existing patch", hasPatch: true, patches: [] }] } }));
-  await page.route("**/api/implement**", route => {
+  await page.route("**/api/implement**", async route => {
     if (route.request().method() === "GET") {
       if (route.request().url().includes("/diff?")) return route.fulfill({ json: { ok: true, workingHtml: formatPrettyDiffHtml("diff --git a/feature.js b/feature.js\n--- a/feature.js\n+++ b/feature.js\n@@ -1 +1 @@\n-oldSource();\n+newSource();\n"), committedHtml: "" } });
       if (route.request().url().includes("/impl-1?")) return route.fulfill({ json: { ok: true, ...runs[0] } });
@@ -30,6 +30,7 @@ for (const aiEnabled of [false, true]) test(`Implement cards and base choices re
       runs[0].instructions.push({ text: data.text });
       return route.fulfill({ json: { ok: true, run: runs[0] } });
     }
+    await new Promise(resolve => { releaseStart = resolve; });
     runs = [{ id: "impl-1", bugId: 123, branch: "Bug-123", phase: "implementing", createdAt: 1, reports: [], instructions: [{ text: data.instructions }], model: "gpt-6-astra" }];
     return route.fulfill({ json: { ok: true, run: runs[0] } });
   });
@@ -45,6 +46,14 @@ for (const aiEnabled of [false, true]) test(`Implement cards and base choices re
   await modal.locator('[data-implement="base"]').selectOption("current");
   await modal.locator('[data-implement="instructions"]').fill("Keep keyboard support.");
   await modal.getByRole("button", { name: "Start Implement", exact: true }).click();
+  await modal.locator('[data-implement="starting"]').waitFor({ state: "visible" });
+  assert.match(await modal.locator('[data-implement="starting"]').innerText(), /Preparing the checkout/);
+  await modal.getByRole("button", { name: "Minimize task and keep it running", exact: true }).click();
+  assert.equal(await page.locator('[data-task-key^="implement:starting-"]').count(), 1);
+  releaseStart();
+  await page.locator('[data-task-key="implement:impl-1"] .ai-task-open').click();
+  await modal.waitFor();
+  assert.equal(await page.locator('[data-task-key^="implement:starting-"]').count(), 0);
   await modal.locator('[data-implement="phase"]').filter({ hasText: "implementing" }).waitFor();
   assert.equal(await modal.getByRole("button", { name: "Cancel implementation", exact: true }).isVisible(), true);
   assert.equal(calls[0].base, "current"); assert.equal(calls[0].expectedHead, "abcdef1234567890");
@@ -102,6 +111,10 @@ for (const aiEnabled of [false, true]) test(`Implement cards and base choices re
   assert.equal(await reports.locator("details").nth(1).getAttribute("open"), "");
   await reports.locator(":scope > summary").click();
   await page.screenshot({ path: "/tmp/implement-compact-reports.png", fullPage: true });
+  runs[0].phase = "monitoring";
+  await page.evaluate(async () => (await import("/assets/graph-client/implement.js")).refreshImplementations());
+  assert.equal(await modal.locator('[data-implement="feedback"]').isVisible(), true);
+  assert.equal(await modal.locator('[data-implement="message"]').inputValue(), "Unsent draft");
   runs[0].tryStatus = "analyzing";
   runs[0].tryResultStatus = "failed";
   runs[0].tryFailedJobCount = 10;

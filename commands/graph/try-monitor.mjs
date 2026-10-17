@@ -1,3 +1,4 @@
+import { leaseStorage } from "./storage-retention.mjs";
 import path from "node:path";
 import { migrateRepositoryPatchIdentities } from "../../lib/patch-identity.mjs";
 import { run } from "../../lib/utils.mjs";
@@ -35,7 +36,9 @@ export function createTryMonitor({ graphs, taskWorktrees = false, store = create
   let stopped = false;
   let stopPromise;
   const aiAllowed = () => aiEnabled && !store.isAutomationPaused?.();
-  const hasNewerTry = state => !isLatestTryWorkflow(state, store.list());
+  const hasNewerTry = state => !isLatestTryWorkflow(state, store.list(), {
+    acrossWorktrees: ["build-blocked", "rust-blocked"].includes(state.phase) || Boolean(state.blockedBuildRecovery),
+  });
   function canStartAi(state) {
     if (stopped || hasNewerTry(state)) {
       if (!stopped) { state.phase = "superseded"; state.nextCheckAt = null; }
@@ -46,7 +49,19 @@ export function createTryMonitor({ graphs, taskWorktrees = false, store = create
   async function advance(state) {
     if (state.phase === "squashing") { await resumeTryFixupSquash({ state, store }); return; }
     const attempt = state.attempts.at(-1);
-    if (attempt.rustFailure) {
+    if (state.phase === "repairing" && attempt.status === "submission-failed" && !attempt.assessment) {
+      state.phase = "ready-to-submit";
+    }
+    if (["build-blocked", "rust-blocked"].includes(state.phase)) {
+      if (aiAllowed() && canStartAi(state)) await repairer.resumeBlocked?.(state);
+      if (state.phase === "superseded") return;
+      if (state.phase === "build-blocked") {
+        state.nextCheckAt = now() + TRY_CHECK_INTERVAL_MS;
+        state.error = "No build validated this patch. Waiting for updated author or Firefox source before another full Try.";
+        return;
+      }
+    }
+    if (attempt.rustFailure && state.phase !== "ready-to-submit") {
       state.phase = "rust-blocked";
       state.nextCheckAt = now() + TRY_CHECK_INTERVAL_MS;
       const update = await rustOriginCheck(state);
@@ -221,15 +236,19 @@ export function createTryMonitor({ graphs, taskWorktrees = false, store = create
         const nextCheck = resumeDiagnosis ? 0 : saved.phase === "waiting" && !saved.error && Number.isFinite(lastStatus)
           ? Math.min(saved.nextCheckAt ?? Infinity, lastStatus + TRY_STATUS_CHECK_INTERVAL_MS) : saved.nextCheckAt;
         if (saved.imported || active.has(saved.id) ||
-            ["passed", "build-blocked", "squashed", "paused", "superseded", "needs-rebase"].includes(saved.phase) ||
+            ["passed", "squashed", "paused", "superseded", "needs-rebase"].includes(saved.phase) ||
             (nextCheck > now() && !hasCompletedUnrelatedAssessment(saved.attempts.at(-1)) && isLatestTryWorkflow(saved, workflows))) continue;
         const release = store.lock(saved.id);
         if (!release) continue;
         const task = (async () => {
           let state;
+          let releaseEvidence;
+          let releaseAssessment;
           try {
+            releaseEvidence = await leaseStorage(treeherder.evidenceDirectory || path.join(store.directory, "download-cache"));
+            releaseAssessment = await leaseStorage(path.join(store.directory, "assessment-evidence"), [path.join(store.directory, "assessment-evidence", saved.id)]);
             state = store.read(saved.id);
-            delete state.attempts.at(-1).aiUsageBlock;
+            if (state.attempts.at(-1)) delete state.attempts.at(-1).aiUsageBlock;
             const newer = hasNewerTry(state);
             if (newer && state.phase !== "squashing") { state.phase = "superseded"; state.nextCheckAt = null; return; }
             if (reconcileTryAssessment(state)) return;
@@ -258,7 +277,13 @@ export function createTryMonitor({ graphs, taskWorktrees = false, store = create
             else if (state) state.error = error.message;
             else onError(error);
           } finally {
-            try { if (state) { delete state.workerPid; store.save(state); } } finally { release(); }
+            try { if (state) { delete state.workerPid; store.save(state); } } finally {
+              try {
+                await releaseEvidence?.();
+                await releaseAssessment?.();
+                await treeherder.pruneEvidenceCache?.();
+              } finally { release(); }
+            }
           }
         })();
         active.set(saved.id, task);

@@ -36,7 +36,7 @@ test("Settings saves model and reasoning independently and restores them after s
   const directory = await mkdtemp(path.join(os.tmpdir(), "ai-settings-browser-"));
   const file = path.join(directory, "settings.json");
   const start = () => startInteractiveGraphServer({ graphs: [], token: "test", tryMonitor: null,
-    aiSettingsPath: file, getAiModels: async () => models,
+    aiSettingsPath: file, serviceCredentialsPath: path.join(directory, "service-credentials.json"), getAiModels: async () => models,
     html: buildGraphHtml({ graphs: [], interactive: { enabled: true, aiEnabled: true, token: "test" },
       scriptSrcs: [], stylesheetHref: "/assets/graph-client/style.css" }),
   });

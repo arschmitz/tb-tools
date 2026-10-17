@@ -20,8 +20,11 @@ export async function importLegacyKnowledge(store, memoryDirectory) {
     }
     const key = `import-v3:${file}`, fingerprint = digest(text);
     if (store.setting(key) === fingerprint) continue;
-    const previous = new Map(store.all().filter(record => record.source.type === "legacy-memory" && record.source.file === file)
-      .map(record => [digest({ heading: record.title, text: record.text }), record.id]));
+    const previous = new Map();
+    const throughRowid = store.maxRecordRowid();
+    for (const record of store.records({ sourceType: "legacy-memory", throughRowid })) {
+      if (record.source.file === file) previous.set(digest({ heading: record.title, text: record.text }), record.id);
+    }
     let line = 1;
     for (const section of text.split(/(?=^# Task Group: )/m)) {
       const start = line;

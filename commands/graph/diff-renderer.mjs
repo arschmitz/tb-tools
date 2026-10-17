@@ -63,7 +63,7 @@ export function splitPrettyDiffFiles(diff) {
     }
 
     if (line.startsWith("diff --")) {
-      filename = line.replace(/^diff --(?:cc |git a\/)(\S+).*$/, "$1");
+      filename = getDiffFilePaths([line], line.replace(/^diff --(?:cc |git a\/)(\S+).*$/, "$1")).oldPath;
       files[filename] = [];
     }
 
@@ -77,11 +77,11 @@ export function splitPrettyDiffFiles(diff) {
 
 function getDiffFilePaths(lines, fallback) {
   const header = lines.find((line) => line.startsWith("diff --git ")) || "";
-  const match = /^diff --git a\/(\S+) b\/(\S+)$/.exec(header);
+  const match = /^diff --git (?:"a\/(.*?)"|a\/(.*?)) (?:"b\/(.*?)"|b\/(.*))$/.exec(header);
 
   return {
-    newPath: match?.[2] || fallback,
-    oldPath: match?.[1] || fallback,
+    newPath: match?.[3] || match?.[4] || fallback,
+    oldPath: match?.[1] || match?.[2] || fallback,
   };
 }
 
@@ -448,7 +448,31 @@ function formatDiffRows(lines, language, fileIndex) {
   return rendered.join("\n");
 }
 
-export function formatPrettyDiffHtml(diff) {
+export function formatDiffFileSummaryHtml(diff) {
+  const files = splitPrettyDiffFiles(diff);
+  if (!files) return "";
+  const rows = Object.entries(files).map(([file, lines]) => {
+    const { oldPath, newPath } = getDiffFilePaths(lines, file);
+    const renamedFrom = lines.find(line => line.startsWith("rename from "))?.slice(12);
+    const renamedTo = lines.find(line => line.startsWith("rename to "))?.slice(10);
+    const added = lines.some(line => line.startsWith("new file mode "));
+    const removed = lines.some(line => line.startsWith("deleted file mode "));
+    const moved = renamedFrom !== undefined;
+    const status = added ? "Added" : removed ? "Removed" : moved ? "Moved" : "Modified";
+    const label = moved ? `${renamedFrom || oldPath} → ${renamedTo || newPath}` : newPath;
+    const { insertions, deletions } = countDiffChanges(lines);
+    const binary = lines.some(line => line.startsWith("Binary files ") || line === "GIT binary patch");
+    return `<li class="commit-file-row"><span class="commit-file-status">${status}</span><button type="button" class="commit-file-path" data-file-path="${escapeHtml(file)}">${escapeHtml(label)}</button><span class="file-stats" aria-label="${formatChangeCountLabel(insertions, deletions)}"><span class="stat-additions">+${insertions}</span><span class="stat-deletions">-${deletions}</span>${binary ? '<span class="commit-file-binary">Binary</span>' : ""}</span></li>`;
+  });
+  return `<details class="commit-file-summary"><summary>Files changed (${rows.length})</summary><ul class="commit-file-list">${rows.join("\n")}</ul></details>`;
+}
+
+export function getDiffFilePathsForLocalLookup(lines, file) {
+  const { oldPath, newPath } = getDiffFilePaths(lines, file);
+  return [...new Set([newPath, oldPath])];
+}
+
+export function formatPrettyDiffHtml(diff, { localFiles = new Map() } = {}) {
   const files = splitPrettyDiffFiles(diff);
 
   if (!files) {
@@ -461,14 +485,20 @@ export function formatPrettyDiffHtml(diff) {
     const changeCountLabel = formatChangeCountLabel(insertions, deletions);
     const language = getHighlightLanguage(file);
     const diffLines = formatDiffRows(lines, language, fileIndex);
+    const localFile = localFiles.get(file);
+    const localPath = typeof localFile === "string" ? localFile : localFile?.path;
+    const editorLink = localPath
+      ? `<a class="copy-path open-vscode" href="${escapeHtml("vscode://file/" + localPath.replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/"))}" title="${escapeHtml(localPath)}">Open in VS Code</a>`
+      : "";
 
-    return `<section class="pretty-file" data-file-path="${escapeHtml(file)}" data-old-file-path="${escapeHtml(oldPath)}" data-new-file-path="${escapeHtml(newPath)}">
+    return `<section class="pretty-file" data-file-path="${escapeHtml(file)}" data-old-file-path="${escapeHtml(oldPath)}" data-new-file-path="${escapeHtml(newPath)}" data-local-file-side="${localFile?.side || "new"}">
       <h3>
         <span class="file-heading">
           <span class="file-icon" aria-hidden="true"></span>
           <span class="title">${escapeDiffHtml(file)}</span>
         </span>
         <span class="file-actions">
+          ${editorLink}
           <span class="file-stats" aria-label="${changeCountLabel}">
             <span class="stat-additions">+${insertions}</span>
             <span class="stat-deletions">-${deletions}</span>

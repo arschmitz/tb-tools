@@ -1,4 +1,17 @@
 // Keep existing text nodes so status polls do not clear browser selections.
+export function setDialogCommitTitle(heading, value) {
+  if (!heading) return;
+  let subject = heading.parentElement.querySelector(".dialog-commit-title");
+  if (!subject) {
+    subject = document.createElement("p");
+    subject.className = "dialog-commit-title";
+    heading.after(subject);
+  }
+  const text = String(value || "").split(/\r?\n/).find(line => line.trim())?.trim() || "";
+  subject.hidden = !text;
+  setLiveText(subject, text);
+}
+
 export function setLiveText(element, value) {
   const text = String(value ?? "");
   const previous = element.textContent;

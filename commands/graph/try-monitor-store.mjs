@@ -3,26 +3,35 @@ import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFi
 import os from "node:os";
 import path from "node:path";
 import { migratePatchIdentityFields, resolvePatchIdentity } from "../../lib/patch-identity.mjs";
+import { compactTryEvidence } from "./try-evidence-memory.mjs";
 
 export const TRY_STATUS_CHECK_INTERVAL_MS = 60 * 1000;
 export const TRY_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 export const TRY_MONITOR_DIRECTORY = path.join(os.homedir(), ".tb-tools", "try-monitor");
 
-export function isLatestTryWorkflow(state, workflows) {
+export function isLatestTryWorkflow(state, workflows, { acrossWorktrees = false } = {}) {
   const own = workflows.find(other => other.id === state.id);
   const attempt = state.attempts.at(-1);
   if (own && (own.attempts.at(-1)?.id !== attempt?.id || own.attempts.at(-1)?.url !== attempt?.url)) return false;
   const time = Date.parse(attempt?.createdAt || "") || 0;
-  return !workflows.some(other => other.id !== state.id && other.path === state.path &&
+  const repository = value => path.resolve(value.repositoryPath || value.path);
+  return !workflows.some(other => other.id !== state.id &&
+    (acrossWorktrees ? repository(other) === repository(state) : other.path === state.path) &&
     ((state.tbToolsId && resolvePatchIdentity(state.tbToolsId) === resolvePatchIdentity(other.tbToolsId)) || (state.sourceHash && state.sourceHash === other.sourceHash) || other.relatedWorkflowIds?.includes(state.id)) &&
     (Date.parse(other.attempts.at(-1)?.createdAt || "") || 0) > time);
 }
 
 function attachEvidence(state, initial) {
-  let evidence = initial;
+  // Keep evidence alive only while an assessor or repair holds it. Saved
+  // workflow objects must not retain every large comparison indefinitely.
+  let evidence = initial ? new WeakRef(compactTryEvidence(initial)) : null;
   Object.defineProperty(state, "evidence", {
     configurable: true, enumerable: false,
-    get() { return evidence ??= JSON.parse(readFileSync(state.evidenceFile, "utf8")); },
+    get() {
+      const value = evidence?.deref() || compactTryEvidence(JSON.parse(readFileSync(state.evidenceFile, "utf8")));
+      evidence = new WeakRef(value);
+      return value;
+    },
     set(value) { Object.defineProperty(state, "evidence", { value, enumerable: true, writable: true, configurable: true }); },
   });
   return state;
@@ -64,7 +73,7 @@ export function createTryMonitorStore(directory = TRY_MONITOR_DIRECTORY) {
       mkdirSync(directory, { recursive: true });
       const target = file(state.id);
       if (Object.prototype.propertyIsEnumerable.call(state, "evidence") && state.evidence) {
-        const evidence = state.evidence;
+        const evidence = compactTryEvidence(state.evidence);
         const evidenceDirectory = path.join(directory, "evidence");
         mkdirSync(evidenceDirectory, { recursive: true });
         const evidenceFile = path.join(evidenceDirectory, `${state.id}-${randomUUID()}.json`);
@@ -200,7 +209,11 @@ export function monitorRuns(state) {
 }
 
 export function mergeMonitoredTryRuns(graph, store, monitors = createTryMonitorStore().list()) {
-  const matching = monitors.filter(state => path.resolve(state.path) === path.resolve(graph.path));
+  const graphPath = path.resolve(graph.path);
+  // The main tree must retain Try history after a task checkout is removed.
+  // A task tree still sees only its own records.
+  const matching = monitors.filter(state => path.resolve(state.path) === graphPath ||
+    state.repositoryPath && path.resolve(state.repositoryPath) === graphPath);
   const fresh = matching.flatMap(monitorRuns);
   const urls = new Set(fresh.map(run => run.url));
   return { ...store, runs: [...fresh, ...store.runs.filter(run => !urls.has(run.url))], monitors: matching };

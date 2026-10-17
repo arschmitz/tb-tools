@@ -588,17 +588,21 @@ export function createPhabricatorWebSession({
     return request;
   }
 
-  function withRevisionPage(revision, operation, callback) {
+  function withRevisionPage(revision, operation, callback, { signal } = {}) {
     const normalizedRevision = normalizeRevision(revision);
     if (!normalizedRevision) {
       return Promise.reject(new Error("A valid Phabricator revision is required."));
     }
     const run = reviewOperation.catch(() => {}).then(async () => {
+      signal?.throwIfAborted();
       if ((await getStatus()).state !== "connected") {
         throw new Error("Sign in to Phabricator before opening this review.");
       }
       const context = await launchContext({ headless: true });
+      const abort = () => { void context.close().catch(() => {}); };
+      signal?.addEventListener("abort", abort, { once: true });
       try {
+        signal?.throwIfAborted();
         if (sessionStorageState?.cookies?.length) {
           await context.addCookies(sessionStorageState.cookies);
         }
@@ -640,6 +644,7 @@ export function createPhabricatorWebSession({
         });
         throw error;
       } finally {
+        signal?.removeEventListener("abort", abort);
         await context.close();
       }
     });
@@ -647,11 +652,12 @@ export function createPhabricatorWebSession({
     return run;
   }
 
-  function getReview({ revision }) {
-    const key = normalizeRevision(revision);
+  function getReview({ revision, signal, includeRawPatch = true }) {
+    const key = `${normalizeRevision(revision)}:${includeRawPatch}:${signal ? "bounded" : "default"}`;
     if (!reviewInflight.has(key)) {
-      const request = withRevisionPage(key, "read-review", async (page, id) => {
+      const request = withRevisionPage(revision, "read-review", async (page, id) => {
         const review = await readWebReview(page, id);
+        if (!includeRawPatch) return review;
         recordPhabricatorBrowserActivity({ event: "browser-download-start", operation: "raw-patch", revision: id });
         review.rawPatch = await downloadWebPatch(page, review.rawUrl);
         recordPhabricatorBrowserActivity({ event: "browser-download-success", operation: "raw-patch", revision: id });
@@ -659,7 +665,7 @@ export function createPhabricatorWebSession({
           comment.contextDiff = review.rawPatch;
         }
         return review;
-      }).finally(() => reviewInflight.delete(key));
+      }, { signal }).finally(() => reviewInflight.delete(key));
       reviewInflight.set(key, request);
     }
     return reviewInflight.get(key);

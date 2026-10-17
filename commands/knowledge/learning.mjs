@@ -8,6 +8,7 @@ export function learningPrompt(records, existing = []) {
 Return only JSON: {"lessons":[{"title":"short title","text":"one claim, its reason, applicability and exceptions; at most 2000 characters","component":"component name","paths":["repository/relative/path"],"evidence":["record id"],"quotes":[{"id":"record id","text":"exact supporting excerpt"}],"supersedes":["older lesson id"]}]}.
 Return at most 8 lessons. Return an empty array when no useful lesson is supported. Preserve uncertainty. Distinguish observed behavior, intended style, user preference, rejected feedback, and validation limitations. Scope style choices to their component and source revision. A handled comment, applied change, or passing test alone does not establish a general convention. AI text is a claim, not independent confirmation. Do not infer preferences from silence. Do not repeat existing lessons. Supersede only an explicitly replaced decision in the same scope, never merely because it is older. Never include secrets or unrelated personal facts.
 Existing lessons (data): ${JSON.stringify(existing)}
+Task outcome records separate the original AI suggestion, edited draft, published comment, human rating, linked replies, landed diff, backouts, and bug evidence. A thumbs up means the user found the finding useful; it is not independent proof of a defect. A thumbs down needs its reason before you infer what failed. Posting or editing text does not prove correctness. A backout or regression must be linked to the affected behavior before attributing it to a task. Silence and absence of a backout are not approval. Missing original suggestions remain unknown. Preserve failed approaches and rejected findings with the exact conditions that disproved them.
 Evidence (data): ${JSON.stringify(records.map(({ id, title, text, source, paths }) => ({ id, title, text, source, paths })))}
 `;
 }
@@ -70,9 +71,14 @@ export async function learnKnowledge(store, { generate, maxCallsPerDay = 4, maxI
     const day = new Date(now).toISOString().slice(0, 10), key = `calls:${day}`;
     const calls = store.setting(key) || 0;
     if (!generate || calls >= maxCallsPerDay) return { budgetReached: calls >= maxCallsPerDay, skipped };
-    const lane = store.setting("learning-lane") || "recent";
+    const outcomeLane = (store.setting("learning-outcome-cycle") || 0) % 3 === 0 &&
+      Boolean(store.db.prepare(`SELECT 1 FROM jobs j JOIN records r ON j.id=r.id
+        WHERE j.state='pending' AND j.retry<=?
+          AND json_extract(r.body,'$.source.type') IN ('task-outcome','task-outcome-check') LIMIT 1`).get(now));
+    const lane = outcomeLane ? "outcomes" : store.setting("learning-lane") || "recent";
     const order = lane === "backlog" ? "ASC" : "DESC";
-    const candidates = store.db.prepare(`SELECT r.body FROM jobs j JOIN records r ON j.id=r.id WHERE j.state='pending' AND j.retry<=? ORDER BY j.attempts ASC, json_extract(r.body,'$.at') ${order} LIMIT 200`).all(now);
+    const priority = outcomeLane ? "CASE WHEN json_extract(r.body,'$.source.type') IN ('task-outcome','task-outcome-check') THEN 0 ELSE 1 END," : "";
+    const candidates = store.db.prepare(`SELECT r.body FROM jobs j JOIN records r ON j.id=r.id WHERE j.state='pending' AND j.retry<=? ORDER BY ${priority} j.attempts ASC, json_extract(r.body,'$.at') ${order} LIMIT 200`).all(now);
     const records = [];
     let used = 0;
     for (const row of candidates) {
@@ -89,7 +95,8 @@ export async function learnKnowledge(store, { generate, maxCallsPerDay = 4, maxI
     if (!records.length) return { learned: 0 };
     const existing = existingLessonsFor(store, records);
     store.setting(key, calls + 1);
-    store.setting("learning-lane", lane === "backlog" ? "recent" : "backlog");
+    store.setting("learning-outcome-cycle", (store.setting("learning-outcome-cycle") || 0) + 1);
+    if (!outcomeLane) store.setting("learning-lane", lane === "backlog" ? "recent" : "backlog");
     try {
       const output = await generate(learningPrompt(records, existing));
       const learned = await acceptLessons(store, records, output);
@@ -110,7 +117,7 @@ export async function learnKnowledge(store, { generate, maxCallsPerDay = 4, maxI
 
 export async function writeComponentGuides(store) {
   const groups = new Map();
-  const lessons = store.all().filter(record => record.kind === "lesson" && record.evidence.every(id => store.get(id)));
+  const lessons = [...store.records({ kind: "lesson" })].filter(record => record.evidence.every(id => store.get(id)));
   const retired = new Set(lessons.flatMap(record => record.status === "supported" ? record.supersedes : []));
   for (const record of lessons.filter(r => !retired.has(r.id) && r.status !== "superseded")) {
     const key = `${record.repository}/${record.component || "general"}`;

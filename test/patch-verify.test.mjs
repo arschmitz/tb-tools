@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { createGraphPatchUpdateSession, findGraphPatchCommit,
+import { cancelGraphPatchUpdateSession, createGraphPatchUpdateSession, findGraphPatchCommit,
   getGraphPatchVerifyPrompt, prepareGraphPatchUpdateSession,
   serializeGraphPatchUpdateSession } from "../commands/graph/patch-update.mjs";
 import { createPatchSessionStore } from "../commands/graph/patch-session-store.mjs";
@@ -23,6 +23,23 @@ function setup() {
   const session = createGraphPatchUpdateSession({ graph, graphIndex: 0, revision: "D123456", mode: "verify", aiEnabled: true });
   return { graph, session };
 }
+
+test("Update prepares source without building before the first instruction", async () => {
+  const { graph } = setup();
+  const session = createGraphPatchUpdateSession({ graph, graphIndex: 0, revision: "D123456", mode: "freeform", aiEnabled: true });
+  session.managedWorktree = true;
+  await prepareGraphPatchUpdateSession({ session, graphs: [graph],
+    findPatchCommit: async () => ({ hash: "selected", message }),
+    assertSafeWorktree: async () => {},
+    getReview: async () => ({ comments: [], transactions: [] }),
+    getSnapshot: async () => ({ commits: [] }),
+    prepareBuild: async () => assert.fail("Update must not build before input"),
+    runCodexTask: async () => assert.fail("Update must wait for input"),
+    runCommand: async ({ args }) => args[0] === "rev-parse" ? "selected" : "",
+  });
+  assert.equal(session.status, "review");
+  assert.equal(session.requireLocalBuild, false);
+});
 
 test("Verify selects the newest exact revision across branches, including detached HEAD", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "verify-git-"));
@@ -187,4 +204,111 @@ test("Verify resume refreshes a newer local copy in its saved conversation", asy
   assert.equal(second.id, first.id);
   assert.equal(second.currentHash, "new");
   assert.equal(calls, 2);
+});
+
+
+test("Local Verify and Update select the exact commit without a Phabricator ID", async () => {
+  const hash = "2135bbdeb7dd3feafb298c0220b412a66cc41826";
+  const graph = { path: "/work/comm", checkout: "working", repository: "comm" };
+  for (const mode of ["verify", "freeform"]) {
+    const session = createGraphPatchUpdateSession({ graph, revision: hash.toUpperCase(), mode, aiEnabled: true });
+    assert.equal(session.revision, hash);
+    assert.match(session.codexThreadName, /^2135bbdeb7dd - /);
+    const commands = [];
+    const found = await findGraphPatchCommit({ graph, revision: session.revision, newest: true,
+      runCommand: async ({ args }) => {
+        commands.push(args);
+        return args[0] === "rev-parse" ? hash : "Bug 2061199 - Add writable calendar selection";
+      } });
+    assert.equal(found.hash, hash);
+    assert.equal(found.revision, hash);
+    assert.deepEqual(commands[0], ["rev-parse", "--verify", `${hash}^{commit}`]);
+    assert.equal(commands.some(args => args.some(arg => arg.startsWith("--grep="))), false);
+  }
+  assert.throws(() => createGraphPatchUpdateSession({ graph, revision: hash, mode: "update", aiEnabled: true }),
+    /Review Update requires a Phabricator revision/);
+});
+
+
+test("Local Verify resumes its amended commit without reverting to the original hash", async (t) => {
+  const original = "2135bbdeb7dd3feafb298c0220b412a66cc41826";
+  const amended = "a".repeat(40);
+  let calls = 0;
+  const { graph } = setup();
+  const info = await startInteractiveGraphServer({ graphs: [graph], html: "", token: "test",
+    appConfig: { ai: { enabled: true } }, savePatchUpdateMemory: async () => {},
+    runCommand: async ({ args }) => {
+      if (args[0] === "rev-parse") return amended;
+      if (args[0] === "log") assert.fail("A local Verify resume must retain its amended commit");
+      return "";
+    },
+    preparePatchUpdateSession: async ({ session }) => {
+      calls++;
+      Object.assign(session, { status: "review", currentHash: amended, codexSessionId: "saved-local" });
+    },
+  });
+  t.after(() => new Promise(resolve => info.server.close(resolve)));
+  const post = async () => (await fetch(new URL("/api/patch-update", info.url), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "test", graphIndex: 0, revision: original, mode: "verify", resume: true }),
+  })).json();
+  const first = await post();
+  const second = await post();
+  assert.equal(second.id, first.id);
+  assert.equal(second.currentHash, amended);
+  assert.equal(calls, 1);
+});
+
+
+test("Cancel interrupts the running update and keeps unfinished changes", async () => {
+  const { session } = setup();
+  const calls = [];
+  const candidate = { id: "edit", changeApplied: true, changesAmended: false };
+  session.items = [candidate];
+  session.status = "applying";
+  session.freeformOperationRunning = true;
+  session.freeformOperationStatus = "applying";
+  session.codexTurnId = "turn";
+  session.codexAgent = { threadId: "thread", client: {
+    interruptTurn: async value => calls.push(value), close: () => calls.push("closed"),
+  } };
+  await cancelGraphPatchUpdateSession({ session });
+  assert.deepEqual(calls, [{ threadId: "thread", turnId: "turn" }, "closed"]);
+  assert.equal(session.abortController.signal.aborted, true);
+  assert.equal(session.items[0], candidate);
+  session.status = "review";
+  const result = serializeGraphPatchUpdateSession(session);
+  assert.equal(result.status, "cancelled");
+  assert.match(result.message, /Unfinished edits are kept/);
+  await cancelGraphPatchUpdateSession({ session });
+  assert.equal(calls.length, 2);
+});
+
+
+test("Cancel API aborts preparation and stays cancelled after the callback ends", async (t) => {
+  const { graph } = setup();
+  let prepared;
+  const info = await startInteractiveGraphServer({ graphs: [graph], html: "", token: "test",
+    appConfig: { ai: { enabled: true } }, savePatchUpdateMemory: async () => {},
+    runCommand: async () => "",
+    preparePatchUpdateSession: async ({ session }) => {
+      prepared = session;
+      await new Promise(resolve => session.abortController.signal.addEventListener("abort", resolve, { once: true }));
+      session.status = "complete";
+    } });
+  t.after(() => new Promise(resolve => info.server.close(resolve)));
+  const post = async (route, body) => (await fetch(new URL(route, info.url), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "test", ...body }),
+  })).json();
+  const started = await post("/api/patch-update", { graphIndex: 0, revision: "D123456", mode: "freeform" });
+  const stopped = await post(`/api/patch-update/${started.id}/cancel`, {});
+  assert.equal(stopped.status, "cancelled");
+  assert.equal(prepared.abortController.signal.aborted, true);
+  await new Promise(resolve => setImmediate(resolve));
+  const status = await (await fetch(new URL(`/api/patch-update/${started.id}?token=test`, info.url))).json();
+  assert.equal(status.status, "cancelled");
+  const rejected = await post(`/api/patch-update/${started.id}/steer`, { instruction: "Continue" });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /cancelled/);
 });

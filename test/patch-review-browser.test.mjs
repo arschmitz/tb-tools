@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { chromium } from "playwright";
 import { formatPrettyDiffHtml } from "../commands/graph/diff-renderer.mjs";
 import { startInteractiveGraphServer } from "../commands/graph/server.mjs";
@@ -28,6 +30,7 @@ const REVIEW_CHECKOUT_DIFF = [
 
 test("Patch Review shows the saved error before a stale command message", async (t) => {
   const error = "Selected model is at capacity. Please try a different model.";
+  let review;
   const graphs = [{ checkout: "review", repository: "comm", path: "/repo/review/comm",
     label: "Review comm", commits: [], diffs: {} }];
   const serverInfo = await startInteractiveGraphServer({
@@ -39,9 +42,12 @@ test("Patch Review shows the saved error before a stale command message", async 
     }),
     getRustUpstreamStatus: async () => ({ state: "current" }),
     preparePatchReviewSession: async ({ session }) => {
+      review = session;
       session.status = "error";
       session.error = error;
       session.message = "Command completed";
+      Object.assign(session, { codexSessionId: "saved", currentHash: "head", rawPatchPath: "/tmp/exact.patch",
+        rawPatchHash: "hash", commitMessage: "Bug 123 - Review", restored: true, interrupted: true });
     },
     runCommand: async () => "",
   });
@@ -59,7 +65,107 @@ test("Patch Review shows the saved error before a stale command message", async 
   await page.waitForFunction(expected =>
     globalThis.document.querySelector(".patch-review-status")?.textContent === expected, error);
   assert.equal(await page.locator(".patch-review-status").evaluate(
-    element => element.classList.contains("error")), true);
+    element => element.classList.contains("error")), true, "The failed review should show its actual error.");
+  await page.locator('.ai-task-toast[data-state="error"]').waitFor();
+  assert.match(await page.locator('.ai-task-toast[data-state="error"] .ai-task-state').textContent(), /Failed.*capacity/,
+    "The tray should identify the capacity failure.");
+  let reject = true;
+  await page.route("**/api/review/*/steer", async route => {
+    if (reject) return route.fulfill({ status: 409, json: { ok: false,
+      error: "Codex is finishing the current review response. Try again in a moment." } });
+    Object.assign(review, { status: "reviewing", error: "", message: "Retrying the failed Codex review...",
+      codexTurnId: "new-turn", restored: false, interrupted: false });
+    const { serializeGraphPatchReviewSession } = await import("../commands/graph/patch-review.mjs");
+    return route.fulfill({ json: { ok: true, ...serializeGraphPatchReviewSession(review) } });
+  });
+  await page.locator(".patch-review-steer-input").fill("Resume the review.");
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
+  await page.locator(".patch-review-action-notice").waitFor();
+  assert.equal(await page.locator(".patch-review-status").textContent(), error,
+    "A rejected request should not replace the task's capacity error.");
+  assert.match(await page.locator("#patch-review-dialog .codex-run-status").textContent(), /Failed/,
+    "The header should still report the actual failure.");
+  reject = false;
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
+  await page.locator('#patch-review-dialog .codex-run-status[data-state="working"]').waitFor();
+  assert.equal(await page.locator(".patch-review-action-notice").isHidden(), true,
+    "A successful resume should clear the rejected-request notice.");
+  assert.equal(await page.locator(".patch-review-status").evaluate(element => element.classList.contains("error")), false,
+    "The resumed review should clear the error color.");
+  assert.equal(await page.locator('.ai-task-toast[data-state="error"]').count(), 0,
+    "The tray should clear the old capacity failure when the retry starts.");
+});
+
+test("Patch Review offers conflict choices and posts only the edited rebase request", async t => {
+  const posts = [];
+  const graphs = [{ checkout: "review", repository: "comm", path: "/repo/review/comm", label: "Review comm", commits: [], diffs: {} }];
+  const serverInfo = await startInteractiveGraphServer({ appConfig: { ai: { enabled: true } }, graphs, token: "secret",
+    html: buildGraphHtml({ graphs, interactive: { aiEnabled: true, enabled: true, pollIntervalMs: 20, token: "secret" },
+      scriptSrcs: ["/assets/graph-client/init.js"], stylesheetHref: "/assets/graph-client/style.css" }),
+    getRustUpstreamStatus: async () => ({ state: "current" }),
+    phabWebSession: { publishRevisionReview: async value => posts.push(value) },
+    preparePatchReviewSession: async ({ session }) => Object.assign(session, { status: "paused", applyConflict: true,
+      rebaseRequestMessage: "Please rebase D123456 onto the latest main.", error: "Patch apply conflict" }),
+    runCommand: async () => "" });
+  const browser = await chromium.launch({ headless: true });
+  t.after(async () => { await browser.close(); await new Promise(resolve => serverInfo.server.close(resolve)); });
+  const page = await browser.newPage();
+  await page.goto(serverInfo.url, { waitUntil: "domcontentloaded" });
+  await page.evaluate(async () => {
+    const { openPatchReviewDialog } = await import("/assets/graph-client/patch-review-dialog.js");
+    await openPatchReviewDialog({ patch: { id: "D123456" } });
+  });
+  await page.getByRole("button", { name: "Resolve conflicts locally", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Try applying only this patch", exact: true }).isEnabled(), true,
+    "A failed stack should offer the single-patch option.");
+  assert.deepEqual(posts, [], "Showing conflict choices should not post a comment.");
+  const comment = page.getByRole("textbox", { name: "Comment asking the author to rebase" });
+  assert.match(await comment.inputValue(), /latest main/);
+  await comment.fill("Please rebase this stack onto current main so I can finish the review.");
+  await page.getByRole("button", { name: "Post comment asking for a rebase", exact: true }).click();
+  await page.waitForFunction(() => !globalThis.document.querySelector("#patch-review-dialog").open);
+  assert.deepEqual(posts, [{ revision: "D123456", action: "comment", message: "Please rebase this stack onto current main so I can finish the review." }]);
+});
+
+test("The single-patch button resumes Review and shows omitted parent context", async t => {
+  let review;
+  let singleFetch = false;
+  const graphs = [{ checkout: "review", repository: "comm", path: "/repo/review/comm", label: "Review comm", commits: [], diffs: {} }];
+  const serverInfo = await startInteractiveGraphServer({ appConfig: { ai: { enabled: true } }, graphs, token: "secret",
+    html: buildGraphHtml({ graphs, interactive: { aiEnabled: true, enabled: true, pollIntervalMs: 20, token: "secret" },
+      scriptSrcs: ["/assets/graph-client/init.js"], stylesheetHref: "/assets/graph-client/style.css" }),
+    getRustUpstreamStatus: async () => ({ state: "current" }),
+    preparePatchReviewSession: async ({ session, useAppliedCheckout }) => {
+      review = session;
+      Object.assign(session, useAppliedCheckout ? { status: "review", applyConflict: false } :
+        { status: "paused", applyConflict: true, error: "Patch stack failed" });
+    },
+    runCommand: async command => {
+      if (command.cmd === "moz-phab") {
+        singleFetch = true;
+        assert.ok(command.args.includes("--skip-dependencies"), "The button should fetch only the selected patch.");
+        await writeFile(command.env.TB_TOOLS_MOZPHAB_REVIEW_EXPORT, JSON.stringify([{
+          diff: "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n",
+          body: "Bug 123 - Patch\n\nDifferential Revision: https://example.invalid/D123456\n",
+        }]));
+      }
+      return command.args[0] === "rev-parse" ? "a".repeat(40) : "";
+    } });
+  const browser = await chromium.launch({ headless: true });
+  t.after(async () => {
+    await browser.close(); await new Promise(resolve => serverInfo.server.close(resolve));
+    if (review?.rawPatchPath) await rm(path.dirname(review.rawPatchPath), { recursive: true, force: true });
+  });
+  const page = await browser.newPage();
+  await page.goto(serverInfo.url, { waitUntil: "domcontentloaded" });
+  await page.evaluate(async () => {
+    const { openPatchReviewDialog } = await import("/assets/graph-client/patch-review-dialog.js");
+    await openPatchReviewDialog({ patch: { id: "D123456" } });
+  });
+  await page.getByRole("button", { name: "Try applying only this patch", exact: true }).click();
+  await page.getByText("This review applies only the selected patch on main. Parent patches are omitted.", { exact: true }).waitFor();
+  assert.equal(singleFetch, true, "Clicking the option should request the selected patch.");
+  assert.equal(review.status, "review", "A clean single patch should resume the review.");
 });
 
 test("Patch Review anchors actions and source changes in the patch diff", async (t) => {
@@ -286,6 +392,10 @@ test("Patch Review anchors actions and source changes in the patch diff", async 
   await finding.getByRole("button", { name: "Save Inline Comment Draft" }).waitFor({ state: "visible" });
   await finding.getByRole("button", { name: "Save Reply + Code Suggestion Draft" }).waitFor({ state: "visible" });
   await finding.locator(".patch-review-inline-suggested-diff").waitFor({ state: "visible" });
+  assert.equal(await finding.locator(".patch-review-inline-suggestion-input").isVisible(), false);
+  await finding.getByRole("button", { name: "Edit code suggestion", exact: true }).click();
+  assert.equal(await finding.locator(".patch-review-inline-suggestion-input").inputValue(), "return selectedItem;");
+  await finding.getByRole("button", { name: "Done", exact: true }).click();
   assert.match(await finding.innerText(), /-return selectedItem;/);
   assert.match(await finding.innerText(), /\+return selectedItem;/);
   assert.equal(await finding.evaluate((element) => (
@@ -311,7 +421,16 @@ test("Patch Review anchors actions and source changes in the patch diff", async 
   await diff.locator('.pretty-file[data-file-path="mail/example.mjs"]').getByRole("button", { name: "Add comment on line 15", exact: true }).click();
   const manual = diff.locator(".patch-review-manual-comment");
   await manual.getByLabel("Comment", { exact: true }).fill("Please handle the empty selection.");
+  assert.equal(await manual.getByLabel("Code replacement (optional)").isVisible(), false);
+  await manual.getByRole("button", { name: "Add code suggestion", exact: true }).click();
+  assert.equal(await manual.getByLabel("Code replacement (optional)").inputValue(), "return selectedItem;");
   await manual.getByLabel("Code replacement (optional)").fill("return selectedItem ?? null;");
+  await manual.getByRole("button", { name: "Done", exact: true }).click();
+  assert.equal(await manual.getByLabel("Code replacement (optional)").isVisible(), false);
+  assert.match(await manual.locator(".patch-review-inline-suggested-diff").innerText(), /\+return selectedItem \?\? null;/);
+  await manual.getByRole("button", { name: "Edit code suggestion", exact: true }).click();
+  assert.equal(await manual.getByLabel("Code replacement (optional)").inputValue(), "return selectedItem ?? null;");
+  await manual.getByRole("button", { name: "Done", exact: true }).click();
   await manual.getByRole("button", { name: "Save Additional Inline Draft" }).click();
   await manual.waitFor({ state: "detached" });
   await diff.getByText("Please handle the empty selection.", { exact: true }).waitFor();
@@ -324,11 +443,79 @@ test("Patch Review anchors actions and source changes in the patch diff", async 
   await prefix.getByRole("button", { name: "Add comment on line 12", exact: true }).click({ modifiers: ["Shift"] });
   await manual.getByRole("heading", { name: "Add comment on lines 10–12" }).waitFor();
   await manual.getByLabel("Comment", { exact: true }).fill("Replace these three lines.");
+  await manual.getByRole("button", { name: "Add code suggestion", exact: true }).click();
+  assert.equal(await manual.getByLabel("Code replacement (optional)").inputValue(), "const row9 = true;\nconst row10 = true;\nconst row11 = true;");
+  await page.screenshot({ path: "/tmp/tb-review-suggestion-editor.png" });
   await manual.getByLabel("Code replacement (optional)").fill("const replacement = true;");
+  await manual.getByRole("button", { name: "Done", exact: true }).click();
+  assert.equal(await manual.locator(".patch-review-suggested-diff-table .delete").count(), 3);
+  await page.screenshot({ path: "/tmp/tb-review-suggestion-preview.png" });
   await manual.getByRole("button", { name: "Save Additional Inline Draft" }).click();
   await manual.waitFor({ state: "detached" });
   assert.equal(inlineDrafts[2].lineNumber, 10);
   assert.equal(inlineDrafts[2].lineLength, 3);
+  // Drag without opening a comment until the pointer is released.
+  const firstLine = prefix.getByRole("button", { name: "Add comment on line 20", exact: true });
+  const lastLine = prefix.getByRole("button", { name: "Add comment on line 23", exact: true });
+  await firstLine.scrollIntoViewIfNeeded();
+  const firstBox = await firstLine.boundingBox();
+  const lastBox = await lastLine.boundingBox();
+  await page.mouse.move(firstBox.x + firstBox.width / 2, firstBox.y + firstBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(lastBox.x + lastBox.width / 2, lastBox.y + lastBox.height / 2, { steps: 5 });
+  assert.equal(await manual.count(), 0);
+  await page.mouse.up();
+  await manual.getByRole("heading", { name: "Add comment on lines 20–23" }).waitFor();
+  await manual.getByRole("button", { name: "Add code suggestion", exact: true }).click();
+  assert.equal(await manual.getByLabel("Code replacement (optional)").inputValue(),
+    [19, 20, 21, 22].map(index => `const row${index} = true;`).join("\n"));
+  await manual.getByRole("button", { name: "Cancel", exact: true }).click();
+  await manual.waitFor({ state: "detached" });
+  await lastLine.scrollIntoViewIfNeeded();
+  const reverseFirst = await lastLine.boundingBox();
+  const reverseLast = await firstLine.boundingBox();
+  await page.mouse.move(reverseFirst.x + reverseFirst.width / 2, reverseFirst.y + reverseFirst.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(reverseLast.x + reverseLast.width / 2, reverseLast.y + reverseLast.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await manual.getByRole("heading", { name: "Add comment on lines 20–23" }).waitFor();
+  await manual.getByLabel("Comment", { exact: true }).fill("Comment without a suggestion.");
+  await manual.getByRole("button", { name: "Save Additional Inline Draft" }).click();
+  await manual.waitFor({ state: "detached" });
+  assert.equal(inlineDrafts[3].hasSuggestion, false);
+  assert.equal(inlineDrafts[3].lineNumber, 20);
+  assert.equal(inlineDrafts[3].lineLength, 4);
+  const codeStart = prefix.locator('.diff-line[data-new-line="30"] .line-content');
+  const codeEnd = prefix.locator('.diff-line[data-new-line="32"] .line-content');
+  await codeStart.scrollIntoViewIfNeeded();
+  const codeStartBox = await codeStart.boundingBox();
+  const codeEndBox = await codeEnd.boundingBox();
+  await page.mouse.move(codeStartBox.x + 8, codeStartBox.y + codeStartBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(codeEndBox.x + 8, codeEndBox.y + codeEndBox.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await manual.getByRole("heading", { name: "Add comment on lines 30–32" }).waitFor();
+  await manual.getByRole("button", { name: "Add code suggestion", exact: true }).click();
+  assert.equal(await manual.getByLabel("Code replacement (optional)").inputValue(),
+    [29, 30, 31].map(index => `const row${index} = true;`).join("\n"));
+  await manual.getByRole("button", { name: "Cancel", exact: true }).click();
+  const keyboardLine = prefix.getByRole("button", { name: "Add comment on line 40", exact: true });
+  await keyboardLine.focus();
+  await keyboardLine.press("Enter");
+  await manual.getByRole("heading", { name: "Add comment on line 40" }).waitFor();
+  await manual.getByRole("button", { name: "Cancel", exact: true }).click();
+  const gutterStyle = await firstLine.evaluate(button => {
+    const style = globalThis.getComputedStyle(button);
+    const cell = globalThis.getComputedStyle(button.parentElement);
+    return { background: style.backgroundColor, border: style.borderWidth, font: style.font, cellFont: cell.font };
+  });
+  assert.equal(gutterStyle.background, "rgba(0, 0, 0, 0)");
+  assert.equal(gutterStyle.border, "0px");
+  assert.equal(gutterStyle.font, gutterStyle.cellFont);
+  const bottomButtons = await page.locator(".patch-review-actions > button:visible").evaluateAll(buttons =>
+    buttons.map(button => ({ width: button.getBoundingClientRect().width, parentWidth: button.parentElement.getBoundingClientRect().width })));
+  assert.ok(bottomButtons.every(button => button.width < button.parentWidth / 3));
+  assert.ok(await page.locator(".patch-review-final").evaluate(element => element.getBoundingClientRect().width < 220));
   assert.deepEqual(inlineDrafts.slice(0, 1), [{
     content: "Please return the selected item.",
     commentText: "Please return the selected item.",

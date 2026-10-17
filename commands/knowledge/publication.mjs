@@ -22,8 +22,10 @@ function safeProjectClaim(record) {
 
 export async function publishProjectLessons(store, { shareRepositories = [] } = {}) {
   const counts = { published: 0, alreadyPublished: 0 };
-  const all = store.all(), existing = new Map(all.filter(r => r.kind === "lesson" && r.visibility === "shared").map(r => [claimKey(r), r]));
-  for (const lesson of all.filter(r => r.kind === "lesson" && r.visibility === "private" && shareRepositories.includes(r.repository))) {
+  const throughRowid = store.maxRecordRowid(), existing = new Map();
+  for (const lesson of store.records({ kind: "lesson", visibility: "shared", throughRowid })) existing.set(claimKey(lesson), lesson);
+  for (const lesson of store.records({ kind: "lesson", visibility: "private", throughRowid })) {
+    if (!shareRepositories.includes(lesson.repository)) continue;
     const key = claimKey(lesson);
     // The earlier backfill already recorded these original IDs. Keep its citations.
     const oldKey = digest([lesson.repository, lesson.title, lesson.text, lesson.component, lesson.paths]);
@@ -54,10 +56,14 @@ export async function publishProjectLessons(store, { shareRepositories = [] } = 
 
 export async function exportLessonNotes(store, root) {
   await mkdir(path.join(root, "notes"), { recursive: true });
-  const all = store.all(), linked = new Set(all.filter(r => r.source.type === "shared-note")
-    .flatMap(r => [r.source.recordId, r.text.match(/\.\.\/records\/([a-f0-9]{64})\.json/)?.[1]]).filter(Boolean));
+  const throughRowid = store.maxRecordRowid(), linked = new Set();
+  for (const record of store.records({ sourceType: "shared-note", throughRowid })) {
+    for (const id of [record.source.recordId, record.text.match(/\.\.\/records\/([a-f0-9]{64})\.json/)?.[1]]) {
+      if (id) linked.add(id);
+    }
+  }
   let written = 0;
-  for (const record of all.filter(r => r.kind === "lesson" && r.visibility === "shared")) {
+  for (const record of store.records({ kind: "lesson", visibility: "shared", throughRowid })) {
     if (linked.has(record.id)) continue;
     const file = path.join(root, "notes", `${record.id}.md`);
     const metadata = { repository: record.repository, at: record.at, paths: record.paths,

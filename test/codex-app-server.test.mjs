@@ -1,4 +1,5 @@
 import { CODEX_MEMORY_ARGS } from "../commands/knowledge/instructions.mjs";
+import { COMMENT_WRITING_GUIDANCE } from "../commands/knowledge/comment-writing.mjs";
 import { DEFAULT_AI_PROFILES } from "../commands/graph/ai-models.mjs";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -24,6 +25,7 @@ test("new and follow-up turns receive the console browser instructions", async (
     await client.steerTurn({ threadId: "thread-1", turnId: "browser-turn", prompt: "Check focus" });
     for (const method of ["turn/start", "turn/steer"]) {
       assert.ok(requests.find(request => request.method === method).params.input[0].text.includes("# Console knowledge instructions"));
+      assert.ok(requests.find(request => request.method === method).params.input[0].text.includes(COMMENT_WRITING_GUIDANCE));
       assert.ok(requests.find(request => request.method === method).params.input[0].text
         .includes(BACKGROUND_BROWSER_POLICY));
     }
@@ -459,5 +461,18 @@ test("console refuses a task when native memory exclusion fails", async () => {
   try {
     await assert.rejects(client.start(), /Memory mode unavailable/);
     assert.ok(!requests.some(request => request.method === "turn/start"));
+  } finally { client.close(); }
+});
+
+test("interrupt sends the exact active thread and turn to Codex", async () => {
+  const requests = [];
+  const child = createAppServerChild(requests, () => undefined);
+  const client = createGraphCodexAppServer({ command: "codex", cwd: "/review/comm",
+    spawnProcess: () => child, knowledge: false });
+  try {
+    await client.start();
+    await client.interruptTurn({ threadId: "active-thread", turnId: "active-turn" });
+    assert.deepEqual(requests.find(request => request.method === "turn/interrupt").params,
+      { threadId: "active-thread", turnId: "active-turn" });
   } finally { client.close(); }
 });

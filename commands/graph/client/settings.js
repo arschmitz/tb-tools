@@ -1,7 +1,8 @@
 import { INTERACTIVE } from "./config.js";
+import { loadServiceCredentials } from "./service-credentials.js";
 
 const dialog = document.querySelector(".console-settings-dialog");
-const form = dialog?.querySelector("form");
+const form = dialog?.querySelector(".console-settings-form");
 const rows = dialog?.querySelector(".console-settings-rows");
 const status = dialog?.querySelector(".console-settings-status");
 const save = dialog?.querySelector(".console-settings-save");
@@ -110,6 +111,7 @@ export async function openConsoleSettings() {
   save.disabled = true;
   status.textContent = "Loading available models...";
   void loadDailyBuild();
+  void loadServiceCredentials();
   try {
     const result = await requestSettings();
     if (current !== generation) return;

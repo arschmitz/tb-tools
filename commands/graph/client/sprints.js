@@ -1,4 +1,5 @@
 import { INTERACTIVE } from "./config.js";
+import { isClosedBoardBug } from "./meta-board-visibility.js";
 import {
   createColorAssignments,
   getAccessibleAssigneePillStyle,
@@ -448,7 +449,10 @@ function renderPlanning() {
 
   panel.querySelectorAll(".sprint-column").forEach((column) => {
     const columnId = column.dataset.sprintColumn;
-    const cards = (state.current.columns?.[columnId]?.cards || []).filter(matchesFilters);
+    const cards = (state.current.columns?.[columnId]?.cards || []).filter((card) => (
+      (columnId === "sprint" || (card.column !== "complete" && !isClosedBoardBug(card))) &&
+      matchesFilters(card)
+    ));
     const headerValue = column.querySelector("header span");
     const container = column.querySelector(".sprint-cards");
     const orderedCards = columnId === "sprint" ? cards.sort(compareCardsByAssignee) : cards;

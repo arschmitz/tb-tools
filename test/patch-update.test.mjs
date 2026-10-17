@@ -1528,3 +1528,21 @@ test("failed assessment remains retryable and can recover in the saved conversat
 test("ending a Codex turn does not claim the assessment succeeded", () => {
   assert.equal(getGraphCodexActivity({ type: "turn.completed" }).title, "Codex turn ended");
 });
+
+
+test("focused Patch Update retrieval uses the selected feedback and explicit resume instruction", async () => {
+  let received;
+  const session = { status: "applying", mode: "update", revision: "D123", currentHash: "a".repeat(40),
+    commitMessage: "Fix calendar selection", currentItemIndex: 0,
+    items: [{ content: "Unrelated comment", filePath: "unrelated.js" },
+      { content: "Preserve focus on error", instruction: "Test the rejection path", filePath: "calendar/dialog.js" }] };
+  await runGraphPatchUpdateCodexTurn({ session, prompt: "Complete workflow instructions and response schema",
+    knowledgeQuestion: "Keep the user's selected calendar", knowledgeItem: session.items[1], getAgent: async () => ({ threadId: "saved", client: {
+      startTurn: async args => { received = args; return { turn: { status: "completed" }, message: "Done" }; },
+    } }) });
+  assert.ok(received.knowledgeRequest.question.startsWith("Keep the user's selected calendar"), "Retrieval should prioritize the latest explicit request");
+  assert.match(received.knowledgeRequest.question, /Test the rejection path/, "Retrieval should retain the focused item instruction");
+  assert.doesNotMatch(received.knowledgeRequest.question, /Unrelated comment|response schema/, "Retrieval should exclude unrelated comments and workflow schema");
+  assert.deepEqual(received.knowledgeRequest.paths, ["calendar/dialog.js"], "Retrieval should retain the selected comment path");
+  assert.equal(received.knowledgeQuery, "Complete workflow instructions and response schema", "The complete task contract should remain available separately");
+});

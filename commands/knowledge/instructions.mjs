@@ -1,5 +1,8 @@
+import { CODE_EVIDENCE_GUIDANCE } from "./code-evidence.mjs";
 import os from "node:os";
 import path from "node:path";
+import { COMMENT_WRITING_GUIDANCE } from "./comment-writing.mjs";
+import { CODE_STYLE_GUIDANCE } from "./code-style.mjs";
 
 export function knowledgeDirectory(settings = {}, home = os.homedir()) {
   const value = settings.ai?.knowledge?.directory || "~/.tb-tools/knowledge";
@@ -25,6 +28,17 @@ Use repository tb-tools for console work. Current instructions and verified sour
 outweigh historical claims. Check scope, revision, outcome, and validation limits.
 Recent timestamps alone do not establish style rules or settle conflicting claims.
 
+For Thunderbird work, exclude Suite and SeaMonkey from history ingestion,
+source analysis, knowledge retrieval, examples, style and naming guidance,
+implementation, verification, and review. Do not use suite/ files or Suite-only
+commits and discussions as evidence for Thunderbird behavior or conventions.
+Classify excluded commits from paths and metadata; do not study their bodies.
+For mixed commits, inspect only Thunderbird and shared code used by Thunderbird.
+Keep explicit exclusions separate from completed Thunderbird audits. Existing
+Suite records remain historical evidence and must not guide Thunderbird work.
+This is deliberate user-directed scope guidance; automatic learning must not
+change it.
+
 The console automatically captures requests, final answers, completed tool events,
 source snapshots, and review outcomes. State useful lessons with exact references
 and uncertainty. Background extraction creates cited lessons within a daily budget.
@@ -43,6 +57,12 @@ belong in the shared repository. Git hosting permissions control who can push.
 Do not force-push. Fetch and merge unique new files; report unresolved instruction
 or evidence conflicts. The console automates local commits and sync when configured.
 If memory is unavailable, continue with current source and report the limit.
+
+${COMMENT_WRITING_GUIDANCE}
+
+${CODE_STYLE_GUIDANCE}
+
+${CODE_EVIDENCE_GUIDANCE}
 `;
 }
 

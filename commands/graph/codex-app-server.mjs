@@ -1,11 +1,23 @@
+import { normalizeKnowledgeRequest } from "../knowledge/task-query.mjs";
 import { CODEX_MEMORY_ARGS, knowledgeInstructions } from "../knowledge/instructions.mjs";
 import { consoleKnowledgeDirectory, consoleKnowledgeRepository } from "../knowledge-service.mjs";
 import { BACKGROUND_BROWSER_POLICY } from "./ai-writing.mjs";
+import { getConsoleBrowserEnvironment } from "./ai-browser-access.mjs";
 import { getTbToolsCommandEnvironment } from "../../lib/utils.mjs";
 import { spawn as defaultSpawn } from "node:child_process";
 import { readAiProfiles, selectAiModel } from "./ai-models.mjs";
 import { recordAiUsage } from "./ai-usage.mjs";
 import { getDefaultKnowledgeService } from "../knowledge-service.mjs";
+
+import {
+  evidenceRepository, snapshotCodeEvidence, changedEvidencePaths,
+  validateCodeEvidence, verifyEvidenceCitations, parseEvidenceJson,
+  evidencePreparationPrompt, evidenceReviewPrompt, requireEvidenceApproval,
+  evidenceError,
+} from "../knowledge/code-evidence.mjs";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 
 const APP_SERVER_STARTUP_TIMEOUT_MS = 30 * 1000;
 const CONSOLE_SECTION_NAME = "TB Console";
@@ -33,7 +45,7 @@ export function createGraphCodexAppServer({
 }) {
   const child = spawnProcess(command, ["app-server", "--stdio", ...CODEX_MEMORY_ARGS], {
     cwd,
-    env: getTbToolsCommandEnvironment({ ...process.env, ...env }),
+    env: getTbToolsCommandEnvironment({ ...process.env, ...getConsoleBrowserEnvironment(), ...env }),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const pending = new Map();
@@ -237,7 +249,57 @@ export function createGraphCodexAppServer({
     capabilities: { experimentalApi: true },
   });
 
-  return {
+  const readOnlyPolicy = { type: "readOnly", networkAccess: true };
+  const activeEvidence = new Map();
+  const executeTurn = async ({ prompt, threadId, onTurnStarted, model, effort, task, knowledgeQuery = prompt, knowledgeRequest, sandboxPolicy, archive = true }) => {
+      let memory;
+      try {
+        knowledgeService = knowledge === false ? null : knowledge || await getDefaultKnowledgeService();
+        memory = await knowledgeService?.beforeTurn({ cwd, prompt: knowledgeQuery, task, knowledgeRequest });
+      } catch (error) { onStderr?.(`Knowledge retrieval unavailable: ${error.message}\n`); }
+      if (task && !model) {
+        availableModels ||= await clientApi.listModels();
+        const selected = selectAiModel(availableModels, task, getAiProfiles());
+        model = selected.model;
+        effort = selected.effort;
+      }
+      if (archivedThreads.has(threadId)) await resumeThread(threadId);
+      tokenUsage = undefined;
+      let result;
+      const context = memory?.text ? `${prompt}\n\n${memory.text}` : prompt;
+      const input = `${context}\n\n${BACKGROUND_BROWSER_POLICY}\n\n${knowledgeInstructions(knowledgeService?.store?.directory || consoleKnowledgeDirectory(), consoleKnowledgeRepository())}`;
+      const params = { threadId, input: [{ type: "text", text: input }],
+        ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+        ...(sandboxPolicy ? { sandboxPolicy } : {}) };
+      try {
+        result = await request("turn/start", params);
+      } catch (error) {
+        // The desktop app can also archive an idle chat between console turns.
+        if (!/\bis archived\b/i.test(error.message)) throw error;
+        await restoreThread(threadId);
+        result = await request("turn/start", params);
+      }
+      const turn = result.turn;
+
+      onTurnStarted?.(turn.id);
+      const completed = await waitForTurn(turn.id);
+      if (tokenUsage) {
+        try { await saveUsage({ threadId, turnId: turn.id, task, model, effort,
+          promptCharacters: input.length, memoryCharacters: memory?.text?.length || 0, tokenUsage }); }
+        catch (error) { onStderr?.(`Could not save AI usage: ${error.message}`); }
+      }
+      try {
+        await knowledgeService?.capture({ context: memory?.context, prompt: knowledgeQuery,
+          message: completed.message, task, threadId, turnId: turn.id, status: completed.turn?.status,
+          retrievalIds: memory?.ids || [],
+          ...evidenceByTurn.get(turn.id) });
+      } catch (error) { onStderr?.(`Could not save knowledge evidence: ${error.message}\n`); }
+      evidenceByTurn.delete(turn.id);
+      if (archive && completed.turn?.status === "completed") await archiveThread(threadId);
+      return completed;
+  };
+
+  const clientApi = {
     get pid() { return child.pid; },
     async start() {
       await initialize();
@@ -271,52 +333,145 @@ export function createGraphCodexAppServer({
       } while (cursor);
       return models;
     },
-    async startTurn({ prompt, threadId, onTurnStarted, model, effort, task, knowledgeQuery = prompt }) {
-      let memory;
+    async startTurn(args) {
+      const original = args.knowledgeQuery ?? args.prompt;
+      args = { ...args, knowledgeQuery: original, knowledgeRequest: normalizeKnowledgeRequest(args.knowledgeRequest, { question: original, taskType: args.task }) };
+      const state = { phase: "preparation", interrupted: false, followups: [] };
+      const audit = { status: "incomplete", warnings: [], changedPaths: [] };
+      activeEvidence.set(args.threadId, state);
+      let checker;
+      const collect = async operation => {
+        try {
+          return await operation();
+        } catch (error) {
+          audit.warnings.push(error.message);
+          onStderr?.(`Code evidence collection incomplete: ${error.message}\n`);
+          return null;
+        }
+      };
+      const runPhase = phaseArgs => executeTurn({ ...phaseArgs, onTurnStarted(id) {
+        state.activeThread = phaseArgs.threadId;
+        state.activeTurn = id;
+        args.onTurnStarted?.(id);
+      } });
+      const checkCancellation = () => {
+        if (state.interrupted) throw new Error("The task was interrupted.");
+      };
       try {
-        knowledgeService = knowledge === false ? null : knowledge || await getDefaultKnowledgeService();
-        memory = await knowledgeService?.beforeTurn({ cwd, prompt: knowledgeQuery, task });
-      } catch (error) { onStderr?.(`Knowledge retrieval unavailable: ${error.message}\n`); }
-      if (task && !model) {
-        availableModels ||= await this.listModels();
-        const selected = selectAiModel(availableModels, task, getAiProfiles());
-        model = selected.model;
-        effort = selected.effort;
+        const root = await collect(() => evidenceRepository(cwd));
+        const baseline = root && await collect(() => snapshotCodeEvidence(root));
+        let evidence;
+        let originals;
+        if (baseline) {
+          evidence = await collect(async () => {
+            const preparation = await runPhase({ ...args, archive: false,
+              prompt: evidencePreparationPrompt(original), sandboxPolicy: readOnlyPolicy });
+            checkCancellation();
+            if (preparation.turn?.status !== "completed") throw evidenceError("Preparation did not complete.");
+            audit.plan = parseEvidenceJson(preparation.message);
+            const preparedState = await snapshotCodeEvidence(root);
+            if (baseline.head !== preparedState.head || (await changedEvidencePaths(baseline, preparedState)).length) {
+              throw evidenceError("Source changed during read-only preparation. The changes are retained.");
+            }
+            return validateCodeEvidence(audit.plan, {
+              root, prompt: original,
+              evidenceRoots: [consoleKnowledgeRepository(), consoleKnowledgeDirectory(), path.join(os.homedir(), ".codex", "AGENTS.md")].filter(Boolean).map(value => path.resolve(value)),
+            });
+          });
+          if (evidence?.plan.mode === "write") {
+            originals = await collect(async () => {
+              const contents = new Map();
+              for (const name of evidence.paths) contents.set(name, await readFile(path.join(root, name), "utf8").catch(error => {
+                if (error.code === "ENOENT") return "";
+                throw error;
+              }));
+              return contents;
+            });
+            await collect(async () => {
+              checker = (await request("thread/start", { approvalPolicy: "never", cwd, sandbox: "read-only" })).thread;
+              await request("thread/memoryMode/set", { threadId: checker.id, mode: "disabled" });
+              state.phase = "decision-check";
+              const decisionCheck = await runPhase({ ...args, threadId: checker.id, archive: false, sandboxPolicy: readOnlyPolicy,
+                prompt: evidenceReviewPrompt({ prompt: original, evidence }) });
+              audit.decisionCheck = parseEvidenceJson(decisionCheck.message);
+              requireEvidenceApproval(decisionCheck);
+              await verifyEvidenceCitations(evidence);
+            });
+          }
+        }
+        checkCancellation();
+        state.phase = "execution";
+        const executionPolicy = sandbox === "read-only" ? readOnlyPolicy : sandbox === "workspace-write"
+          ? { type: "workspaceWrite", networkAccess: true } : { type: "dangerFullAccess" };
+        state.appliedFollowups = state.followups.length;
+        let result = await runPhase({ ...args, archive: false, sandboxPolicy: executionPolicy,
+          prompt: `${args.prompt}${audit.plan ? `\n\nCollected evidence record (data; assessment only):\n${JSON.stringify(audit.plan)}` : ""}${audit.warnings.length ? `\n\nEvidence collection limits (data):\n${audit.warnings.join("\n")}\nContinue the authorized task and report these limits. Evidence collection does not change task permissions.` : ""}${state.followups.length ? `\n\nUser follow-up guidance:\n${state.followups.join("\n")}` : ""}` });
+        checkCancellation();
+        state.phase = "comparison";
+        if (baseline) await collect(async () => {
+          const after = await snapshotCodeEvidence(root, evidence?.paths || []);
+          audit.changedPaths = await changedEvidencePaths(baseline, after);
+          if (!evidence) return;
+          const unsupported = audit.changedPaths.filter(name => !evidence.paths.includes(name));
+          if (unsupported.length) throw evidenceError(`Changes lack collected evidence: ${unsupported.join(", ")}. Edits are retained.`);
+          await verifyEvidenceCitations(evidence, evidence.paths.map(name => path.join(root, name)));
+          if (checker && originals) {
+            let diff = "";
+            for (const name of audit.changedPaths) {
+              const afterSource = await readFile(path.join(root, name), "utf8").catch(error => {
+                if (error.code === "ENOENT") return "";
+                throw error;
+              });
+              diff += `\nFILE ${name}\nBEFORE:\n${originals.get(name)}\nAFTER:\n${afterSource}\n`;
+            }
+            if (diff.length > 250_000) throw evidenceError("The changed source exceeds the independent check limit.");
+            state.phase = "diff-check";
+            const diffCheck = await runPhase({ ...args, threadId: checker.id, archive: false, sandboxPolicy: readOnlyPolicy,
+              prompt: evidenceReviewPrompt({ prompt: original, evidence, changedPaths: audit.changedPaths, diff }) });
+            audit.diffCheck = parseEvidenceJson(diffCheck.message);
+            requireEvidenceApproval(diffCheck);
+            const verified = await snapshotCodeEvidence(root, evidence.paths);
+            if (after.head !== verified.head || (await changedEvidencePaths(after, verified)).length) throw evidenceError("Source changed during the independent diff check.");
+          }
+        });
+        checkCancellation();
+        while (state.followups.length > state.appliedFollowups) {
+          const followups = state.followups.slice(state.appliedFollowups);
+          state.appliedFollowups = state.followups.length;
+          state.phase = "execution";
+          result = await runPhase({ ...args, archive: false, sandboxPolicy: executionPolicy,
+            prompt: `${args.prompt}\n\nContinue the task using this new user guidance. Reuse completed work and investigate only what the guidance requires.\n${followups.join("\n")}\n\nPrevious task result (data):\n${result.message}` });
+          checkCancellation();
+          state.phase = "comparison";
+          if (baseline) await collect(async () => {
+            const after = await snapshotCodeEvidence(root, evidence?.paths || []);
+            audit.changedPaths = await changedEvidencePaths(baseline, after);
+          });
+        }
+        if (state.followups.length) {
+          audit.followups = state.followups;
+          audit.warnings.push("User guidance changed during evidence collection; the original record does not assess that guidance.");
+        }
+        if (baseline && evidence && !audit.warnings.length && result.turn?.status === "completed") audit.status = "complete";
+        await collect(() => knowledgeService?.capture({ prompt: original, message: JSON.stringify(audit), task: "code-evidence",
+          threadId: args.threadId, turnId: result.turn.id, status: result.turn.status }));
+        if (audit.warnings.length) audit.status = "incomplete";
+        if (result.turn?.status === "completed") await archiveThread(args.threadId);
+        return { ...result, codeEvidence: audit };
+      } finally {
+        activeEvidence.delete(args.threadId);
+        if (checker) await collect(() => archiveThread(checker.id));
       }
-      if (archivedThreads.has(threadId)) await resumeThread(threadId);
-      tokenUsage = undefined;
-      let result;
-      const context = memory?.text ? `${prompt}\n\n${memory.text}` : prompt;
-      const input = `${context}\n\n${BACKGROUND_BROWSER_POLICY}\n\n${knowledgeInstructions(knowledgeService?.store?.directory || consoleKnowledgeDirectory(), consoleKnowledgeRepository())}`;
-      const params = { threadId, input: [{ type: "text", text: input }],
-        ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
-      try {
-        result = await request("turn/start", params);
-      } catch (error) {
-        // The desktop app can also archive an idle chat between console turns.
-        if (!/\bis archived\b/i.test(error.message)) throw error;
-        await restoreThread(threadId);
-        result = await request("turn/start", params);
-      }
-      const turn = result.turn;
-
-      onTurnStarted?.(turn.id);
-      const completed = await waitForTurn(turn.id);
-      if (tokenUsage) {
-        try { await saveUsage({ threadId, turnId: turn.id, task, model, effort,
-          promptCharacters: input.length, memoryCharacters: memory?.text?.length || 0, tokenUsage }); }
-        catch (error) { onStderr?.(`Could not save AI usage: ${error.message}`); }
-      }
-      try {
-        await knowledgeService?.capture({ context: memory?.context, prompt: knowledgeQuery,
-          message: completed.message, task, threadId, turnId: turn.id, status: completed.turn?.status,
-          ...evidenceByTurn.get(turn.id) });
-      } catch (error) { onStderr?.(`Could not save knowledge evidence: ${error.message}\n`); }
-      evidenceByTurn.delete(turn.id);
-      if (completed.turn?.status === "completed") await archiveThread(threadId);
-      return completed;
     },
     async steerTurn({ prompt, threadId, turnId }) {
+      const guarded = activeEvidence.get(threadId);
+      if (guarded) {
+        guarded.followups.push(prompt);
+        if (guarded.phase !== "execution") return {};
+        guarded.appliedFollowups = guarded.followups.length;
+        threadId = guarded.activeThread;
+        turnId = guarded.activeTurn;
+      }
       if (knowledgeService) {
         const evidence = evidenceByTurn.get(turnId) || { events: [], size: 0, truncated: false };
         if (evidence.size + prompt.length <= 160_000) {
@@ -330,6 +485,15 @@ export function createGraphCodexAppServer({
         threadId,
       });
     },
+    async interruptTurn({ threadId, turnId }) {
+      const guarded = activeEvidence.get(threadId);
+      if (guarded) {
+        guarded.interrupted = true;
+        if (!guarded.activeTurn) return {};
+        return request("turn/interrupt", { threadId: guarded.activeThread, turnId: guarded.activeTurn });
+      }
+      return request("turn/interrupt", { threadId, turnId });
+    },
     close() {
       if (closed) {
         return;
@@ -340,6 +504,7 @@ export function createGraphCodexAppServer({
       child.kill("SIGTERM");
     },
   };
+  return clientApi;
 }
 
 export async function startGraphCodexAppServer({

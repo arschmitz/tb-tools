@@ -10,15 +10,20 @@ Right now these are only things that I have personally used and found useful but
 `npm install -g https://github.com/arschmitz/tb-tools`
 ## Desktop app
 
-Run `tb desktop` from a Thunderbird comm checkout to start the Electron app.
+Run `tb desktop` from a Thunderbird comm checkout to start Thunderbird Development Dashboard.
 The terminal returns after the app starts. Outside a comm checkout, the app uses
 its saved checkout or asks you to choose one.
 
 Use `tb desktop --comm=/path/to/firefox/comm` to choose a checkout.
 Use `--project=/path/to/commands` if the desktop source is in another directory.
 Set `desktop.projectDirectory` in `~/.tb.json` to save that source directory.
-Run `npm install` in the desktop source directory to install Electron.
+Run `npm install` in the desktop source directory to install the runtime.
+The first launch creates a branded app bundle in `~/.tb-tools/desktop-runtime`.
+Later launches reuse that bundle and load the current source. Saved checkout,
+sign-in, and phone settings keep their existing data directory.
 `tb console` continues to start the web console.
+
+On macOS, use **Window → Fill Entire Display** (Control-Command-Shift-F) to remove the black strip above the app on displays with a camera cutout. This mode stays on the current desktop. The standard fullscreen action uses a separate macOS Space and keeps the reserved top strip.
 
 ## Configuration
 TB Tools uses a configuration `.tb.json` file in your user's home directory to enable some features.
@@ -61,7 +66,7 @@ Meta bug boards read story points from Bugzilla's `cf_fx_points` field by defaul
 
 The console's Phabricator Authentication menu item uses a separate private browser profile in `~/.tb-tools/phabricator-browser` for inline code suggestions. It is not stored in `.tb.json` or Git. Use Sign Out in the same dialog to remove that profile. If Chrome or Edge is unavailable, install Playwright Chromium with `npx playwright install chromium`.
 
-## Thunderbird Desktop Console
+## Thunderbird Development Dashboard
 
 `tb console` starts a local browser-based control surface for Thunderbird patch work. The standalone desktop app runs the same console in a persistent window and creates its own Review worktrees. See the desktop app section below.
 
@@ -90,31 +95,33 @@ Use the console to:
 
 AI tasks use automatic local knowledge capture and bounded retrieval. See [Console knowledge](docs/knowledge.md) for learning budgets, private records, Git sync, and inspection commands.
 
-![Thunderbird Desktop Console showing a selected commit, integration badges, and a GitHub-style diff](/images/console-overview.png)
+![Thunderbird Development Dashboard showing a selected commit, integration badges, and a GitHub-style diff](/images/console-overview.png)
 
 _The main console view keeps the comm graph, checkout state, Bugzilla and Phabricator status, tracked try runs, and a syntax-highlighted diff in one place._
 
-![Thunderbird Desktop Console try run dialog](/images/console-try.png)
+![Thunderbird Development Dashboard try run dialog](/images/console-try.png)
 
 _The try dialog exposes the normal `mach try` selectors, presets, task regexes, artifact builds, and optional Phabricator comments without leaving the browser flow._
 
-![Thunderbird Desktop Console land patches dialog](/images/console-land.png)
+![Thunderbird Development Dashboard land patches dialog](/images/console-land.png)
 
 _The Land Patches flow brings the `tb land` sheriff workflow into the console, showing accepted checkin-needed patches, related links, prompts, and Lando output._
 
-![Thunderbird Desktop Console parsed test output](/images/console-test-output.png)
+![Thunderbird Development Dashboard parsed test output](/images/console-test-output.png)
 
 _Test runs preserve colored output and add parsed summaries, failed-file actions, rerun controls, copy buttons, and VS Code links._
 
 ## Standalone desktop app
 
+The window uses Electron. The background service uses bundled standalone Node.js with an 8 GB JavaScript heap limit. This limit permits memory use; it does not reserve 8 GB at startup. Set `TB_DESKTOP_HEAP_MB` before starting the app to change the limit, for example `TB_DESKTOP_HEAP_MB=12288 tb desktop`. Startup logs in `~/.tb-tools/desktop-logs` show the actual Node executable and heap limit. Comparison logs stay on disk instead of retaining all their excerpts in memory.
+
 Run `npm ci`, then `npm run desktop -- --comm=/path/to/firefox/comm`. Run `npm run desktop:package` to make a native app for the current system. The app keeps running in the tray after its console window closes. Links open as tabs in the main window. Normal clicks reuse the most recently used tab for the same service. Right-click a link for Open in New Tab or Open in Browser. Right-click any tab for Open in Browser. The fixed header keeps Back, Forward, Reload, and the tab list visible. Use the native window controls to close, minimize, or maximize the window. Reload and Cmd/Ctrl+R also work on the Console tab.
 
-The desktop app creates paired Review worktrees in `~/.tb-tools/worktrees`. Each revision under review gets its own pair, so different reviews can run together. Each active worktree has its own writable object directory. Completed artifact snapshots live in `~/.tb-tools/build-cache`. When sccache is installed, its compiler-result storage is shared; cache hits across worktrees depend on the active sccache server's base paths. The app turns off sccache direct mode to avoid stale headers across worktrees. A new worktree can build without copying another live object directory. Try repair worktrees also get a Thunderbird build config with a private object directory. Windows builds need Visual Studio C++ tools, MozillaBuild's `bin` directory on PATH, and native Python.
+The desktop app creates paired Review worktrees in `~/.tb-tools/worktrees`. Each revision under review gets its own pair, so different reviews can run together. Each active worktree has its own writable object directory. Command-line, manual, Review, landing, task, and scheduled builds use the same build flow. It checks completed local binaries first, then uses Mach to check its download cache and available Thunderbird CI artifacts on Treeherder/Taskcluster. New artifact worktrees try `mach build faster` first and use a complete artifact build if generated files are missing. Native changes use an incremental native build unless matching completed local binaries are available. Completed artifact snapshots live in `~/.tb-tools/build-cache`. Scheduled builds keep their private object directory for the next run. When sccache is installed, its compiler-result storage is shared; cache hits across worktrees depend on the active sccache server's base paths. The app turns off sccache direct mode to avoid stale headers across worktrees. A new worktree can build without copying another live object directory. Try repair worktrees also get a Thunderbird build config with a private object directory. Windows builds need Visual Studio C++ tools, MozillaBuild's `bin` directory on PATH, and native Python.
 
-When a review completes, is cancelled, or is marked handled, the console removes its task worktrees and task branches. Review-only commits then become eligible for normal Git garbage collection if no other branch refers to them. Other finished tasks remove their worktrees but keep their branches and final commits. The console saves detached final commits under `tb-task/<task-id>/retained-head` in each repository. Try repair commits use `tb-try-workspace/<workflow-id>-<generation>/retained-head`. Tasks waiting for input keep their worktrees. A task also keeps its worktree while a Try workflow still uses it. Shared build caches stay available.
+When a review completes, is cancelled, or is marked handled, the console removes its task worktrees and task branches. Review-only commits then become eligible for normal Git garbage collection if no other branch refers to them. Other finished tasks remove their worktrees and visible task branches. Their commits remain in hidden recovery refs under `refs/tb-tools/task-history/<task-id>/` in each repository. The final checked-out commit is saved as `retained-head`. Worktrees with unfinished edits stay available. Try repair commits use `tb-try-workspace/<workflow-id>-<generation>/retained-head`. Tasks waiting for input keep their worktrees. A task also keeps its worktree while a Try workflow still uses it. Shared build caches stay available.
 
-In Settings, set one or more local times in `HH:MM` format and enable Daily source pull and build. The app fetches both `origin/main` branches, updates its own detached worktree in `~/.tb-tools/daily-build`, and runs `./mach build` there. It never switches the Working checkout. Build now, Cancel build, and View log are available in the same section. If the app starts after a scheduled time, it runs one catch-up build that day. Enabling the schedule also asks the packaged app to start at login on macOS or Windows; operating system approval may still be needed.
+In Settings, set one or more local times in `HH:MM` format and enable Daily source pull and build. The app fetches both `origin/main` branches, updates its own detached worktree in `~/.tb-tools/daily-build`, and uses the shared build flow there. It keeps the private object directory for later incremental builds. It never switches the Working checkout. Build now, Cancel build, and View log are available in the same section. If the app starts after a scheduled time, it runs one catch-up build that day. Enabling the schedule also asks the packaged app to start at login on macOS or Windows; operating system approval may still be needed.
 
 For phone access over cellular, install Tailscale on the computer and phone and sign in to the same private network. Choose Pair Phone in the desktop app. It configures Tailscale Serve on private HTTPS port 8443 and shows the phone URL and a one-time code. Open the URL on the phone, enter the code, then add the page to the home screen. The phone uses the same console and actions through a separate paired gateway. Disable Phone Access and Revoke Paired Phones are in the app menu. The original local console stays bound to loopback.
 
@@ -276,7 +283,7 @@ tb graph
 <br/><br/>
 ### console
 ---
-Starts the interactive Thunderbird Desktop Console with a Phabricator/Bugzilla dashboard, live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, tracked try runs, update/rebase controls, and build/run output.
+Starts the interactive Thunderbird Development Dashboard with a Phabricator/Bugzilla dashboard, live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, tracked try runs, update/rebase controls, and build/run output.
 ```bash
 tb console
 ```
@@ -768,3 +775,9 @@ Review uses its own checkout queue, including follow-up turns. Update and Implem
 reserve the working checkout while active. A busy Codex writer causes an error;
 it does not start a second writer in a new chat. Try diagnosis and repair use
 per-workflow checkouts and saved conversations. Separate checkouts can run at once.
+
+Review imports the selected Phabricator revision with its parent patches. It checks
+out the selected commit if moz-phab also imports later patches. The review compares
+that commit with its immediate parent. Case-only file renames work on
+case-insensitive disks. If the stack cannot be applied, Review stops with an error
+instead of retrying without the parent patches.

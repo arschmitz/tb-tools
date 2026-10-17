@@ -27,9 +27,12 @@ export function initializeDesktopBrowserTabs() {
     <button type="button" data-browser-action="reload" aria-label="Reload">↻</button>
     <span class="desktop-browser-address"></span>`;
   navigation.closest("header").append(toolbar);
-  const layout = () => api.layout(toolbar.hidden
-    ? navigation.closest("header").getBoundingClientRect().bottom : toolbar.getBoundingClientRect().bottom);
-  new ResizeObserver(layout).observe(document.querySelector("header"));
+  const header = navigation.closest("header");
+  const layout = () => {
+    document.documentElement.style.setProperty("--console-header-height", `${Math.ceil(header.getBoundingClientRect().height)}px`);
+    api.layout(toolbar.hidden ? header.getBoundingClientRect().bottom : toolbar.getBoundingClientRect().bottom);
+  };
+  new ResizeObserver(layout).observe(header);
   window.addEventListener("resize", layout);
   document.addEventListener("click", event => {
     if (event.target.closest(".graph-menu-button, .graph-menu-command, .update-action, .mach-action")) api.action("select", "console");

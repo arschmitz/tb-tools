@@ -1,6 +1,7 @@
 import { getMonitoredTryVerdict, mergeMonitoredTryRuns } from "./try-monitor-store.mjs";
+import { findTryFixupMonitor } from "./try-fixup-identity.mjs";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { migratePatchIdentityFields, migrateRepositoryPatchIdentities, resolvePatchIdentity } from "../../lib/patch-identity.mjs";
 import {
@@ -8,7 +9,7 @@ import {
   installTbToolsCommitMsgHook,
 } from "../../lib/commit-message.mjs";
 import { run } from "../../lib/utils.mjs";
-import { formatPrettyDiffHtml, getDiffChangeCounts } from "./diff-renderer.mjs";
+import { formatPrettyDiffHtml, formatDiffFileSummaryHtml, getDiffChangeCounts, splitPrettyDiffFiles, getDiffFilePathsForLocalLookup } from "./diff-renderer.mjs";
 import {
   DEFAULT_DIFF_CONTEXT_LINES,
   DEFAULT_MAX_DIFF_BYTES,
@@ -184,12 +185,15 @@ function getGitLogArgs(limit, offset = 0) {
     // Private AI worktrees retain old revisions for evidence and recovery.
     // Show shared refs and this checkout, not detached HEADs from other tasks.
     "--single-worktree",
-    "--exclude=refs/tb-tools/repair-history/*",
-    "--exclude=refs/tb-tools/repair-owners/*",
-    "--exclude=refs/tb-tools/try-validation/*",
+    "--exclude=refs/tb-tools/*",
+    "--exclude=refs/heads/tb-task/*",
+    "--exclude=refs/heads/tb-try-workspace/*",
     "--all",
     "--topo-order",
     "--decorate=short",
+    "--decorate-refs-exclude=refs/tb-tools/*",
+    "--decorate-refs-exclude=refs/heads/tb-task/*",
+    "--decorate-refs-exclude=refs/heads/tb-try-workspace/*",
     "--date=unix",
     `--format=${RECORD_SEPARATOR}%H${FIELD_SEPARATOR}%P${FIELD_SEPARATOR}%D${FIELD_SEPARATOR}%an${FIELD_SEPARATOR}%ae${FIELD_SEPARATOR}%at${FIELD_SEPARATOR}%s`,
   ];
@@ -277,7 +281,11 @@ export function getGitAmendArgs(messagePath, { includeChanges = false } = {}) {
 }
 
 function normalizeCommitMessage(message = "") {
-  return `${String(message).replace(/\r\n/g, "\n").trimEnd()}\n`;
+  // git commit -F removes trailing spaces and leading/trailing blank lines,
+  // and collapses repeated blank lines. Compare the stored form.
+  return `${String(message).replace(/\r\n/g, "\n")
+    .split("\n").map(line => line.replace(/[\t ]+$/, "")).join("\n")
+    .replace(/\n{3,}/g, "\n\n").replace(/^\n+|\n+$/g, "")}\n`;
 }
 
 export function ensureAmendedCommitMessage(actualMessage, expectedMessage, hash) {
@@ -660,8 +668,12 @@ export async function attachGraphTryRunsToCommits({
   const userEmail = runCommand === run
     ? (await runCommand({ cmd: "git", args: ["config", "user.email"], cwd: graph.path, capture: true, silent: true }).catch(() => "")).trim().toLowerCase()
     : "";
+  const fixups = new Map();
+  for (const commit of commits.filter(item => item.subject?.startsWith("fixup!"))) {
+    fixups.set(commit.hash, await findTryFixupMonitor({ graph, hash: commit.hash, monitors: store.monitors || [], runCommand }));
+  }
   commits = commits.map(commit => {
-    const monitor = store.monitors?.find(state => state.fixupHash === commit.hash && state.phase !== "squashed");
+    const monitor = fixups.get(commit.hash) || store.monitors?.find(state => state.fixupHash === commit.hash && state.phase !== "squashed");
     const latest = store.monitors?.filter(state => [state.hash, state.fixupHash].includes(commit.hash))
       .sort((a, b) => Date.parse(b.attempts[0]?.createdAt) - Date.parse(a.attempts[0]?.createdAt))[0];
     const attempt = latest && [...latest.attempts].reverse().find(item => (item.hash || latest.sourceHash) === commit.hash);
@@ -842,9 +854,10 @@ export async function getWorkingTreeDiff({
   maxDiffBytes = DEFAULT_MAX_DIFF_BYTES,
   runCommand = run,
 }) {
-  return truncateDiff(
+  return renderLocalDiff(
     await getRawWorkingTreeDiff({ cwd, fullFile, runCommand }),
     maxDiffBytes,
+    { cwd, runCommand },
   );
 }
 
@@ -886,7 +899,7 @@ export async function getWorkingTreeCommits({
     if (diffs) {
       untrackedDiff ??= await getUntrackedDiff({ cwd, files, runCommand });
       const diff = [trackedDiff.trimEnd(), untrackedDiff].filter(Boolean).join("\n");
-      commitDiffs[WORKING_TREE_CHANGES_HASH] = truncateDiff(diff, maxDiffBytes);
+      commitDiffs[WORKING_TREE_CHANGES_HASH] = await renderLocalDiff(diff, maxDiffBytes, { cwd, runCommand });
     }
   }
 
@@ -944,9 +957,46 @@ export async function getGraphCommitMessage({
   });
 }
 
-export function truncateDiff(diff, maxDiffBytes = DEFAULT_MAX_DIFF_BYTES) {
+export async function renderLocalDiff(diff, maxDiffBytes, { cwd, runCommand = run, workingTrees } = {}) {
+  const localFiles = new Map();
+  const files = Object.entries(splitPrettyDiffFiles(diff) || {});
+  const findLocalFiles = async (roots) => Promise.all(files.filter(([file]) => !localFiles.has(file)).map(async ([file, lines]) => {
+    // The renderer supplies both paths, including rename destinations.
+    const paths = getDiffFilePathsForLocalLookup(lines, file);
+    for (const root of roots) {
+      for (const relativePath of paths) {
+        const absolutePath = path.resolve(root, relativePath);
+        const relative = path.relative(path.resolve(root), absolutePath);
+        if (relative.startsWith(".." + path.sep) || relative === ".." || path.isAbsolute(relative)) continue;
+        try {
+          if ((await stat(absolutePath)).isFile()) {
+            localFiles.set(file, { path: absolutePath, side: relativePath === paths[0] ? "new" : "old" });
+            return;
+          }
+        } catch {
+          // Missing files have no editor link.
+        }
+      }
+    }
+  }));
+  await findLocalFiles([...new Set([cwd, ...(workingTrees || [])].filter(Boolean))]);
+  if (!workingTrees && localFiles.size < files.length) {
+    // List other worktrees only when the current checkout lacks a changed file.
+    try {
+      const output = await runCommand({ cmd: "git", args: ["worktree", "list", "--porcelain", "-z"], cwd, capture: true, silent: true });
+      const roots = output.split("\0").filter(field => field.startsWith("worktree ")).map(field => field.slice(9));
+      await findLocalFiles([...new Set(roots)].filter(root => root !== cwd));
+    } catch {
+      // The current checkout can still provide links if Git cannot list working trees.
+    }
+  }
+  return truncateDiff(diff, maxDiffBytes, { localFiles });
+}
+
+export function truncateDiff(diff, maxDiffBytes = DEFAULT_MAX_DIFF_BYTES, options = {}) {
   const maxBytes = Number(maxDiffBytes);
-  const fullHtml = formatPrettyDiffHtml(diff);
+  const fileSummary = formatDiffFileSummaryHtml(diff);
+  const fullHtml = fileSummary + formatPrettyDiffHtml(diff, options);
   const changeCounts = getDiffChangeCounts(diff);
 
   if (!maxBytes || maxBytes < 1 || Buffer.byteLength(diff, "utf8") <= maxBytes) {
@@ -962,7 +1012,7 @@ export function truncateDiff(diff, maxDiffBytes = DEFAULT_MAX_DIFF_BYTES) {
 
   return {
     text: truncatedText,
-    html: `${formatPrettyDiffHtml(truncatedText)}<pre class="info">[diff truncated at ${maxBytes} bytes]</pre>`,
+    html: `${fileSummary}${formatPrettyDiffHtml(truncatedText, options)}<pre class="info">[diff truncated at ${maxBytes} bytes]</pre>`,
     truncated: true,
     ...changeCounts,
   };
@@ -993,7 +1043,7 @@ export async function getCommitDiffs({
           silent: true,
         });
 
-        diffs[commit.hash] = truncateDiff(diff, maxDiffBytes);
+        diffs[commit.hash] = await renderLocalDiff(diff, maxDiffBytes, { cwd, runCommand });
       }
     } catch (error) {
       diffs[commit.hash] = {
@@ -1033,7 +1083,7 @@ export async function getCommitDiff({
     silent: true,
   });
 
-  return truncateDiff(diff, maxDiffBytes);
+  return await renderLocalDiff(diff, maxDiffBytes, { cwd, runCommand });
 }
 
 export async function getCheckoutGraphMetadata({

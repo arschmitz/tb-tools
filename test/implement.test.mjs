@@ -125,6 +125,37 @@ test("verifier and implementer exchange findings and amend one commit", async t 
   assert.deepEqual(state.reports.map(entry => entry.role), ["implement", "verify", "implement", "verify"]);
 });
 
+for (const hasFindings of [false, true]) test(`Verify repairs are amended and checked again (findings: ${hasFindings})`, async t => {
+  const f = await fixture(t);
+  let verifies = 0;
+  const manager = createImplementationManager({ ...f.options, generate: async ({ role, prompt }) => {
+    if (role === "implement") {
+      await writeFile(path.join(f.root, "feature.txt"), "feature\n");
+      return report();
+    }
+    assert.match(prompt, /Repair issues in source and tests/);
+    assert.doesNotMatch(prompt, /Do not edit source, tests|do not edit source or Git/);
+    if (!verifies++) {
+      await writeFile(path.join(f.root, "feature.txt"), "verified repair\n");
+      return report(hasFindings ? { complete: false, findings: [
+        { id: "repair", description: "Check the amended repair", evidence: "feature.txt:1" },
+      ] } : {});
+    }
+    assert.equal(await f.git("show", "HEAD:feature.txt"), "verified repair");
+    assert.equal(await f.git("status", "--porcelain"), "");
+    assert.equal(f.pushes(), 0);
+    return report();
+  } });
+  t.after(() => manager.stop());
+  await manager.create({ bugId: 123, base: "current", expectedHead: f.head });
+  const state = await f.wait();
+  assert.equal(state.error, undefined);
+  assert.equal(state.phase, "monitoring");
+  assert.equal(await f.git("rev-list", "--count", `${f.head}..HEAD`), "1");
+  assert.deepEqual(state.reports.map(entry => entry.role), ["implement", "verify", "verify"]);
+  assert.equal(f.pushes(), 1);
+});
+
 test("automatically folds only this implementation's passing Try fixup into its commit", async t => {
   const f = await fixture(t);
   await f.manager.create({ bugId: 123, base: "current", expectedHead: f.head });
@@ -263,7 +294,17 @@ test("feedback during verification survives saves and gets implemented before Tr
   assert.equal(result.phase, "monitoring");
   assert.equal(implementations, 2); assert.equal(verifications, 2); assert.equal(f.pushes(), 1);
   assert.equal(result.instructions.length, 2);
-  await assert.rejects(f.manager.feedback(state.id, { text: "Too late" }), /Try already owns/);
+  const releaseMonitor = f.monitorStore.lock(result.monitorId);
+  await f.manager.feedback(state.id, { text: "Handle Escape after Try too" });
+  await f.manager.tick();
+  assert.equal(f.store.read(state.id).feedbackPending, true);
+  releaseMonitor();
+  await f.manager.tick();
+  assert.equal(f.store.read(state.id).phase, "monitoring");
+  assert.equal(f.store.read(state.id).feedbackPending, undefined);
+  assert.equal(implementations, 3);
+  assert.equal(verifications, 3);
+  assert.equal(f.pushes(), 2);
 });
 
 test("live feedback steers the active Codex turn and keeps untracked changes visible", async t => {
@@ -274,7 +315,12 @@ test("live feedback steers the active Codex turn and keeps untracked changes vis
   const f = await fixture(t, { generate: undefined, codexCommand: process.execPath,
     startAgent: async ({ cwd, threadName, onNotification }) => ({ thread: { id: threadName }, client: {
       listModels: async () => [{ id: "gpt-6-sol", supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }] }],
-      async startTurn({ onTurnStarted, effort }) {
+      async startTurn({ onTurnStarted, effort, knowledgeRequest, knowledgeQuery }) {
+        assert.equal(knowledgeRequest.taskType, threadName.endsWith(" verify") ? "verify" : "implement", "Retrieval should retain the implementation phase");
+        assert.match(knowledgeRequest.question, /Bug 123: Feature/, "Retrieval should include the original bug title");
+        assert.match(knowledgeRequest.question, /Original acceptance criteria/, "Retrieval should include the original bug description");
+        assert.doesNotMatch(knowledgeRequest.question, /Return JSON only/, "Retrieval should omit the workflow response schema");
+        assert.match(knowledgeQuery, /Return JSON only/, "The full task contract should retain the required response schema");
         assert.equal(effort, threadName.endsWith(" verify") ? "high" : "medium");
         onTurnStarted("turn-123");
         onNotification({ method: "item/started", params: { item: { type: "commandExecution", command: "mach test" } } });
@@ -516,7 +562,7 @@ test("Implement cannot complete when a saved pass had no successful builds", asy
   await f.manager.tick();
   const saved = f.store.read(state.id);
   assert.equal(saved.phase, "monitoring");
-  assert.match(saved.error, /failed before the patch could build/);
+  assert.equal(saved.feedbackPending, true);
 });
 
 
@@ -560,4 +606,25 @@ test("old Implement commit receipts still recover after restart", async t => {
   await resumed.tick();
   assert.equal(f.store.read(state.id).error, undefined);
   assert.equal(await f.git("rev-parse", "HEAD"), hash);
+});
+
+test("Implement continues build recovery after repeated blockage", async t => {
+  const f = await fixture(t);
+  const state = await f.manager.create({ bugId: 123, base: "current", expectedHead: f.head });
+  await f.wait();
+  const monitor = f.monitorStore.read("try-1");
+  monitor.phase = "build-blocked";
+  f.monitorStore.save(monitor);
+  await f.manager.tick();
+  const saved = f.store.read(state.id);
+  assert.equal(saved.tryStatus, "build-blocked");
+  assert.equal(saved.feedbackPending, true);
+  assert.equal(saved.buildRecoveryAttempts, 1);
+  assert.match(saved.reportClarification, /Resume build recovery/);
+  delete saved.feedbackPending;
+  f.store.save(saved);
+  await f.manager.tick();
+  assert.equal(f.store.read(state.id).feedbackPending, true);
+  assert.equal(f.store.read(state.id).buildRecoveryAttempts, 2);
+  assert.equal(f.pushes(), 1);
 });

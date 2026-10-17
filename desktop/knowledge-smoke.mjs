@@ -3,13 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { _electron } from "playwright";
+import branding from "./branding.cjs";
 
 const commPath = process.argv[2] || process.env.TB_COMM_PATH;
 if (!commPath) throw new Error("Pass the Thunderbird comm checkout path.");
-const executablePath = process.env.TB_DESKTOP_EXECUTABLE || path.resolve("dist",
-  `Thunderbird-Commands-${process.platform}-${process.arch}`,
-  process.platform === "darwin" ? "Thunderbird-Commands.app/Contents/MacOS/Thunderbird-Commands"
-    : process.platform === "win32" ? "Thunderbird-Commands.exe" : "Thunderbird-Commands");
+const executablePath = process.env.TB_DESKTOP_EXECUTABLE || branding.packagedExecutable(path.resolve("dist",
+  `${branding.APP_NAME}-${process.platform}-${process.arch}`));
 const testUserData = await fs.mkdtemp(path.join(os.tmpdir(), "tb-desktop-knowledge-"));
 const directory = process.env.TB_KNOWLEDGE_SMOKE_CACHE || path.join(os.homedir(), ".tb-tools", "knowledge");
 let electron;
@@ -67,7 +66,7 @@ try {
   assert.equal(failure.errors.length, 1);
   const consoleAddress = await electron.evaluate(({ webContents }) =>
     webContents.getAllWebContents().find(contents =>
-      contents.getTitle() === "Thunderbird Desktop Console")?.getURL());
+      contents.getTitle() === "Thunderbird Development Dashboard")?.getURL());
   assert.ok(consoleAddress?.startsWith("http://127.0.0.1:"));
   assert.equal((await fetch(consoleAddress)).ok, true);
   await electron.evaluate(async () => { await globalThis.knowledgeSmokeModel.close(); });

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { executeConsoleArtifactBuild, getConsoleBuildEnvironment, prepareConsoleBuild, publishCompletedConsoleBuild, supportsArtifactBuild } from "../commands/graph/build.mjs";
+import { executeConsoleArtifactBuild, getConsoleBuildEnvironment, prepareConsoleBuild, publishCompletedConsoleBuild, supportsArtifactBuild, supportsArtifactMozBuild, runConsoleBuild } from "../commands/graph/build.mjs";
 import { prepareTaskWorktreeBuild } from "../commands/graph/task-worktrees.mjs";
 
 async function fixture(t) {
@@ -14,6 +14,7 @@ async function fixture(t) {
   }));
   for (const graph of graphs) {
     await mkdir(graph.path, { recursive: true });
+    await mkdir(path.join(graph.path, ".git"));
     await writeFile(path.join(graph.path, "..", "mozconfig"),
       `ac_add_options --enable-project=comm/mail\nmk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-${graph.checkout}\n`);
   }
@@ -53,11 +54,73 @@ function executor(plan, calls) {
   };
 }
 
+test("task build vendors Rust once and retries the failed build command", async t => {
+  const f = await fixture(t);
+  const graph = f.graphs[0];
+  f.changes.set(graph.path, "mail/native.cpp\0");
+  await mkdir(path.join(graph.path, "rust"));
+  await writeFile(path.join(graph.path, "rust/Cargo.toml"), "existing source edit");
+  const calls = [];
+  let builds = 0;
+  const session = { graph };
+  await prepareTaskWorktreeBuild(session, async command => {
+    calls.push(command);
+    if (command.args.join(" ") === "tb-rust vendor") {
+      await writeFile(path.join(graph.path, "rust/Cargo.toml"), "local vendor change");
+      await writeFile(path.join(graph.path, "rust/Cargo.lock"), "local lock");
+    }
+    if (command.args.join(" ") === "build" && ++builds === 1) {
+      command.onStdout("Rust dependencies are out of sync. Run `mach tb-rust vendor`.\n");
+      throw new Error("make failed");
+    }
+    return f.runCommand(command);
+  });
+  assert.equal(builds, 2);
+  assert.equal(calls.filter(command => command.args.join(" ") === "tb-rust vendor").length, 1);
+  assert.equal(calls.find(command => command.args.join(" ") === "tb-rust vendor").cwd, path.dirname(graph.path));
+  assert.match(session.output, /Running mach tb-rust vendor/);
+  assert.equal(await readFile(path.join(graph.path, "rust/Cargo.toml"), "utf8"), "existing source edit");
+  await assert.rejects(readFile(path.join(graph.path, "rust/Cargo.lock")), { code: "ENOENT" });
+});
+
+test("task build stops if vendoring does not fix Rust dependencies", async t => {
+  const f = await fixture(t);
+  const graph = f.graphs[0];
+  f.changes.set(graph.path, "mail/native.cpp\0");
+  let vendors = 0;
+  await assert.rejects(prepareTaskWorktreeBuild({ graph }, async command => {
+    if (command.args.join(" ") === "tb-rust vendor") {
+      vendors++;
+      await mkdir(path.join(graph.path, "rust"));
+      await writeFile(path.join(graph.path, "rust/Cargo.lock"), "local lock");
+    }
+    if (command.args.join(" ") === "build") throw new Error("Rust dependencies are out of sync");
+    return f.runCommand(command);
+  }), /Rust dependencies are out of sync/);
+  assert.equal(vendors, 1);
+  await assert.rejects(readFile(path.join(graph.path, "rust/Cargo.lock")), { code: "ENOENT" });
+});
+
 test("artifact mode accepts frontend changes and rejects native and build changes", () => {
   assert.equal(supportsArtifactBuild(["ui/file.mjs", "theme/style.css"]), true);
   for (const file of ["code.cpp", "code.rs", "interface.webidl", "moz.build", "Cargo.lock", "config.json"]) {
     assert.equal(supportsArtifactBuild([file]), false, file);
   }
+});
+
+test("artifact mode accepts resource registration changes but rejects native build statements", async t => {
+  const before = 'EXTRA_JS_MODULES.calendar += [\n    "modules/old.mjs",\n]\n\nSOURCES += ["native.cpp"]';
+  const after = before.replace('"modules/old.mjs",', '"modules/old.mjs",\n    "modules/new.mjs",');
+  assert.equal(supportsArtifactMozBuild(before, after), true);
+  assert.equal(supportsArtifactMozBuild(before, after.replace('native.cpp', 'other.cpp')), false);
+  assert.equal(supportsArtifactMozBuild(before, after.replace('modules/new.mjs', 'native.cpp')), false);
+  assert.equal(supportsArtifactMozBuild(before, after.replace('"modules/new.mjs"', 'generated_files')), false);
+  const f = await fixture(t);
+  await writeFile(path.join(f.graphs[0].path, "moz.build"), after);
+  f.changes.set(f.graphs[0].path, "moz.build\0jar.mn\0modules/new.mjs\0");
+  const plan = await prepareConsoleBuild({ graph: f.graphs[0], cacheDirectory: path.join(path.dirname(f.graphs[0].path), "cache"),
+    runCommand: command => command.args[0] === "show" ? Promise.resolve(before) : f.runCommand(command) });
+  assert.ok(plan);
 });
 
 test("artifact builds reuse the other checkout in both directions and use faster on repeat builds", async (t) => {
@@ -68,13 +131,13 @@ test("artifact builds reuse the other checkout in both directions and use faster
     const firstCalls = [];
     await executeConsoleArtifactBuild({ plan: first, execute: executor(first, firstCalls) });
     assert.deepEqual(firstCalls.map((call) => call.args.slice(0, 2)), [
-      ["configure"], ["artifact", "install"], ["build"],
+      ["configure"], ["artifact", "install"], ["build", "faster"],
     ]);
     const second = await fixtureData.prepare(graphs[1]);
     assert.equal(second.donor, first.snapshot);
     const secondCalls = [];
     await executeConsoleArtifactBuild({ plan: second, execute: executor(second, secondCalls) });
-    assert.deepEqual(secondCalls.map((call) => call.args), [["configure"], ["build"]]);
+    assert.deepEqual(secondCalls.map((call) => call.args), [["configure"], ["build", "faster"]]);
     assert.equal(await readFile(path.join(second.paths.object, "dist", "bin", "binary"), "utf8"), "prebuilt");
     // Refreshing frontend files must not change the immutable donor snapshot.
     await writeFile(path.join(second.paths.object, "dist", "bin", "binary"), "local edit");
@@ -147,7 +210,7 @@ test("copied object directories are configured again for the destination root", 
   assert.deepEqual(await getConsoleBuildEnvironment(graphs[1]), {});
   const calls = [];
   await executeConsoleArtifactBuild({ plan: second, execute: executor(second, calls) });
-  assert.deepEqual(calls.map((call) => call.args), [["configure"], ["build"]]);
+  assert.deepEqual(calls.map((call) => call.args), [["configure"], ["build", "faster"]]);
 });
 
 test("Gecko changes and untracked native files require a normal build", async (t) => {
@@ -220,7 +283,7 @@ test("an artifact setup failure falls back to the original build and run configu
   } });
   assert.match(session.output, /Trying a normal build/);
   assert.equal(session.status, "complete");
-  assert.deepEqual(calls.slice(-2).map(({ args }) => args), [["build"], ["run"]]);
+  assert.deepEqual(calls.filter(call => call.cmd.endsWith("mach") && ["build", "run"].includes(call.args[0])).slice(-2).map(({ args }) => args), [["build"], ["run"]]);
   assert.deepEqual(calls.at(-1).env, {});
 });
 
@@ -263,7 +326,7 @@ test("a completed native build warms another worktree without sharing paths or w
   assert.equal(second.donor, snapshot);
   const calls = [];
   await executeConsoleArtifactBuild({ plan: second, execute: executor(second, calls) });
-  assert.deepEqual(calls.map(call => call.args), [["configure"], ["build"]]);
+  assert.deepEqual(calls.map(call => call.args), [["configure"], ["build", "faster"]]);
   await writeFile(path.join(second.paths.object, "dist", "bin", "library"), "task changed");
   assert.equal(await readFile(path.join(snapshot, "dist", "bin", "library"), "utf8"), "native binary");
   f.changes.set(root, "source.cpp");
@@ -282,6 +345,22 @@ test("compiler server paths do not split compatible binary snapshots", async t =
   const first = await prepareConsoleBuild({ graph: f.graphs[0], runCommand });
   const second = await prepareConsoleBuild({ graph: f.graphs[1], runCommand });
   assert.equal(first.key, second.key);
+});
+
+test("a completed build with frontend commits shares binaries with its source base", async t => {
+  const f = await fixture(t);
+  const root = path.dirname(f.graphs[0].path);
+  await mkdir(path.join(root, "obj-original", "dist", "bin"), { recursive: true });
+  await writeFile(path.join(root, "obj-original", "dist", "bin", "binary"), "completed");
+  const runCommand = command => {
+    if (command.cmd === "git" && command.args[0] === "rev-parse") return Promise.resolve("b".repeat(40));
+    if (command.args[0] === "diff" && command.args.includes("-z") && command.cwd === f.graphs[0].path) return Promise.resolve("ui.mjs\0");
+    return f.runCommand(command);
+  };
+  const cacheDirectory = path.join(root, "shared");
+  const snapshot = await publishCompletedConsoleBuild({ graph: f.graphs[0], runCommand, cacheDirectory });
+  const plan = await prepareConsoleBuild({ graph: f.graphs[1], runCommand, cacheDirectory });
+  assert.equal(plan.donor, snapshot);
 });
 
 test("a task switches from artifact output to a native build after native source changes", async t => {
@@ -304,4 +383,147 @@ test("a task switches from artifact output to a native build after native source
     if (command.args.join(" ") === "build") throw new Error("Native compiler failed");
     return f.runCommand(command);
   }), /Native compiler failed/);
+});
+
+test("resource includes and resource-only registrations keep reviews on the artifact path", async t => {
+  const f = await fixture(t);
+  const before = 'FINAL_TARGET_FILES.chrome += [\n    "old.css",\n]';
+  const after = before.replace('"old.css",', '"old.css",\n    "new.css",');
+  await writeFile(path.join(f.graphs[1].path, "moz.build"), after);
+  f.changes.set(f.graphs[1].path, "mail/themes/shared/jar.inc.mn\0moz.build\0new.css\0");
+  const plan = await prepareConsoleBuild({ graph: f.graphs[1],
+    cacheDirectory: path.join(path.dirname(f.graphs[1].path), "cache"),
+    runCommand: command => command.args[0] === "show" ? Promise.resolve(before) : f.runCommand(command) });
+  assert.ok(plan);
+  assert.equal(supportsArtifactBuild(["mail/themes/shared/jar.inc.mn", "mail/base/jar.mn"]), true);
+  assert.equal(supportsArtifactMozBuild(before, after.replace("new.css", "native.cpp")), false);
+});
+
+test("the paired comm checkout does not count as an untracked Gecko source change", async t => {
+  const f = await fixture(t);
+  const root = path.dirname(f.graphs[1].path);
+  const plan = await prepareConsoleBuild({ graph: f.graphs[1],
+    cacheDirectory: path.join(root, "cache"), runCommand: command => {
+      if (command.cwd === root && command.args[0] === "ls-files") return Promise.resolve("comm/.git\0comm/native.cpp\0");
+      return f.runCommand(command);
+    } });
+  assert.ok(plan);
+});
+
+test("remote artifact lookup failure uses the same native fallback for any caller", async t => {
+  const f = await fixture(t);
+  const calls = [];
+  let output = "";
+  const result = await runConsoleBuild({ graph: f.graphs[1], runCommand: f.runCommand,
+    cacheDirectory: path.join(path.dirname(f.graphs[1].path), "cache"),
+    log: text => { output += text; }, execute: async command => {
+      calls.push(command);
+      if (command.args[0] === "artifact") throw new Error("No matching CI artifacts");
+    } });
+  assert.equal(result.artifact, false);
+  assert.deepEqual(calls.map(call => call.args.slice(0, 2)), [["configure"], ["artifact", "install"], ["build"]]);
+  assert.deepEqual(calls.at(-1).env, {});
+  assert.deepEqual(await getConsoleBuildEnvironment(f.graphs[1]), {});
+  assert.match(output, /Treeherder\/Taskcluster/);
+  assert.match(output, /No matching CI artifacts/);
+});
+
+test("completed binaries of a native patch can be reused, but local native edits cannot", async t => {
+  const f = await fixture(t);
+  const root = path.dirname(f.graphs[0].path);
+  await mkdir(path.join(root, "obj-original", "dist", "bin"), { recursive: true });
+  await writeFile(path.join(root, "obj-original", "dist", "bin", "binary"), "patched native binary");
+  let dirty = false;
+  const runCommand = command => {
+    if (command.cmd === "git" && command.args[0] === "rev-parse") return Promise.resolve("b".repeat(40));
+    if (command.cmd === "git" && command.args[0] === "diff" && command.cwd.endsWith("comm")) {
+      return Promise.resolve(command.args.includes("a".repeat(40)) || dirty ? "native.cpp\0" : "");
+    }
+    return f.runCommand(command);
+  };
+  const cacheDirectory = path.join(root, "native-patch-cache");
+  const snapshot = await publishCompletedConsoleBuild({ graph: f.graphs[0], runCommand, cacheDirectory });
+  const plan = await prepareConsoleBuild({ graph: f.graphs[1], runCommand, cacheDirectory });
+  assert.equal(plan.donor, snapshot);
+  assert.equal(plan.requiresCompiledSnapshot, true);
+  const calls = [];
+  await executeConsoleArtifactBuild({ plan, execute: executor(plan, calls) });
+  assert.deepEqual(calls.map(call => call.args), [["configure"], ["build", "faster"]]);
+  const result = await runConsoleBuild({ graph: f.graphs[1], runCommand, cacheDirectory,
+    execute: async command => {
+      calls.push(command);
+      if (command.args[1] === "faster") throw new Error("Missing package files");
+    } });
+  assert.equal(result.artifact, false);
+  assert.equal(calls.at(-1).env.MOZCONFIG, undefined);
+  assert.deepEqual(await getConsoleBuildEnvironment(f.graphs[1]), {});
+  dirty = true;
+  assert.equal(await prepareConsoleBuild({ graph: f.graphs[1], runCommand, cacheDirectory }), null);
+});
+
+test("cancelling artifact setup never starts a native fallback", async t => {
+  const f = await fixture(t);
+  let cancelled = false;
+  const calls = [];
+  await runConsoleBuild({ graph: f.graphs[0], runCommand: f.runCommand,
+    cacheDirectory: path.join(path.dirname(f.graphs[0].path), "cache"),
+    canceled: () => cancelled, execute: async command => {
+      calls.push(command);
+      cancelled = true;
+      throw new Error("Cancelled during configure");
+    } });
+  assert.deepEqual(calls.map(call => call.args), [["configure"]]);
+});
+
+test("a completed native checkout uses its own output before copying or downloading artifacts", async t => {
+  const f = await fixture(t);
+  const graph = f.graphs[0];
+  const root = path.dirname(graph.path);
+  const object = path.join(root, "obj-original");
+  await mkdir(path.join(object, "dist", "bin"), { recursive: true });
+  await mkdir(path.join(object, "faster"), { recursive: true });
+  await writeFile(path.join(object, "dist", "bin", "binary"), "local native binary");
+  await writeFile(path.join(object, "faster", "Makefile"), "native resource backend");
+  let nativeEdit = true;
+  const runCommand = command => {
+    if (command.cmd === "git" && command.args[0] === "rev-parse") return Promise.resolve("a".repeat(40));
+    if (command.args[0] === "diff" && command.args.includes("a".repeat(40)) && nativeEdit) return Promise.resolve("native.cpp\0");
+    return f.runCommand(command);
+  };
+  const calls = [];
+  const cacheDirectory = path.join(root, "native-output-cache");
+  await runConsoleBuild({ graph, runCommand, cacheDirectory, execute: async command => { calls.push(command); } });
+  assert.deepEqual(calls.map(call => call.args), [["build"]]);
+  nativeEdit = false;
+  f.changes.set(graph.path, "frontend.css\0");
+  calls.length = 0;
+  const result = await runConsoleBuild({ graph, runCommand, cacheDirectory,
+    execute: async command => { calls.push(command); } });
+  assert.equal(result.artifact, false);
+  assert.deepEqual(calls.map(call => call.args), [["build", "faster"]]);
+  assert.equal(calls[0].env.MOZCONFIG, undefined);
+  assert.deepEqual(await getConsoleBuildEnvironment(graph), {});
+});
+
+test("landing builds use artifact reuse and preserve the artifact environment for later commands", async t => {
+  const { runGraphMach } = await import("../commands/graph/actions.mjs");
+  const f = await fixture(t);
+  const first = await f.prepare(f.graphs[0]);
+  await executeConsoleArtifactBuild({ plan: first, execute: executor(first, []) });
+  const second = await f.prepare(f.graphs[1]);
+  const previousCache = process.env.TB_BUILD_CACHE_PATH;
+  process.env.TB_BUILD_CACHE_PATH = path.dirname(first.snapshot);
+  t.after(() => {
+    if (previousCache === undefined) delete process.env.TB_BUILD_CACHE_PATH;
+    else process.env.TB_BUILD_CACHE_PATH = previousCache;
+  });
+  const calls = [];
+  const execute = executor(second, calls);
+  const session = { output: "" };
+  await runGraphMach({ graph: f.graphs[1], args: ["build"], session, runCommand: async command => {
+    if (command.cmd === "git" || command.args[0] === "environment") return f.runCommand(command);
+    return execute(command);
+  } });
+  assert.deepEqual(calls.map(call => call.args), [["configure"], ["build", "faster"]]);
+  assert.deepEqual(await getConsoleBuildEnvironment(f.graphs[1]), { MOZCONFIG: second.paths.config });
 });

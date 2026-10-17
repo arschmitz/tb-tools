@@ -9,13 +9,13 @@ import { readGitBlobs } from "./git-data.mjs";
 import { publishProjectLessons, exportLessonNotes } from "./publication.mjs";
 
 const execute = promisify(execFile);
-const documents = new Set(["README.md", "AGENTS.md", "CONTRIBUTING.md", "FORMAT.md", "SCHEMA.md", "CONSUMING.md", "SKILLS.md", ".gitignore"]);
+const documents = new Set(["README.md", "AGENTS.md", "CONTRIBUTING.md", "FORMAT.md", "SCHEMA.md", "CONSUMING.md", "SKILLS.md", "CODE-EVIDENCE.md", "WORKFLOW.md", ".gitignore"]);
 const skillDocument = /^skills\/[a-z0-9]+(?:-[a-z0-9]+)*\/(?:SKILL\.md|references\/[a-z0-9]+(?:-[a-z0-9]+)*\.md)$/;
 const instructionFile = file => documents.has(file) || skillDocument.test(file);
 const noteName = /^notes\/[a-z0-9-]+\.md$/;
 const recordName = /^records\/[a-f0-9]{64}\.json$/;
 const git = async (cwd, args) => (await execute("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-  cwd, timeout: 30_000, maxBuffer: 8_000_000,
+  cwd, timeout: 30_000, maxBuffer: args[0] === "ls-tree" ? 16_000_000 : 8_000_000,
   env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no" },
 })).stdout.trim();
 
@@ -23,11 +23,12 @@ export function parseKnowledgeNote(text) {
   const match = text.match(/^<!-- knowledge: (.+) -->\r?\n([\s\S]+)$/);
   if (!match) throw new Error("Knowledge note needs a JSON metadata header.");
   const metadata = JSON.parse(match[1]);
-  if (!metadata.source?.reference || !metadata.repository || !metadata.at || !Array.isArray(metadata.paths)) {
+  const instruction = metadata.source?.type === "user-directed-code-style" && metadata.source.status === "instruction";
+  if ((!metadata.source?.reference && !instruction) || !metadata.repository || !metadata.at || !Array.isArray(metadata.paths)) {
     throw new Error("Knowledge note needs repository, date, paths, and a source reference.");
   }
   const body = { version: 1, kind: "evidence", visibility: "shared", repository: metadata.repository,
-    at: metadata.at, paths: metadata.paths, source: { ...metadata.source, type: "shared-note" },
+    at: metadata.at, paths: metadata.paths, source: { ...metadata.source, type: instruction ? metadata.source.type : "shared-note" },
     title: match[2].match(/^# (.+)/)?.[1] || "Shared knowledge note", text: match[2].trim() };
   return validateRecord({ ...body, id: digest(body) });
 }
@@ -93,9 +94,15 @@ export async function readKnowledgeRepository(store, directory) {
   if (directory) await importCheckout(store, directory);
 }
 
-export async function syncKnowledgeRepository(store, { repositoryDirectory, push = true, beforePush, shareRepositories = [] } = {}) {
+export async function syncKnowledgeRepository(store, { repositoryDirectory, push = true, beforePush, shareRepositories = [], onPhase } = {}) {
   if (!repositoryDirectory) return { localOnly: true };
   return withKnowledgeLock(store.directory, "shared-repository", async () => {
+    let phaseStarted = performance.now();
+    const phase = name => {
+      const finished = performance.now();
+      onPhase?.({ name, elapsedMs: finished - phaseStarted });
+      phaseStarted = finished;
+    };
     const root = repositoryDirectory;
     const branch = await git(root, ["symbolic-ref", "--short", "HEAD"]);
     // Never stage edits to instructions, existing records, or other user work.
@@ -103,18 +110,43 @@ export async function syncKnowledgeRepository(store, { repositoryDirectory, push
       throw new Error("Commit or restore tracked memory repository edits before automatic sync.");
     }
     await importTree(store, root, "HEAD");
+    phase("import-head");
     await importCheckout(store, root);
+    phase("import-checkout");
     if (push) {
       await publishProjectLessons(store, { shareRepositories });
-      for (const lesson of store.all().filter(record => record.kind === "lesson" && record.visibility === "shared")) {
-        if (lesson.evidence.some(id => store.get(id)?.visibility !== "shared" || store.get(id)?.repository !== lesson.repository) ||
-            lesson.quotes?.some(quote => !lesson.evidence.includes(quote.id) || !store.get(quote.id)?.text.includes(quote.text))) {
+      phase("publish-lessons");
+      const shared = new Map(), throughRowid = store.maxRecordRowid();
+      let afterRowid = 0;
+      while (true) {
+        const rows = store.recordIds({ visibility: "shared", afterRowid, throughRowid });
+        if (!rows.length) break;
+        for (const row of rows) shared.set(row.id, row);
+        afterRowid = rows.at(-1).rowid;
+      }
+      for (const lesson of store.records({ kind: "lesson", visibility: "shared", throughRowid })) {
+        if (lesson.evidence.some(id => shared.get(id)?.repository !== lesson.repository)) {
           throw new Error(`Shared lesson has unavailable or invalid citations: ${lesson.id}`);
         }
+        const key = `shared-lesson-validation:v1:${lesson.id}`;
+        const receipt = { evidence: lesson.evidence };
+        if (canonical(store.setting(key)) === canonical(receipt)) continue;
+        const sources = new Map();
+        for (const quote of lesson.quotes || []) {
+          if (!sources.has(quote.id)) sources.set(quote.id, store.get(quote.id));
+          if (!lesson.evidence.includes(quote.id) || !sources.get(quote.id)?.text.includes(quote.text)) {
+            throw new Error(`Shared lesson has unavailable or invalid citations: ${lesson.id}`);
+          }
+        }
+        // Immutable IDs bind this receipt to the checked lesson and evidence.
+        // Dependency existence and repository scope are checked on every pass.
+        store.setting(key, receipt);
       }
+      phase("validate-citations");
       await exportLessonNotes(store, root);
+      phase("export-notes");
       await mkdir(path.join(root, "records"), { recursive: true });
-      for (const record of store.all().filter(record => record.visibility === "shared")) {
+      for (const record of shared.values()) {
         const file = path.join(root, "records", `${record.id}.json`);
         const stat = await lstat(file).catch(error => { if (error.code === "ENOENT") return null; throw error; });
         if (stat && !stat.isFile()) throw new Error("Shared records must be regular files.");
@@ -122,10 +154,11 @@ export async function syncKnowledgeRepository(store, { repositoryDirectory, push
         try { await copyFile(store.file(record), file, constants.COPYFILE_EXCL); }
         catch (error) {
           if (error.code !== "EEXIST") throw error;
-          if (canonical(JSON.parse(await readFile(file, "utf8"))) !== canonical(record)) throw new Error("Shared record collision.");
+          if (canonical(JSON.parse(await readFile(file, "utf8"))) !== canonical(store.get(record.id))) throw new Error("Shared record collision.");
         }
         store.rememberFile(file, await lstat(file), record.id);
       }
+      phase("export-records");
       const untracked = (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0")
         .filter(file => noteName.test(file) || recordName.test(file));
       for (let offset = 0; offset < untracked.length; offset += 100) {
@@ -133,6 +166,7 @@ export async function syncKnowledgeRepository(store, { repositoryDirectory, push
       }
       if (untracked.length) await git(root, ["-c", "user.name=TB Knowledge", "-c", "user.email=knowledge@localhost",
         "-c", "commit.gpgsign=false", "commit", "-m", "Add knowledge evidence"]);
+      phase("commit");
     }
     const remote = await git(root, ["remote", "get-url", "origin"]).catch(() => "");
     if (!remote) return { localOnly: true, repositoryDirectory: root };
@@ -141,6 +175,7 @@ export async function syncKnowledgeRepository(store, { repositoryDirectory, push
       if (exists) {
         await git(root, ["fetch", "--no-tags", "origin", `refs/heads/${branch}`]);
         await importTree(store, root, "FETCH_HEAD");
+        phase("import-remote");
         // Unique immutable files merge normally. Governance conflicts require review.
         try { await git(root, ["-c", "user.name=TB Knowledge", "-c", "user.email=knowledge@localhost",
           "-c", "commit.gpgsign=false", "merge", "--no-edit", "FETCH_HEAD"]); }
@@ -153,6 +188,7 @@ export async function syncKnowledgeRepository(store, { repositoryDirectory, push
       await beforePush?.({ attempt });
       try {
         await git(root, ["push", "origin", `HEAD:refs/heads/${branch}`]);
+        phase("push");
         return { pulled: Boolean(exists), pushed: true };
       } catch (error) {
         if (attempt === 3 || !/rejected|fetch first|non-fast-forward|cannot lock ref/i.test(error.stderr || error.message)) throw error;

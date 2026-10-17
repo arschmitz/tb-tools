@@ -3,17 +3,19 @@ import { INTERACTIVE } from "./config.js";
 const tasks = new Map();
 const adapters = new Map();
 const storageKey = `tb-ai-tasks:${INTERACTIVE.token}`;
-const labels = { thinking: "Thinking", working: "Working", waiting: "Waiting for input", complete: "Complete" };
+const labels = { thinking: "Thinking", working: "Working", waiting: "Waiting for input", error: "Failed", complete: "Complete" };
 let tray, list, permissionButton, permissionNote, timer;
 let polling = false;
+let openGeneration = 0;
 let collapsed = false;
 const dismissed = new Set();
 
 export function getAiTaskState(session = {}, busy) {
   const phase = session.status || session.phase;
   if (["complete", "cancelled", "canceled"].includes(phase)) return "complete";
-  if (session.error || ["error", "paused", "needs-evidence"].includes(phase)) return "waiting";
-  const running = busy ?? ["running", "preparing", "pulling", "reviewing", "applying", "amending", "posting", "implementing", "committing", "verifying", "submitting", "monitoring"].includes(phase);
+  if (phase === "error") return "error";
+  if (session.interrupted || session.restored || session.error || ["paused", "needs-evidence"].includes(phase)) return "waiting";
+  const running = busy ?? ["running", "preparing", "recovering-build", "pulling", "reviewing", "applying", "amending", "posting", "implementing", "committing", "verifying", "submitting", "monitoring"].includes(phase);
   if (!running) return "waiting";
   if (["thinking", "working"].includes(session.aiTaskState)) return session.aiTaskState;
   const latest = session.activity?.findLast?.(entry => ["reasoning", "command", "tool", "edit", "research"].includes(entry.kind));
@@ -69,7 +71,20 @@ function persistDismissed() {
   try { sessionStorage.setItem(`${storageKey}:dismissed`, JSON.stringify([...dismissed])); } catch { /* Optional browser storage. */ }
 }
 
-function dismissTask(key) {
+async function dismissTask(key, saveOnServer = false) {
+  const [kind, id] = key.split(":");
+  if (saveOnServer && ["review", "update"].includes(kind)) {
+    try {
+      const response = await fetch("/api/background-jobs/dismiss", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: INTERACTIVE.token, kind, id }),
+      });
+      if (!response.ok) throw new Error("Could not save task dismissal. Reload and try again.");
+    } catch (error) {
+      if (permissionNote) permissionNote.textContent = error.message;
+      return;
+    }
+  }
   dismissed.add(key);
   persistDismissed();
   tasks.get(key)?.card?.remove();
@@ -89,16 +104,19 @@ function render(task) {
     open.append(title, status); open.addEventListener("click", () => void openTask(task.key));
     const dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.className = "ai-task-dismiss"; dismiss.textContent = "×";
     dismiss.addEventListener("click", () => {
-      dismissTask(task.key);
+      void dismissTask(task.key, true);
     });
     card.append(open, dismiss); list.append(card);
   }
   card.dataset.state = task.state;
   card.querySelector(".ai-task-title").textContent = task.title;
-  const text = task.unavailable || task.session?.error ? `${labels[task.state]} — ${task.unavailable || task.session.error}` : labels[task.state];
+  const saved = task.state !== "error" && (task.session?.interrupted || task.session?.restored);
+  const time = task.session?.updatedAt || task.session?.createdAt;
+  const label = saved ? `Stopped — no work running${time ? ` · saved ${new Date(time).toLocaleString()}` : ""}` : labels[task.state];
+  const text = task.unavailable || task.session?.error ? `${label} — ${task.unavailable || task.session.error}` : label;
   const status = card.querySelector(".ai-task-state");
   if (status.textContent !== text) status.textContent = text;
-  card.querySelector(".ai-task-dismiss").hidden = !["complete", "waiting"].includes(task.state) && !task.unavailable;
+  card.querySelector(".ai-task-dismiss").hidden = !["complete", "waiting", "error"].includes(task.state) && !task.unavailable;
   card.querySelector(".ai-task-dismiss").setAttribute("aria-label", `Dismiss ${task.title}`);
   tray.hidden = false;
 }
@@ -114,7 +132,7 @@ function notify(task) {
     } catch { /* Storage is optional. */ }
     try {
       const notification = new Notification(`${task.title}: ${labels[state]}`, {
-        body: "Open this task in Thunderbird Desktop Console.", tag: `tb-task:${task.key}`,
+        body: "Open this task in Thunderbird Development Dashboard.", tag: `tb-task:${task.key}`,
       });
       notification.onclick = () => { window.focus(); void openTask(task.key); notification.close(); };
     } catch { permissionNote.textContent = "System notifications could not be shown. Task updates remain here."; }
@@ -132,6 +150,8 @@ export function trackAiTask({ kind, session, title, endpoint, busy, open }) {
   let task = tasks.get(key);
   const previous = task?.state;
   if (!task) { task = { key, kind, id: session.id }; tasks.set(key, task); }
+  const commitTitle = session.commitTitle || session.commitMessage?.split(/\r?\n/)[0];
+  if (commitTitle && ["review", "update"].includes(kind)) title = `${commitTitle} · ${session.revision} ${kind === "review" ? "Review" : "Update"}`;
   Object.assign(task, { session, title, endpoint, open: open || task.open, revision: session.revision, mode: session.mode, graphIndex: session.graphIndex,
     unavailable: "", needsRefresh: false, state });
   task.version = (task.version || 0) + 1;
@@ -143,25 +163,42 @@ export function trackAiTask({ kind, session, title, endpoint, busy, open }) {
 
 async function openTask(key) {
   const task = tasks.get(key); if (!task) return;
-  for (const adapter of adapters.values()) if (adapter.dialog?.open) adapter.minimize();
+  const generation = ++openGeneration;
+  window.commandsBrowser?.focus?.();
+  const minimize = () => {
+    for (const adapter of adapters.values()) if (adapter.dialog?.open) adapter.minimize();
+  };
   try {
-    if (task.open) await task.open();
+    if (task.open) { minimize(); await task.open(); }
     else {
+      if (task.kind === "implement" && !adapters.has(task.kind)) {
+        const { initializeImplementDialog } = await import("./implement.js");
+        if (generation !== openGeneration) return;
+        initializeImplementDialog();
+      }
       const adapter = adapters.get(task.kind);
       if (!adapter) throw new Error("Open the console view for this task.");
-      if (task.endpoint) {
+      // Open the last known session immediately. Background polling refreshes it.
+      if (task.endpoint && !task.session) {
         const response = await fetch(`${task.endpoint}?token=${encodeURIComponent(INTERACTIVE.token)}`, { cache: "no-store" });
         const session = await response.json();
+        if (generation !== openGeneration) return;
         if (!response.ok || !session.ok) {
-          if (response.status === 404 && adapter.recover) { await adapter.recover(task); return; }
+          if (response.status === 404 && adapter.recover) { minimize(); await adapter.recover(task); return; }
           throw new Error(session.error || "Could not open the task. Try again.");
         }
         task.session = session;
       }
+      if (generation !== openGeneration) return;
+      minimize();
+      if (task.session?.interrupted && adapter.recover) { await adapter.recover(task); return; }
       await adapter.restore(task.session);
       if (adapter.dialog) restoreDraft(adapter.dialog, task.draft);
     }
-  } catch (error) { task.unavailable = error.message; task.state = "waiting"; render(task); }
+  } catch (error) {
+    if (generation !== openGeneration) return;
+    task.unavailable = error.message; task.state = "waiting"; render(task);
+  }
 }
 
 function captureDraft(dialog) {
@@ -249,7 +286,8 @@ async function restoreServerTasks() {
     const result = await response.json();
     if (!response.ok || !result.ok) return;
     const kinds = { Review: "review", Update: "update", Implement: "implement", Submit: "submit", Rebase: "rebase" };
-    await Promise.all((result.jobs || []).filter(job => kinds[job.kind] && job.state === "running").map(async job => {
+    await Promise.all((result.jobs || []).filter(job => kinds[job.kind] &&
+      (["running", "waiting"].includes(job.state) || job.kind === "Review" && job.phase === "interrupted")).map(async job => {
       const kind = kinds[job.kind];
       const id = job.id.slice(job.kind.length + 1);
       const key = `${kind}:${id}`;
@@ -275,6 +313,11 @@ async function pollTasks() {
       const session = await response.json();
       if (!response.ok || !session.ok) throw new Error(session.error || "Connection lost. Retrying.");
       if (!tasks.has(task.key) || task.version !== version) return;
+      if (task.needsRefresh && session.restored && !session.interrupted && !session.recoveryFailed) {
+        task.card?.remove(); tasks.delete(task.key); persist();
+        if (tray) tray.hidden = !tasks.size;
+        return;
+      }
       trackAiTask({ kind: task.kind, session, title: task.title, endpoint: task.endpoint });
       const adapter = adapters.get(task.kind);
       if (adapter?.dialog?.open && adapter.id === task.id) adapter.onUpdate?.(session);

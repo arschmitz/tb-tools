@@ -35,7 +35,7 @@ test("the console retrieves before a turn and captures bounded evidence without 
   const requests = [], captures = [];
   const knowledge = { beforeTurn: async ({ prompt }) => {
     assert.equal(prompt, "full original request");
-    return { text: "A supplied historical claim", context: { repository: "tb-tools" } };
+    return { text: "A supplied historical claim", ids: ["retrieved-record"], context: { repository: "tb-tools" } };
   }, capture: async record => captures.push(record) };
   const child = childProcess((request, child) => {
     requests.push(request);
@@ -48,6 +48,7 @@ test("the console retrieves before a turn and captures bounded evidence without 
     assert.equal(result.message, "ok");
     assert.match(requests.find(r => r.method === "turn/start").params.input[0].text, /A supplied historical claim/);
     assert.equal(captures[0].prompt, "full original request");
+    assert.deepEqual(captures[0].retrievalIds, ["retrieved-record"]);
     assert.equal(captures[0].events.length, 1); assert.equal(captures[0].truncated, true);
     assert.equal(captures[0].events[0].output, "Exact source evidence");
     assert.doesNotMatch(JSON.stringify(captures), /Private reasoning/);
@@ -64,4 +65,21 @@ test("knowledge failures warn without changing a successful console result", asy
     assert.equal((await client.startTurn({ threadId: thread.id, prompt: "task" })).message, "ok");
     assert.match(warnings.join("\n"), /index unavailable/); assert.match(warnings.join("\n"), /disk unavailable/);
   } finally { client.close(); }
+});
+
+
+test("structured task metadata survives a bounded model transport prompt", async t => {
+  const observations = [], captures = [];
+  const knowledge = { beforeTurn: async request => { observations.push(request); }, capture: async record => captures.push(record) };
+  const child = childProcess((request, child) => request.method === "turn/start" ? completeTurn(child) : undefined);
+  const client = createGraphCodexAppServer({ command: "codex", cwd: "/work", knowledge, spawnProcess: () => child });
+  t.after(() => client.close());
+  const thread = await client.start();
+  await client.startTurn({ threadId: thread.id, prompt: "Read the full request file", knowledgeQuery: "Complete original task contract",
+    knowledgeRequest: { question: "Why does CachedStore reject stale data?", taskType: "diagnosis",
+      paths: ["mail/CachedStore.sys.mjs"], symbols: ["CachedStore"], revision: "a".repeat(40) } });
+  assert.equal(observations[0].knowledgeRequest.question, "Why does CachedStore reject stale data?", "Retrieval should use the actual task question");
+  assert.deepEqual(observations[0].knowledgeRequest.symbols, ["CachedStore"], "Retrieval should retain explicit symbols separately");
+  assert.equal(observations[0].prompt, "Complete original task contract", "Retrieval should retain the full contract separately");
+  assert.equal(captures[0].prompt, "Complete original task contract", "Evidence capture should retain the original contract");
 });

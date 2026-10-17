@@ -164,7 +164,9 @@ export function setMachCancelButton(session) {
   button.disabled = false;
 
   if (canCancel) {
-    button.textContent = getMachCancelLabel(session);
+    button.textContent = "×";
+    button.setAttribute("aria-label", getMachCancelLabel(session));
+    button.title = getMachCancelLabel(session);
   }
 }
 
@@ -173,7 +175,7 @@ export function setMachOutputPanel(session = uiState.lastMachSession) {
   const panel = document.querySelector(".mach-output-panel");
   const output = document.querySelector(".mach-output");
   const text = session && session.output ? session.output : "";
-  const hasOutput = Boolean(text);
+  const hasOutput = Boolean(text || session?.status === "running");
 
   if (toggle) {
     toggle.hidden = !hasOutput;
@@ -269,7 +271,11 @@ export function dismissCommandStatus() {
   setUpdateStatus("");
 }
 
-export function setUpdateStatus(message, { error = false, busy = false } = {}) {
+export function setUpdateStatus(message, { error = false, busy = false, clockActive = busy } = {}) {
+  if (!message && !busy && hasActiveMachSession()) {
+    renderMachStatus(uiState.activeMachSession);
+    return;
+  }
   const status = document.querySelector(".update-status");
   const statusBar = document.querySelector(".command-status-bar");
   const closeButton = document.querySelector(".command-status-close");
@@ -277,7 +283,7 @@ export function setUpdateStatus(message, { error = false, busy = false } = {}) {
   const visible = busy || hasMessage;
 
   setUpdateBusy(busy);
-  setCommandStatusBarActive(busy, { visible });
+  setCommandStatusBarActive(clockActive, { visible });
 
   if (statusBar) {
     statusBar.classList.toggle("busy", busy);
@@ -517,7 +523,7 @@ export function getRustRemoteBuildWarning(status = uiState.rustUpstreamStatus) {
     ? "\n\nMismatched files:\n" + status.mismatches.map((item) => "- " + item.file).join("\n")
     : "";
 
-  return (status.message || "Rust dependencies are out of sync with Firefox remote main.") + files;
+  return (status.message || "Rust dependencies are out of sync with fetched Firefox main.") + files;
 }
 
 export async function confirmRemoteBuildRustWarning(actionLabel) {
@@ -558,27 +564,18 @@ export function getMachSessionStatusText(session) {
 }
 
 function renderMachStatus(session) {
-  let panel = document.querySelector(".build-status");
-  if (!panel) {
-    panel = document.createElement("section");
-    panel.className = "build-status";
-    panel.setAttribute("aria-label", "Build and run status");
-    panel.innerHTML = `<span class="build-status-message" role="status"></span>
-      <button class="build-cancel" type="button">Cancel Build</button>
-      <button class="build-dismiss" type="button" hidden>Dismiss</button>
-      <details><summary>Build output</summary><pre class="build-output"></pre></details>`;
-    document.querySelector(".command-status-bar")?.before(panel);
-    panel.querySelector(".build-cancel").addEventListener("click", () => void cancelGraphMachAction());
-    panel.querySelector(".build-dismiss").addEventListener("click", () => { panel.hidden = true; });
+  const statusBar = document.querySelector(".command-status-bar");
+  if (statusBar?.classList.contains("busy")) {
+    return;
   }
-  panel.hidden = false;
-  panel.querySelector(".build-status-message").textContent = session.message || "";
-  const cancel = panel.querySelector(".build-cancel");
-  cancel.hidden = !session.canCancel;
-  cancel.disabled = false;
-  cancel.textContent = getMachCancelLabel(session);
-  panel.querySelector(".build-dismiss").hidden = session.status === "running";
-  panel.querySelector(".build-output").textContent = session.output || "";
+  setUpdateStatus(getMachSessionStatusText(session), {
+    error: session.status === "error", clockActive: session.status === "running",
+  });
+  uiState.lastMachSession = session;
+  setMachOutputPanel(session);
+  setMachCancelButton(session);
+  const closeButton = document.querySelector(".command-status-close");
+  if (closeButton) closeButton.hidden = session.status === "running";
 }
 
 export function renderGraphMachSession(session) {
@@ -627,7 +624,7 @@ export async function startGraphMachAction(action) {
     uiState.machPollTimer = null;
   }
 
-  renderMachStatus({ message: getMachActionLabel(action) + " starting...", status: "running" });
+  renderMachStatus({ action, message: getMachActionLabel(action) + " starting...", status: "running" });
 
   try {
     const response = await fetch("/api/mach-action", {
@@ -662,7 +659,7 @@ export async function cancelGraphMachAction() {
   }
 
   const sessionId = uiState.activeMachSession.id;
-  const cancelButton = document.querySelector(".build-cancel");
+  const cancelButton = document.querySelector(".mach-cancel");
 
   if (cancelButton) {
     cancelButton.disabled = true;
@@ -1291,6 +1288,7 @@ export async function refreshGraphFromServer(index, {
   }
 
   state.refreshing = true;
+  const requestedOffset = state.offset;
 
   try {
     const snapshotLimit = Number(limit) > 0
@@ -1307,6 +1305,9 @@ export async function refreshGraphFromServer(index, {
       throw new Error(result.error || response.statusText);
     }
 
+    // A page can finish loading while this refresh is in flight. Keep that
+    // page instead of replacing it with the shorter, older snapshot.
+    if (state.loading || state.offset !== requestedOffset) return false;
     return applyGraphSnapshot(index, result, { force });
   } catch (error) {
     setGraphStatus(index, error && error.message ? error.message : String(error), { error: true });

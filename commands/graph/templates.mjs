@@ -52,11 +52,11 @@ export function buildInteractiveGraphLauncherHtml({
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Opening Thunderbird Desktop Console</title>
+  <title>Opening Thunderbird Development Dashboard</title>
   <link rel="icon" href="/favicon.ico" sizes="any">
 </head>
 <body class="graph-view-active">
-  <p id="status">Opening Thunderbird Desktop Console...</p>
+  <p id="status">Opening Thunderbird Development Dashboard...</p>
   <script>
     const consolePath = ${safeScriptJson(consolePath)};
     const tabName = ${safeScriptJson(tabName)};
@@ -65,7 +65,7 @@ export function buildInteractiveGraphLauncherHtml({
     if (consoleTab) {
       consoleTab.focus();
       document.getElementById("status").textContent =
-        "Thunderbird Desktop Console opened in a new tab.";
+        "Thunderbird Development Dashboard opened in a new tab.";
       window.setTimeout(() => window.close(), 100);
     } else {
       window.location.replace(consolePath);
@@ -541,6 +541,12 @@ export function buildGraphHtml({
               <p class="patch-update-follow-up-answer" style="white-space: pre-wrap"></p>
             </section>
             <form class="patch-update-steer" hidden>
+              <label class="patch-update-checkout-label" hidden>Run Update in
+                <select class="patch-update-checkout">
+                  <option value="worktree">New worktree</option>
+                  <option value="main">Main checkout</option>
+                </select>
+              </label>
               <label class="patch-update-steer-label" for="patch-update-steer-input">Guide Codex</label>
               <div>
                 <textarea id="patch-update-steer-input" class="patch-update-steer-input" rows="2" placeholder="Add context, question an assumption, or change direction."></textarea>
@@ -555,13 +561,13 @@ export function buildGraphHtml({
               </section>
             </section>
           </section>
-          <div class="patch-update-actions">
+          <div class="patch-update-actions"><button class="patch-update-cancel" type="button" hidden>Cancel Update</button>
             <button class="patch-update-output-toggle" type="button" hidden>Output</button>
             <button class="patch-update-amend" type="button" hidden>Amend Patch</button>
             <button class="patch-update-submit" type="button" hidden>Submit Patch</button>
             <button class="patch-update-retry" type="button" hidden>Retry Assessment</button>
             <button class="patch-update-rollback" type="button" hidden>Roll Back</button>
-          </div>` : `<section class="patch-update-workspace"></section><div class="patch-update-actions">
+          </div>` : `<section class="patch-update-workspace"></section><div class="patch-update-actions"><button class="patch-update-cancel" type="button" hidden>Cancel Update</button>
             <button class="patch-update-output-toggle" type="button" hidden>Output</button>
           </div>`}
         </div>
@@ -800,7 +806,7 @@ export function buildGraphHtml({
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Thunderbird Desktop Console</title>
+  <title>Thunderbird Development Dashboard</title>
   <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="apple-touch-icon" href="/assets/branding/app-icon.png">
   <link rel="stylesheet" href="${escapeHtml(stylesheetHref)}">
@@ -831,8 +837,21 @@ export function buildGraphHtml({
   </header>
   <main>${tabPanels}
     ${interactive.enabled ? `<dialog class="console-settings-dialog" aria-labelledby="console-settings-title">
+      <header><h2 id="console-settings-title">Settings</h2><button type="button" class="console-settings-close">Close</button></header>
+      <form class="service-credentials-settings" aria-labelledby="service-credentials-title">
+        <h3 id="service-credentials-title">Phabricator and Bugzilla</h3>
+        <label>Phabricator username<input class="service-phabricator-user" type="text" autocomplete="username" spellcheck="false"></label>
+        <label>Phabricator API token<input class="service-phabricator-token" type="password" autocomplete="off" spellcheck="false" aria-describedby="service-phabricator-saved"></label>
+        <p id="service-phabricator-saved"></p>
+        <a href="https://phabricator.services.mozilla.com/settings/" target="_blank" rel="noopener noreferrer">Open Phabricator settings</a>
+        <label>Bugzilla API key<input class="service-bugzilla-key" type="password" autocomplete="off" spellcheck="false" aria-describedby="service-bugzilla-saved"></label>
+        <p id="service-bugzilla-saved"></p>
+        <a href="https://bugzilla.mozilla.org/userprefs.cgi?tab=apikey" target="_blank" rel="noopener noreferrer">Create a Bugzilla API key</a>
+        <p>Keys are stored as plain text in your local .tb.json settings. Leave key fields blank to keep saved keys. Restart the app or console after saving to use changed credentials.</p>
+        <p class="service-credentials-status" role="status"></p>
+        <button type="submit" class="service-credentials-save" disabled>Save service keys</button>
+      </form>
       <form class="console-settings-form">
-        <header><h2 id="console-settings-title">Settings</h2><button type="button" class="console-settings-close">Close</button></header>
         <section class="daily-build-settings" aria-labelledby="daily-build-title">
           <h3 id="daily-build-title">Daily source pull and build</h3>
           <p>Build current upstream source in a separate worktree. Your Working and Review checkouts do not switch.</p>

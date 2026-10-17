@@ -1,6 +1,6 @@
 import { uiState } from "./config.js";
 import { openRebaseFailureDialog } from "./rebase-dialog.js";
-import { setLiveText, replaceChangedChildren, hasSelectedText } from "./live-text.js";
+import { setDialogCommitTitle, setLiveText, replaceChangedChildren, hasSelectedText } from "./live-text.js";
 import { createActivityEntry as createSharedActivityEntry, bindAiFeedbackForm } from "./ai-dialog-controls.js";
 import { registerAiTaskDialog, enableTaskNotifications } from "./ai-task-tray.js";
 import { showSystemConfirmation } from "./system-dialog.js";
@@ -16,6 +16,7 @@ import { startOrResumePatchSession } from "./patch-session-resume.js";
 import { createCodexRunStatus } from "./codex-run-status.js";
 
 const dialog = document.getElementById("patch-update-dialog");
+const cancelUpdate = dialog?.querySelector(".patch-update-cancel");
 const runStatus = createCodexRunStatus(dialog);
 const taskView = registerAiTaskDialog({ kind: "update", dialog, title: value => `${value.revision} ${value.mode === "verify" ? "Verify" : value.mode === "freeform" ? "Update" : "Review Update"}`,
   restore: restorePatchUpdateTask, onUpdate: renderSession,
@@ -71,12 +72,42 @@ const steer = dialog?.querySelector(".patch-update-steer");
 const steerLabel = dialog?.querySelector(".patch-update-steer-label");
 const steerInput = dialog?.querySelector(".patch-update-steer-input");
 const steerSubmit = dialog?.querySelector(".patch-update-steer-submit");
+let checkoutLabel = dialog?.querySelector(".patch-update-checkout-label");
+if (steer && !checkoutLabel) {
+  checkoutLabel = document.createElement("label");
+  checkoutLabel.className = "patch-update-checkout-label";
+  checkoutLabel.hidden = true;
+  checkoutLabel.append("Run Update in ");
+  const select = document.createElement("select");
+  select.className = "patch-update-checkout";
+  for (const [value, text] of [["worktree", "Worktree (same branch)"], ["main", "Main checkout"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    select.append(option);
+  }
+  checkoutLabel.append(select);
+  steer.prepend(checkoutLabel);
+}
+const checkoutChoice = checkoutLabel?.querySelector(".patch-update-checkout");
+const worktreeChoice = checkoutChoice?.querySelector('option[value="worktree"]');
+if (worktreeChoice) worktreeChoice.textContent = "Worktree (same branch)";
+const startControls = checkoutLabel && document.createElement("div");
+const startButton = startControls && document.createElement("button");
+if (startControls) {
+  startControls.hidden = true;
+  startButton.type = "button";
+  startButton.className = "patch-update-start";
+  startControls.append(checkoutLabel, startButton);
+  activityProgress.before(startControls);
+}
 const patchDiff = dialog?.querySelector(".patch-update-context-diff");
 const patchDiffContent = dialog?.querySelector(".patch-update-context-diff-content");
 const amend = dialog?.querySelector(".patch-update-amend");
 const submit = dialog?.querySelector(".patch-update-submit");
 
 let session;
+let pendingStart = null;
 let pollTimer;
 let outputVisible = false;
 let activityFilter = "notes";
@@ -113,7 +144,7 @@ function getWorkingTreeDiffTimeoutMs() {
 
   return Number.isFinite(testTimeout) && testTimeout > 0
     ? testTimeout
-    : 5_000;
+    : 60_000;
 }
 
 function cancelWorkingTreeDiffRequest() {
@@ -321,11 +352,11 @@ function setPatchContext(context) {
 }
 
 function getPatchDiffKey(value = session) {
-  if (!value?.id || value.graphIndex === undefined || !value.currentHash) {
+  if (!value || value.graphIndex === undefined || !value.currentHash) {
     return "";
   }
 
-  return [value.id, value.graphIndex, value.currentHash].join(":");
+  return [value.id || "draft", value.graphIndex, value.currentHash].join(":");
 }
 
 function loadPatchDiff() {
@@ -344,7 +375,7 @@ function loadPatchDiff() {
     text: "",
   };
   void fetch(
-    `/api/graph/${encodeURIComponent(session.graphIndex)}/diff/${encodeURIComponent(session.currentHash)}?token=${encodeURIComponent(INTERACTIVE.token)}&patchUpdateSession=${encodeURIComponent(session.id)}`,
+    `/api/graph/${encodeURIComponent(session.graphIndex)}/diff/${encodeURIComponent(session.currentHash)}?token=${encodeURIComponent(INTERACTIVE.token)}${session.id ? `&patchUpdateSession=${encodeURIComponent(session.id)}` : ""}`,
     { cache: "no-store" },
   ).then(async (response) => {
     const result = await response.json();
@@ -857,6 +888,18 @@ function appendWorkingTreeDiff(item) {
           ? "The candidate was reverted, so no working-tree diff remains for this comment."
           : "There are no uncommitted changes in the current checkout.";
     content.append(notice);
+    if (currentDiff?.error) {
+      const retry = document.createElement("button");
+
+      retry.type = "button";
+      retry.textContent = "Retry loading diff";
+      retry.addEventListener("click", () => {
+        workingTreeDiff = { error: "", html: "", key: "", loading: false, text: "" };
+        renderedPatchDiffKey = "";
+        renderSession(session);
+      });
+      content.append(retry);
+    }
   }
   section.append(header, content);
   patchDiffContent.append(section);
@@ -931,6 +974,7 @@ function setPatchDiff(item) {
 }
 
 function resetPatchUpdateDialog(patch) {
+  pendingStart = null;
   submitError = "";
   viewGeneration++;
   session = undefined;
@@ -967,6 +1011,7 @@ function resetPatchUpdateDialog(patch) {
   expandedActivityCommandIds.clear();
   window.clearTimeout(pollTimer);
   title.textContent = `${patch.id} Review Update`;
+  setDialogCommitTitle(title, patch.title || graphStates[session?.graphIndex]?.commits?.find(commit => commit.hash === patch.id)?.subject);
   setPatchLinks(patch.id, patch.bugId || patch.title?.match(/\bBug\s+(\d+)/i)?.[1] || "");
   status.classList.remove("error");
   status.textContent = "Preparing update...";
@@ -1000,6 +1045,15 @@ function renderSession(currentSession) {
   taskView.update(session, isBusy(session) || Boolean(pendingAction));
   dialog.classList.toggle("patch-verify", session.mode === "verify");
   const freeform = session.mode === "freeform";
+  if (checkoutLabel) checkoutLabel.hidden = !pendingStart;
+  if (startControls) {
+    startControls.hidden = !pendingStart;
+    startButton.hidden = freeform;
+    startButton.disabled = false;
+    const name = session.mode === "verify" ? "Verify" : freeform ? "Update" : "Review Update";
+    checkoutLabel.firstChild.textContent = `Run ${name} in `;
+    startButton.textContent = `Start ${name}`;
+  }
   dialog.classList.toggle("patch-freeform", freeform);
   chat.hidden = !freeform;
   if (freeform) {
@@ -1023,6 +1077,7 @@ function renderSession(currentSession) {
   }
   runStatus.update(session, isBusy() || Boolean(pendingAction));
   const busy = isBusy();
+  setButton(cancelUpdate, { hidden: !session?.id || ["cancelled", "complete"].includes(session.status), disabled: pendingAction === "cancel" });
   const actionPending = Boolean(pendingAction);
   const item = getCurrentItem();
   const visibleOutput = getPatchUpdateOutput(session);
@@ -1046,6 +1101,7 @@ function renderSession(currentSession) {
   }
 
   title.textContent = `${session.revision} ${session.mode === "verify" ? "Verify" : session.mode === "freeform" ? "Update" : "Review Update"}`;
+  if (session.commitTitle) setDialogCommitTitle(title, session.commitTitle);
   setPatchLinks(session.revision, session.bugId || undefined);
   setLiveText(status, submitError || session.message || session.error || "");
   status.classList.toggle("error", Boolean(submitError) || session.status === "error" || Boolean(item?.error));
@@ -1086,7 +1142,7 @@ function renderSession(currentSession) {
   );
 
   if (steer) {
-    steer.hidden = freeform ? false : !canSteer;
+    steer.hidden = session.status === "cancelled" || (freeform ? false : !canSteer);
   }
   if (steerLabel) {
     steerLabel.textContent = session.canRetryAssessment ? "Guide Codex and retry the assessment" : freeform ? "Ask Codex for an update" : canGuideCurrentComment
@@ -1123,6 +1179,11 @@ function renderSession(currentSession) {
   });
   setButton(rollback, { hidden: !freeform, disabled: busy || actionPending || !session.canRollback,
     text: pendingAction === "rollback" ? "Rolling Back..." : "Roll Back" });
+  if (pendingStart) {
+    if (steer) steer.hidden = !freeform;
+    if (results) results.hidden = true;
+    setButton(submit, { hidden: true });
+  }
   const finding = getInlineFinding(item);
   const attention = item ? finding?.querySelector(".patch-update-inline-actions") : submit;
   scrollToAttention(
@@ -1172,7 +1233,7 @@ async function loadSession() {
 }
 
 async function runAction(action, body = {}) {
-  if (!session?.id || pendingAction) {
+  if (!session?.id || pendingAction && action !== "cancel") {
     return null;
   }
 
@@ -1215,6 +1276,7 @@ async function runAction(action, body = {}) {
 
 
 function restorePatchUpdateTask(value) {
+  pendingStart = null;
   if (session?.id !== value.id) resetPatchUpdateDialog({ id: value.revision });
   renderSession(value);
   title.textContent = `${value.revision} ${value.mode === "verify" ? "Verify" : value.mode === "freeform" ? "Update" : "Review Update"}`;
@@ -1230,11 +1292,35 @@ export async function openPatchUpdateDialog({ patch, graphIndex, mode = "update"
   void enableTaskNotifications();
   if (dialog.open || session) taskView.minimize();
   resetPatchUpdateDialog(patch);
+  pendingStart = null;
   const generation = viewGeneration;
   setPageScrollLocked(true);
   dialog.showModal();
   title.textContent = `${patch.id} ${mode === "verify" ? "Verify" : mode === "freeform" ? "Update" : "Review Update"}`;
-  status.textContent = mode === "verify" ? "Preparing verification..." : "Preparing review update...";
+  setDialogCommitTitle(title, patch.title || graphStates[graphIndex]?.commits?.find(commit => commit.hash === patch.id)?.subject);
+  if (mode === "freeform") {
+    checkoutChoice.value = "worktree";
+    pendingStart = { patch, graphIndex, generation, mode };
+    renderSession({ id: "", revision: patch.id, graphIndex, mode, aiEnabled: true,
+      currentHash: patch.id,
+      status: "review", message: "What would you like to change?", items: [], chat: [], activity: [] });
+    steerInput?.focus();
+    return;
+  }
+  checkoutChoice.value = "worktree";
+  pendingStart = { patch, graphIndex, generation, mode };
+  renderSession({ id: "", revision: patch.id, graphIndex, mode, aiEnabled: true, currentHash: patch.id,
+    status: "review", message: "Choose a checkout, then start.", items: [], activity: [] });
+  startButton.focus();
+}
+
+async function startPendingPatchUpdate() {
+  if (!pendingStart || pendingStart.mode === "freeform") return;
+  const start = pendingStart;
+  const { patch, graphIndex, generation, mode } = start;
+  const checkoutMode = checkoutChoice.value;
+  pendingStart = null;
+  renderSession({ ...session, status: "preparing", message: "Preparing the patch..." });
 
   try {
     const result = await startOrResumePatchSession("/api/patch-update", {
@@ -1242,6 +1328,7 @@ export async function openPatchUpdateDialog({ patch, graphIndex, mode = "update"
         graphIndex,
         revision: patch.id,
         mode,
+        checkoutMode,
         snapshotLimit: getLoadedGitCommitLimit(graphStates[graphIndex]),
     });
     if (generation !== viewGeneration) { if (result) taskView.background(result); return; }
@@ -1254,6 +1341,8 @@ export async function openPatchUpdateDialog({ patch, graphIndex, mode = "update"
     schedulePoll();
   } catch (error) {
     if (generation !== viewGeneration) return;
+    pendingStart = start;
+    renderSession({ ...session, status: "review", message: error?.message || String(error) });
     status.classList.add("error");
     status.textContent = error?.message || String(error);
   }
@@ -1264,8 +1353,16 @@ export function initializePatchUpdateDialog() {
     return;
   }
 
+  startButton?.addEventListener("click", () => { void startPendingPatchUpdate(); });
+
+  cancelUpdate?.addEventListener("click", () => { void runAction("cancel"); });
   dialog.querySelector(".patch-update-close").addEventListener("click", () => {
     window.clearTimeout(pollTimer);
+    if (!session?.id) {
+      pendingStart = null;
+      dialog.close();
+      return;
+    }
     taskView.minimize();
   });
   dialog.addEventListener("close", () => {
@@ -1292,6 +1389,41 @@ export function initializePatchUpdateDialog() {
   bindAiFeedbackForm(steer, {
     onInput: () => { if (session) renderSession(session); },
     onSend: async value => {
+      if (pendingStart && pendingStart.mode !== "freeform") return false;
+      if (pendingStart) {
+        const start = pendingStart;
+        start.checkoutMode = checkoutChoice.value;
+        pendingStart = null;
+        try {
+          session.status = "preparing";
+          session.message = "Preparing the patch for your request...";
+          renderSession(session);
+          const result = await startOrResumePatchSession("/api/patch-update", {
+            token: INTERACTIVE.token, graphIndex: start.graphIndex,
+            revision: start.patch.id, mode: "freeform",
+            checkoutMode: start.checkoutMode,
+            snapshotLimit: getLoadedGitCommitLimit(graphStates[start.graphIndex]),
+          });
+          if (start.generation !== viewGeneration) {
+            if (result) taskView.background(result);
+            return false;
+          }
+          if (!result) { session.status = "review"; pendingStart = start; renderSession(session); return false; }
+          renderSession(result);
+          while (isBusy(session) && start.generation === viewGeneration) {
+            await new Promise(resolve => window.setTimeout(resolve, 500));
+            if (!await loadSession()) return false;
+          }
+          if (start.generation !== viewGeneration || session.status === "error" || session.status === "cancelled") return false;
+        } catch (error) {
+          if (start.generation !== viewGeneration) return false;
+          pendingStart = start;
+          session.status = "review";
+          session.message = error?.message || String(error);
+          renderSession(session);
+          return false;
+        }
+      }
       const item = getCurrentItem();
       const isCommentFeedback = session?.mode !== "freeform" && session?.aiEnabled && !isBusy() &&
         session.status !== "error" && Boolean(item);
@@ -1374,6 +1506,7 @@ export function initializePatchUpdateDialog() {
 
     button.dataset.graphIndex = String(session.graphIndex);
     button.dataset.hash = session.currentHash;
+    button.dataset.title = session.commitTitle || "";
     button.dataset.label = GRAPHS[session.graphIndex]?.label || "comm";
     const id = session.id;
     submitError = "";

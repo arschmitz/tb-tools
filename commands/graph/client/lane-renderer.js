@@ -734,7 +734,7 @@ export async function loadMoreCommits(index) {
     state.graph.commitCount = state.commits.filter((commit) => !isWorkingTreeCommit(commit)).length;
     renderLoadedGraph(index);
   } catch (error) {
-    setGraphStatus(index, error && error.message ? error.message : String(error), { error: true });
+    setGraphStatus(index, error && error.message ? error.message : String(error), { error: true, canLoad: state.hasMore });
   } finally {
     state.loading = false;
   }

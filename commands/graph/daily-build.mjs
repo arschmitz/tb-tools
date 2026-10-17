@@ -1,3 +1,4 @@
+import { pruneStorage, STORAGE_LIMITS } from "./storage-retention.mjs";
 import { createWriteStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
@@ -5,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { run } from "../../lib/utils.mjs";
-import { publishCompletedConsoleBuild } from "./build.mjs";
+import { runConsoleBuild } from "./build.mjs";
 import { ensurePairedWorktrees, writeWorktreeBuildConfig } from "./worktrees.mjs";
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -45,15 +46,12 @@ async function saveJson(file, value) {
   await rename(temporary, file);
 }
 
-export async function runLoggedBuild({ cwd, env, file, signal }) {
+export async function runLoggedBuild({ cwd, env, file, signal, runCommand = run }) {
   await mkdir(path.dirname(file), { recursive: true });
   const output = createWriteStream(file, { flags: "a", mode: 0o600 });
-  const command = process.platform === "win32" ? (process.env.TB_MACH_PYTHON || "python") : "./mach";
-  const args = process.platform === "win32" ? ["mach", "build"] : ["build"];
-  try {
-    await new Promise((resolve, reject) => {
-      const child = spawn(command, args, {
-        cwd, env: { ...process.env, ...env, AUTOCLOBBER: "1",
+  const execute = ({ cmd, args, cwd: commandCwd, env: commandEnv }) => new Promise((resolve, reject) => {
+      const child = spawn(cmd, args, {
+        cwd: commandCwd, env: { ...process.env, ...commandEnv, AUTOCLOBBER: "1",
           MOZ_SKIP_PATH_PERFORMANCE_CHECK: "1", SCCACHE_DIRECT: "false" },
         stdio: ["ignore", "pipe", "pipe"],
         detached: process.platform !== "win32",
@@ -76,6 +74,11 @@ export async function runLoggedBuild({ cwd, env, file, signal }) {
         else reject(new Error(`Daily build exited ${stoppedBy || code}. See ${file}.`));
       });
     });
+  try {
+    return await runConsoleBuild({ graph: { path: path.join(cwd, "comm") }, env,
+      runCommand: options => runCommand({ ...options, signal }), execute,
+      canceled: () => signal?.aborted, log: text => output.write(text),
+    });
   } finally {
     await new Promise(resolve => output.end(resolve));
   }
@@ -86,7 +89,7 @@ export function createDailyBuildService({
   directory = path.join(os.homedir(), ".tb-tools", "daily-build"),
   runCommand = run,
   build = runLoggedBuild,
-  publishBuild = build === runLoggedBuild ? publishCompletedConsoleBuild : async () => null,
+  publishBuild = async () => null,
   now = () => new Date(),
   onSettingsSaved = async () => {},
 } = {}) {
@@ -178,9 +181,10 @@ export function createDailyBuildService({
         const revisions = await prepareSource();
         state = { ...state, ...revisions };
         await saveState();
-        await build({ cwd: gecko, env: { MOZCONFIG: mozconfig }, file: logFile, signal: abort.signal });
-        const buildSnapshot = await publishBuild({ graph: { path: path.join(gecko, "comm") },
+        const result = await build({ cwd: gecko, env: { MOZCONFIG: mozconfig }, file: logFile, signal: abort.signal, runCommand });
+        const buildSnapshot = result?.snapshot || await publishBuild({ graph: { path: path.join(gecko, "comm") },
           runCommand, env: { MOZCONFIG: mozconfig } });
+        if (abort.signal.aborted) throw new Error("Daily build was cancelled.");
         state = { ...state, buildSnapshot, status: "passed", activeSlots: [], ownerPid: null,
           completedAt: now().toISOString() };
       } catch (error) {
@@ -189,6 +193,8 @@ export function createDailyBuildService({
           activeSlots: [], ownerPid: null, status: abort.signal.aborted ? "cancelled" : "failed",
           completedAt: now().toISOString(), error: error.message };
       } finally {
+        // Keep this fixed pair and its private output so the next build is incremental.
+        await pruneStorage({ directory: path.join(directory, "logs"), ...STORAGE_LIMITS.dailyLogs, keepPaths: [state.logFile] }).catch(error => { state.cleanupError = error.message; });
         try { await saveState(); }
         finally {
           try { await releaseRun(runId); }
@@ -220,6 +226,7 @@ export function createDailyBuildService({
       if (state.status === "running" && !processIsRunning(state.ownerPid)) state = { ...state,
         slots: state.slots.filter(slot => !state.activeSlots?.includes(slot)),
         activeSlots: [], status: "interrupted", completedAt: now().toISOString() };
+      // Keep the private output after an interrupted build too.
       await saveState();
       timer = setInterval(() => { void tick().catch(error => { state.error = error.message; }); }, 30_000);
       await tick();

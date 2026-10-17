@@ -27,7 +27,7 @@ function presentNextDialog() {
     choices: dialogChoices = [],
     confirmLabel = "OK",
     message: dialogMessage = "",
-    title: dialogTitle = "Thunderbird Desktop Console",
+    title: dialogTitle = "Thunderbird Development Dashboard",
   } = activeRequest.options;
 
   title.textContent = dialogTitle;
@@ -80,7 +80,7 @@ function requestSystemDialog(options) {
 }
 
 export async function showSystemNotice({
-  title = "Thunderbird Desktop Console",
+  title = "Thunderbird Development Dashboard",
   message = "",
   confirmLabel = "OK",
 } = {}) {

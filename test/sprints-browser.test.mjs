@@ -124,6 +124,7 @@ test("sprint overview shows status lanes for members and planning keeps membersh
     cards: [
       ...["assigned", "in-progress", "in-review", "complete"].map((column, index) => ({
         column,
+        isOpen: column !== "complete",
         id: String(100004 + index),
         parentMeta: { id: "900100", summary: "Stories" },
         points: 2,
@@ -154,6 +155,24 @@ test("sprint overview shows status lanes for members and planning keeps membersh
         points: 1,
         summary: "Backlog story",
         url: "https://bugzilla.mozilla.org/show_bug.cgi?id=100003",
+      },
+      {
+        column: "complete",
+        id: "100008",
+        isOpen: false,
+        parentMeta: { id: "900100", summary: "Stories" },
+        points: 20,
+        summary: "Closed story outside sprint",
+        url: "https://bugzilla.mozilla.org/show_bug.cgi?id=100008",
+      },
+      {
+        column: "complete",
+        id: "100009",
+        isOpen: true,
+        parentMeta: { id: "900100", summary: "Stories" },
+        points: 20,
+        summary: "Completed story with an open bug",
+        url: "https://bugzilla.mozilla.org/show_bug.cgi?id=100009",
       },
     ],
     childMetas: [{ id: "900100", summary: "Stories" }],
@@ -266,6 +285,9 @@ test("sprint overview shows status lanes for members and planning keeps membersh
   await overviewBoard.getByRole("button", { name: "Current sprint story", exact: true }).waitFor({ state: "hidden" });
   assert.equal(await overviewBoard.locator('[data-sprint-status="ready"] .meta-board-column-count').innerText(), "0");
   await page.getByRole("button", { name: "Planning", exact: true }).click();
+  assert.doesNotMatch(await page.locator(".sprint-planning").innerText(), /Closed story outside sprint/);
+  assert.doesNotMatch(await page.locator(".sprint-planning").innerText(), /Completed story with an open bug/);
+  assert.match(await page.locator('.sprint-column[data-sprint-column="sprint"]').innerText(), /complete sprint story/);
   await page.locator(".sprint-planning").getByRole("button", { name: "Add to Sprint: Bug 100001" }).click();
   await page.locator(".sprint-planning").getByRole("button", { name: "Remove from Sprint: Bug 100001" }).waitFor();
   const restoredMembers = [...memberIds];

@@ -39,6 +39,13 @@ export async function prepareMonitoredTry({ graph, target, options, runCommand =
         state.workspaceGeneration = (state.workspaceGeneration || 0) + 1;
       }
     }
+    if (!existing && graph?.taskWorktree && state.branchNamespace) {
+      const sourceRef = `refs/heads/${state.branchNamespace}result`;
+      const savedHash = await git(["for-each-ref", "--format=%(objectname)", sourceRef]);
+      if (savedHash && savedHash !== hash) throw new Error("The Try task source reference changed before submission.");
+      if (!savedHash) await git(["update-ref", sourceRef, hash, "0".repeat(40)]);
+      state.sourceRef = sourceRef;
+    }
     addTryAttempt(state, now);
     state.nextCheckAt = now + TRY_STATUS_CHECK_INTERVAL_MS;
     store.save(state);

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+  <title>Set up Thunderbird development</title>
+  <link rel="stylesheet" href="setup.css">
+  <script src="setup-renderer.js" defer></script>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">THUNDERBIRD DEVELOPMENT DASHBOARD</p>
+    <header id="intro">
+      <h1>Your development environment,<br>ready in a few steps.</h1>
+      <p>Connect your source files once. The dashboard remembers their location, wherever you start the app.</p>
+    </header>
+    <section id="welcome" aria-label="Choose how to get started">
+      <button id="existing" class="card"><strong>Use an existing checkout</strong><span>Choose your Thunderbird comm folder or its Firefox parent.</span></button>
+      <button id="new" class="card"><strong>Set up a new environment</strong><span>Download Firefox and Thunderbird, then install the development tools.</span></button>
+    </section>
+    <section id="configure" hidden aria-labelledby="configure-title">
+      <h2 id="configure-title">Set up a new environment</h2>
+      <p id="configure-note">Choose a parent folder. Setup creates a new <code>thunderbird</code> folder inside it, with Firefox and Thunderbird source files.</p>
+      <button id="folder">Choose folder…</button>
+      <p id="destination" class="path">No folder selected</p>
+      <fieldset id="mode-options">
+        <legend>What will you work on?</legend>
+        <label><input type="radio" name="mode" value="full" checked> <strong>Any part of Thunderbird</strong><span>Full build. Includes C++, Rust, and interface changes.</span></label>
+        <label><input type="radio" name="mode" value="artifact"> <strong>JavaScript, HTML, and CSS</strong><span>Artifact build. Downloads compiled components for faster builds.</span></label>
+      </fieldset>
+      <div class="preparation-grid">
+      <fieldset>
+        <legend>Required tools</legend>
+        <p id="tool-checks" class="tool-checks" role="status"></p>
+        <p id="tools-note" class="note"></p>
+        <button id="check-tools">Recheck tools</button>
+        <button id="install-tools" hidden>Install missing tools</button>
+      </fieldset>
+      <fieldset>
+        <legend>Git identity for your patches</legend>
+        <label for="git-name">Name</label><input id="git-name" type="text" autocomplete="name">
+        <label for="git-email">Email</label><input id="git-email" type="email" autocomplete="email">
+        <p class="note">Setup fills in missing identities in these two checkouts only. Existing identities and global Git settings stay unchanged.</p>
+      </fieldset>
+      </div>
+      <p class="note">Setup downloads both repositories and opens a terminal for system prompts. Keep it open until setup finishes. You need a good internet connection, and at least 40 GB of free space. Windows also needs MozillaBuild.</p>
+      <div class="actions"><button id="back">Back</button><button id="start" class="primary" disabled>Set up environment</button></div>
+    </section>
+    <section id="progress" hidden aria-labelledby="progress-title">
+      <h2 id="progress-title">Setting up your environment</h2>
+      <p id="step" role="status" aria-live="polite"></p>
+      <p id="progress-path" class="path"></p>
+      <p id="terminal-note">Follow any prompts in the setup terminal. Downloads can take a while. You can close this window and return later; setup continues in the terminal.</p>
+      <p id="setup-error" class="error"></p>
+      <div class="actions">
+        <button id="prepare" hidden>Return to tool checks</button>
+        <button id="defer-submission" hidden>Set up submission later</button>
+        <button id="another" hidden>Choose another location</button>
+        <button id="retry" hidden>Retry setup</button>
+        <button id="finish" class="primary" hidden>Continue</button>
+      </div>
+    </section>
+    <section id="credentials" hidden aria-labelledby="credentials-title">
+      <h2 id="credentials-title">Connect Phabricator and Bugzilla</h2>
+      <p>Add your API keys to work with reviews and bugs from the dashboard. You can skip this step and add keys to your settings later.</p>
+      <form id="credentials-form">
+        <fieldset>
+          <legend>Phabricator</legend>
+          <label for="phabricator-user">Username</label>
+          <input id="phabricator-user" type="text" autocomplete="username" spellcheck="false">
+          <label for="phabricator-token">API token</label>
+          <input id="phabricator-token" type="password" autocomplete="off" spellcheck="false" aria-describedby="phabricator-saved">
+          <p id="phabricator-saved" class="note"></p>
+          <button id="phabricator-settings" type="button" class="link">Open Phabricator settings</button>
+          <p class="note">In settings, choose Conduit API Tokens and generate a token.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Bugzilla</legend>
+          <label for="bugzilla-key">API key</label>
+          <input id="bugzilla-key" type="password" autocomplete="off" spellcheck="false" aria-describedby="bugzilla-saved">
+          <p id="bugzilla-saved" class="note"></p>
+          <button id="bugzilla-settings" type="button" class="link">Create a Bugzilla API key</button>
+        </fieldset>
+        <p class="note">Keys are stored in your local .tb.json settings file. They are not encrypted. Blank fields keep keys that are already saved.</p>
+        <p id="credentials-error" class="error"></p>
+        <div class="actions">
+          <button id="skip-credentials" type="button">Skip for now</button>
+          <button id="save-credentials" class="primary" type="submit">Save and continue</button>
+        </div>
+      </form>
+    </section>
+    <section id="submission" hidden aria-labelledby="submission-title">
+      <h2 id="submission-title">Ready to submit your first patch?</h2>
+      <p id="submission-note"></p>
+      <p>You can do this later when you have a patch. This connection is separate from the dashboard API keys. No patch is submitted during setup.</p>
+      <div class="actions"><button id="submission-start" class="primary">Set up patch submission</button><button id="open-dashboard">Open dashboard</button></div>
+    </section>
+    <p id="error" class="error" role="alert"></p>
+    <footer><button id="prerequisites" class="link">Prerequisites and platform instructions</button></footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,40 @@
+name: Windows initial setup
+
+on:
+  pull_request:
+    paths:
+      - 'desktop/setup*'
+      - 'test/*setup*.mjs'
+      - 'test/contributor-setup.test.mjs'
+      - 'test/fixtures/desktop-setup*'
+      - 'package*.json'
+      - '.github/workflows/desktop-setup.yml'
+  push:
+    paths:
+      - 'desktop/setup*'
+      - 'test/*setup*.mjs'
+      - 'test/contributor-setup.test.mjs'
+      - 'test/fixtures/desktop-setup*'
+      - 'package*.json'
+      - '.github/workflows/desktop-setup.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm ci
+      - name: Test setup, native batch launch, recovery, and credentials
+        run: node --test test/desktop-setup.test.mjs test/contributor-setup.test.mjs test/setup-launch-check.test.mjs test/desktop-setup-credentials.test.mjs
+      - name: Test the setup window
+        run: node --test test/desktop-setup-browser.test.mjs

@@ -1,0 +1,1243 @@
+{
+  "version": 1,
+  "checkedAt": "2026-10-13",
+  "knowledgeRevision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+  "sourceRevision": "87d0159c7149a43253964c2cb6917939557dc799",
+  "publication": "Public notes and portable source anchors only. Expected answers are evaluation data, never evidence.",
+  "cases": [
+    {
+      "id": "calendar-scheduler",
+      "question": "Where is cal.iterate.forEach implemented, and can I await it to wait for all items?",
+      "intent": "implementation",
+      "repository": "thunderbird",
+      "scope": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        },
+        {
+          "label": "Original implementation contract",
+          "ids": [],
+          "anchors": [
+            {
+              "repository": "thunderbird",
+              "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+              "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+              "contains": [
+                "currentThread.dispatch(dispatcher",
+                "function forEach(iterable, body, completed = null)"
+              ]
+            }
+          ]
+        }
+      ],
+      "facts": [
+        "Defined in calIteratorUtils.sys.mjs.",
+        "Dispatches work to the current thread and returns immediately without a promise.",
+        "Use the optional completed callback for completion."
+      ],
+      "prohibited": [
+        "It is Array.prototype.forEach.",
+        "Awaiting its return waits for completion."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+          "blob": "d9b3bc62e2e598fb633e0e21bb83964b2d602ece"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "calendar-break",
+      "question": "Does cal.iterate.forEach call completed when the body returns BREAK? What does CONTINUE do?",
+      "intent": "async-contract",
+      "repository": "thunderbird",
+      "scope": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        },
+        {
+          "label": "Original implementation contract",
+          "ids": [],
+          "anchors": [
+            {
+              "repository": "thunderbird",
+              "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+              "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+              "contains": [
+                "forEach.CONTINUE = 1",
+                "forEach.BREAK = 2",
+                "completed();"
+              ]
+            }
+          ]
+        }
+      ],
+      "facts": [
+        "BREAK sets done and calls completed if supplied.",
+        "CONTINUE is 1; BREAK is 2.",
+        "Only BREAK is tested; other body return values do not stop iteration."
+      ],
+      "prohibited": [
+        "CONTINUE has a separate scheduler branch.",
+        "BREAK skips completed."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+          "blob": "d9b3bc62e2e598fb633e0e21bb83964b2d602ece"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "calendar-memory",
+      "question": "How does CalMemoryCalendar wait for cal.iterate.forEach before closing its item stream?",
+      "intent": "caller",
+      "repository": "thunderbird",
+      "scope": "calendar/base/modules/utils/calIteratorUtils.sys.mjs, calendar/providers/memory/CalMemoryCalendar.sys.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        },
+        {
+          "label": "Original implementation contract",
+          "ids": [],
+          "anchors": [
+            {
+              "repository": "thunderbird",
+              "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+              "path": "calendar/providers/memory/CalMemoryCalendar.sys.mjs",
+              "contains": [
+                "controller.enqueue(itemsFound);",
+                "resolve();"
+              ]
+            }
+          ]
+        }
+      ],
+      "facts": [
+        "The stream start method returns a promise.",
+        "The completed callback enqueues itemsFound, closes the controller, then resolves.",
+        "The body filters items and can return BREAK when maxTotalItemsReached is true."
+      ],
+      "prohibited": [
+        "The forEach return value is the promise."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+          "blob": "d9b3bc62e2e598fb633e0e21bb83964b2d602ece"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/providers/memory/CalMemoryCalendar.sys.mjs",
+          "blob": "9e35c68865bcf13461920bc7f1a70d4338adafe5"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "calendar-alarm",
+      "question": "Can findAlarms in CalAlarmService replace its inner cal.iterate.forEach with a synchronous loop without changing its completion contract?",
+      "intent": "caller",
+      "repository": "thunderbird",
+      "scope": "calendar/base/modules/utils/calIteratorUtils.sys.mjs, calendar/base/src/CalAlarmService.sys.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        },
+        {
+          "label": "Original implementation contract",
+          "ids": [],
+          "anchors": [
+            {
+              "repository": "thunderbird",
+              "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+              "path": "calendar/base/src/CalAlarmService.sys.mjs",
+              "contains": [
+                "async findAlarms",
+                "reject(e);",
+                "cal.iterate.forEach("
+              ]
+            }
+          ]
+        }
+      ],
+      "facts": [
+        "Each streamed batch awaits a promise resolved by the completed callback.",
+        "Calendar processing overlaps through Promise.all.",
+        "A plain loop removes event-queue yielding; preserve responsiveness and completion.",
+        "The body catches failures and rejects the surrounding promise."
+      ],
+      "prohibited": [
+        "All calendars run sequentially.",
+        "Rejecting the promise cancels the iterator."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+          "blob": "d9b3bc62e2e598fb633e0e21bb83964b2d602ece"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/src/CalAlarmService.sys.mjs",
+          "blob": "48b52db184a844e4761c8ace56de6e11a22aa5be"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "foreach-async-flag",
+      "question": "Do the async forEach callbacks in Calendar head.js and browser_icsAttachment.js prove that these tests miss an await?",
+      "intent": "regression",
+      "repository": "thunderbird",
+      "scope": "calendar/test/browser/head.js, calendar/test/browser/invitations/browser_icsAttachment.js",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "The checked callback bodies contain no await.",
+        "An automated async-callback flag does not prove a missing wait or test failure.",
+        "Read callers and actual asynchronous actions before changing the tests."
+      ],
+      "prohibited": [
+        "Both tests are proven broken."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/test/browser/head.js",
+          "blob": "5723268dee668a526eb83d2e205120c0b17762cf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/test/browser/invitations/browser_icsAttachment.js",
+          "blob": "f88ef84249b88ac78345496f4c5d0a7533a08562"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "test-pref",
+      "question": "How should I test a browser feature that changes preferences, and does the same lint restriction apply unchanged to Calendar browser tests?",
+      "intent": "testing",
+      "repository": "thunderbird",
+      "scope": "eslint.config.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "Browser-test configuration recommends SpecialPowers.pushPrefEnv for setting and clearing preferences.",
+        "The later Calendar no-restricted-syntax array replaces the browser array for matching Calendar paths.",
+        "Check resolved configuration and cleanup; do not claim both arrays remain enforced."
+      ],
+      "prohibited": [
+        "Every browser restriction is merged into the Calendar array."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "eslint.config.mjs",
+          "blob": "d7943cc90bddf72f63c569569886cc3297e3b9a8"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "utc-date",
+      "question": "How should Calendar tests construct dates with several arguments?",
+      "intent": "testing",
+      "repository": "thunderbird",
+      "scope": "eslint.config.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "Use new Date(Date.UTC(...)) for multi-argument construction.",
+        "Calendar test overrides restrict local getters and setters in favor of UTC forms.",
+        "This is test-path scope, not a blanket production rule."
+      ],
+      "prohibited": [
+        "All production code must use UTC date methods."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "eslint.config.mjs",
+          "blob": "d7943cc90bddf72f63c569569886cc3297e3b9a8"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "named-tasks",
+      "question": "Are named functions forbidden in Thunderbird browser test tasks?",
+      "intent": "style",
+      "repository": "thunderbird",
+      "scope": "eslint.config.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "Production func-names uses never.",
+        "The comm-named-functions override turns func-names off for test paths.",
+        "Keep descriptive task names in the relevant harness."
+      ],
+      "prohibited": [
+        "The production rule forbids all named test tasks."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "eslint.config.mjs",
+          "blob": "d7943cc90bddf72f63c569569886cc3297e3b9a8"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "iterator-snapshot",
+      "question": "Should I remove every spread of folderTree.selection.values() in about3Pane.js?",
+      "intent": "style",
+      "repository": "thunderbird",
+      "scope": "mail/base/content/about3Pane.js",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        },
+        {
+          "label": "old",
+          "ids": [
+            "fbe84fea47e86cdf1a2e6be2cec4be6bfb10c05a730fb0a5dfd04d3b7f0a705c"
+          ]
+        }
+      ],
+      "facts": [
+        "Direct iteration is suitable when no array operation or snapshot is needed.",
+        "about3Pane uses direct values iteration and also materializes arrays for map.",
+        "The older D203232 lesson is provisional and lacks independently checked public review evidence."
+      ],
+      "prohibited": [
+        "Every spread is wrong.",
+        "The imported review establishes a global rule."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/a48c194b-2b30-44fd-a7c9-093547f84d50.md",
+          "id": "fbe84fea47e86cdf1a2e6be2cec4be6bfb10c05a730fb0a5dfd04d3b7f0a705c"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "mail/base/content/about3Pane.js",
+          "blob": "9a96aa4371e0e00c2d9b6cf0cdce7f862a631937"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "old-review-rejection",
+      "question": "Did D203232 establish an accepted repository-wide ban on spreading Map.values(), including a rejected alternative?",
+      "intent": "rejected-approach",
+      "repository": "thunderbird",
+      "scope": "Thunderbird knowledge provenance and scoped guidance",
+      "evidence": [
+        {
+          "label": "old",
+          "ids": [
+            "fbe84fea47e86cdf1a2e6be2cec4be6bfb10c05a730fb0a5dfd04d3b7f0a705c"
+          ]
+        },
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "The retained note reports a removed spread and a declined blanket removal where array methods improve clarity.",
+        "It is a provisional imported claim without independently checked public source evidence.",
+        "It cannot establish an accepted repository-wide ban or independently verified rejection."
+      ],
+      "prohibited": [
+        "The rejection is independently verified.",
+        "One historical review is repository policy."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/a48c194b-2b30-44fd-a7c9-093547f84d50.md",
+          "id": "fbe84fea47e86cdf1a2e6be2cec4be6bfb10c05a730fb0a5dfd04d3b7f0a705c"
+        },
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        }
+      ],
+      "limits": "Only the retained provisional account was checked. Original private review evidence was not accessed; acceptance and rejection remain unverified."
+    },
+    {
+      "id": "equality",
+      "question": "Does the Thunderbird code-style study require replacing every == with ===?",
+      "intent": "style",
+      "repository": "thunderbird",
+      "scope": "eslint.config.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "No blanket strict-equality rule is added.",
+        "Check types and intentional null-or-undefined checks.",
+        "Counts and lint success do not establish the correct comparison in each section."
+      ],
+      "prohibited": [
+        "Every == is a defect."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "eslint.config.mjs",
+          "blob": "d7943cc90bddf72f63c569569886cc3297e3b9a8"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "falsy-default",
+      "question": "Can I replace || with ?? as a Thunderbird style cleanup when zero and false are valid inputs?",
+      "intent": "style",
+      "repository": "thunderbird",
+      "scope": "Thunderbird knowledge provenance and scoped guidance",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "?? falls back only for null and undefined.",
+        "|| falls back for all falsy values.",
+        "Check valid zero, false and empty strings and the actual caller contract."
+      ],
+      "prohibited": [
+        "The operators preserve all behavior."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "test-server-html",
+      "question": "Does EwsServer.sys.mjs using forEach to build responses permit the same HTML construction in production code?",
+      "intent": "scope",
+      "repository": "thunderbird",
+      "scope": "mailnews/test/fakeserver/EwsServer.sys.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "EwsServer is a test server helper that builds fixture protocol output.",
+        "Test exceptions do not establish production HTML construction rules.",
+        "Check receiver, caller and production configuration."
+      ],
+      "prohibited": [
+        "A test helper authorizes production unsanitized HTML."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "mailnews/test/fakeserver/EwsServer.sys.mjs",
+          "blob": "2696d5d9676d02e6a2b55085cce75e8c5b541012"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "loop-rewrite",
+      "question": "Can I mechanically change Array.prototype.forEach to for...of for sparse or mutating arrays?",
+      "intent": "style",
+      "repository": "thunderbird",
+      "scope": "Thunderbird knowledge provenance and scoped guidance",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "forEach skips missing slots and fixes the visit range before iteration.",
+        "Normal array iteration can yield undefined for holes and visit appended entries.",
+        "Check mutation, callback arguments, thisArg and return behavior."
+      ],
+      "prohibited": [
+        "They are always interchangeable."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "ordered-save",
+      "question": "How should new Thunderbird code wait for each item save in order?",
+      "intent": "async-contract",
+      "repository": "thunderbird",
+      "scope": "Thunderbird knowledge provenance and scoped guidance",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "Use for...of with await for ordered work.",
+        "Array.prototype.forEach does not wait for callback promises.",
+        "Promise.all permits overlap, rejects on rejection and does not cancel started work."
+      ],
+      "prohibited": [
+        "Awaiting forEach waits for callback promises.",
+        "Promise.all cancels the other operations."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "study-completeness",
+      "question": "Did the code-style study manually prove every Thunderbird source choice correct?",
+      "intent": "uncertainty",
+      "repository": "thunderbird",
+      "scope": "Thunderbird knowledge provenance and scoped guidance",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        },
+        {
+          "label": "coverage",
+          "ids": [
+            "a4814bd02e1c534e46166afa6fc6d27a7d8f7e2eeda233fbb30884f2253a8049"
+          ]
+        }
+      ],
+      "facts": [
+        "The study includes a file census and automated syntax/configuration checks.",
+        "Parser failures and meaning limits remain.",
+        "Counts and automated checks are not exhaustive manual behavior review."
+      ],
+      "prohibited": [
+        "Every source choice was manually checked."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/c3a69f18-1758-4b7e-9d63-5e51cbbcfb54.md",
+          "id": "a4814bd02e1c534e46166afa6fc6d27a7d8f7e2eeda233fbb30884f2253a8049"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "comment-coverage",
+      "question": "Does the comment-writing guide prove that every existing comment is correct?",
+      "intent": "uncertainty",
+      "repository": "thunderbird",
+      "scope": "Thunderbird knowledge provenance and scoped guidance",
+      "evidence": [
+        {
+          "label": "comments",
+          "ids": [
+            "46d1a289b8408defab2bdfd09b61a6f5145e0fd12f90ce87b82feb69152b997d"
+          ]
+        }
+      ],
+      "facts": [
+        "The practical guide is provisional guidance.",
+        "Existing comments remain evidence and need implementation and caller checks.",
+        "Do not demand unrelated cleanup or report harmless wording choices as defects."
+      ],
+      "prohibited": [
+        "Every comment was manually verified."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/81596887-76aa-4804-932a-d01b73042690.md",
+          "id": "46d1a289b8408defab2bdfd09b61a6f5145e0fd12f90ce87b82feb69152b997d"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "ambiguous-foreach",
+      "question": "Should I replace forEach in Calendar?",
+      "intent": "ambiguous",
+      "repository": "thunderbird",
+      "scope": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "Identify the receiver and affected section first.",
+        "Array.prototype.forEach and cal.iterate.forEach have different contracts.",
+        "No blanket replacement; check scheduling, completion and array semantics."
+      ],
+      "prohibited": [
+        "Replace all Calendar forEach calls."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+          "blob": "d9b3bc62e2e598fb633e0e21bb83964b2d602ece"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "language-scope",
+      "question": "Can I apply the Thunderbird JavaScript loop guidance to imported Rust crates and Python?",
+      "intent": "scope",
+      "repository": "thunderbird",
+      "scope": "Thunderbird knowledge provenance and scoped guidance",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "Other languages need their own configuration and caller contracts.",
+        "Imported crates can carry their own rustfmt settings.",
+        "The study did not exhaustively analyze non-JavaScript meaning."
+      ],
+      "prohibited": [
+        "JavaScript style is universal first-party Rust policy."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "current-latency",
+      "question": "What latency value does every user currently have for cal.iterate.forEach?",
+      "intent": "insufficient",
+      "repository": "thunderbird",
+      "scope": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "The implementation reads calendar.threading.latency with fallback 250.",
+        "The retained source cannot establish each user profile value.",
+        "State that profile-specific evidence is insufficient."
+      ],
+      "prohibited": [
+        "Every user has latency 250."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+          "blob": "d9b3bc62e2e598fb633e0e21bb83964b2d602ece"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "unknown-regression",
+      "question": "Which Thunderbird commit caused a user-specific failure after a forEach replacement yesterday?",
+      "intent": "insufficient",
+      "repository": "thunderbird",
+      "scope": "Thunderbird knowledge provenance and scoped guidance",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "The question lacks a commit, affected path and failure evidence.",
+        "The guide explains possible semantic changes but cannot identify the cause.",
+        "Request the patch and reproduction evidence before assigning blame."
+      ],
+      "prohibited": [
+        "A specific commit or cause is proven."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "async-body",
+      "question": "Does cal.iterate.forEach wait for an async body promise, and does BREAK returned by that promise stop it?",
+      "intent": "async-contract",
+      "repository": "thunderbird",
+      "scope": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        },
+        {
+          "label": "Original implementation contract",
+          "ids": [],
+          "anchors": [
+            {
+              "repository": "thunderbird",
+              "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+              "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+              "contains": [
+                "const rc = body(next.value);",
+                "if (rc == lazy.cal.iterate.forEach.BREAK)"
+              ]
+            }
+          ]
+        }
+      ],
+      "facts": [
+        "The body is called synchronously and its immediate return is compared to BREAK.",
+        "Returned promises are not awaited.",
+        "A promise resolving to BREAK is not the immediate BREAK value."
+      ],
+      "prohibited": [
+        "Async bodies are awaited."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+          "blob": "d9b3bc62e2e598fb633e0e21bb83964b2d602ece"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "test-selection",
+      "question": "What minimum checks would support a change to cal.iterate.forEach without pretending the source study ran them?",
+      "intent": "testing",
+      "repository": "thunderbird",
+      "scope": "calendar/base/modules/utils/calIteratorUtils.sys.mjs, calendar/providers/memory/CalMemoryCalendar.sys.mjs, calendar/base/src/CalAlarmService.sys.mjs",
+      "evidence": [
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "Check completion on exhaustion and BREAK, filtering through CONTINUE, and event-queue scheduling.",
+        "Check callers such as memory-calendar stream closure and alarm loading.",
+        "These are proposed focused checks; the study did not run runtime validation for this change."
+      ],
+      "prohibited": [
+        "The proposed tests have already passed."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/modules/utils/calIteratorUtils.sys.mjs",
+          "blob": "d9b3bc62e2e598fb633e0e21bb83964b2d602ece"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/providers/memory/CalMemoryCalendar.sys.mjs",
+          "blob": "9e35c68865bcf13461920bc7f1a70d4338adafe5"
+        },
+        {
+          "repository": "thunderbird",
+          "revision": "87d0159c7149a43253964c2cb6917939557dc799",
+          "path": "calendar/base/src/CalAlarmService.sys.mjs",
+          "blob": "48b52db184a844e4761c8ace56de6e11a22aa5be"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "freshness",
+      "question": "A newly published copy of the D203232 lesson is newer than the code-style guide. Does its date make its claim stronger?",
+      "intent": "stale-conflict",
+      "repository": "thunderbird",
+      "scope": "Thunderbird knowledge provenance and scoped guidance",
+      "evidence": [
+        {
+          "label": "old",
+          "ids": [
+            "fbe84fea47e86cdf1a2e6be2cec4be6bfb10c05a730fb0a5dfd04d3b7f0a705c"
+          ]
+        },
+        {
+          "label": "style",
+          "ids": [
+            "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+          ]
+        }
+      ],
+      "facts": [
+        "A publication date is not source acceptance or independent evidence.",
+        "The old imported claim remains provisional.",
+        "Prefer checked current source in the same scope while preserving unresolved history."
+      ],
+      "prohibited": [
+        "The newer publication date supersedes checked source."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/a48c194b-2b30-44fd-a7c9-093547f84d50.md",
+          "id": "fbe84fea47e86cdf1a2e6be2cec4be6bfb10c05a730fb0a5dfd04d3b7f0a705c"
+        },
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/08ac54d5-331d-4ab5-bc8f-6120318565a3.md",
+          "id": "6486155907fb25467133fa92585b578169923da8b9d2224cb8b04ed4ba690bdf"
+        }
+      ],
+      "limits": "Checked against retained public notes and pinned source. No Thunderbird runtime tests were run."
+    },
+    {
+      "id": "console-browser",
+      "question": "Where is the Commands headless review browser launched, and does it authenticate to Phabricator?",
+      "intent": "cross-repository",
+      "repository": "tb-tools",
+      "scope": "commands/graph/ai-browser.mjs; console web validation",
+      "evidence": [
+        {
+          "label": "console browser evidence",
+          "ids": [
+            "85fc1644a7e0f60c8e0856e2d122a5d0b677dab4198b1bbc0140b7778c760654"
+          ]
+        }
+      ],
+      "facts": [
+        "launchReviewBrowser in commands/graph/ai-browser.mjs launches headless Playwright Chromium.",
+        "The launch itself does not provide Phabricator authentication.",
+        "The historical note reports focused checks; this evaluation did not repeat browser validation."
+      ],
+      "prohibited": [
+        "Launching Chromium proves authentication."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/0b0a5467-1808-418d-9516-aa6ed2c22356.md",
+          "id": "85fc1644a7e0f60c8e0856e2d122a5d0b677dab4198b1bbc0140b7778c760654"
+        },
+        {
+          "repository": "tb-tools",
+          "revision": "e73e2bdb18e9703a88702c911643531a4eb376c8",
+          "path": "commands/graph/ai-browser.mjs",
+          "blob": "d6ad6d7e30527a4a896a10f9b894144dd54e68c8"
+        }
+      ],
+      "limits": "Launch implementation read locally. Historical tests and original private evidence were not independently rerun or accessed."
+    },
+    {
+      "id": "console-chrome-scope",
+      "question": "Can the Commands Playwright Chromium check prove a Thunderbird chrome dialog works?",
+      "intent": "cross-repository",
+      "repository": "tb-tools",
+      "scope": "commands/graph/ai-browser.mjs; console web validation",
+      "evidence": [
+        {
+          "label": "console browser evidence",
+          "ids": [
+            "85fc1644a7e0f60c8e0856e2d122a5d0b677dab4198b1bbc0140b7778c760654"
+          ]
+        }
+      ],
+      "facts": [
+        "Chromium checks can validate ordinary local web UI.",
+        "Thunderbird chrome UI needs a matching Thunderbird harness.",
+        "An unavailable iab does not prove every browser check is blocked."
+      ],
+      "prohibited": [
+        "A Chromium result proves Thunderbird chrome behavior."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/0b0a5467-1808-418d-9516-aa6ed2c22356.md",
+          "id": "85fc1644a7e0f60c8e0856e2d122a5d0b677dab4198b1bbc0140b7778c760654"
+        },
+        {
+          "repository": "tb-tools",
+          "revision": "e73e2bdb18e9703a88702c911643531a4eb376c8",
+          "path": "commands/graph/ai-browser.mjs",
+          "blob": "d6ad6d7e30527a4a896a10f9b894144dd54e68c8"
+        }
+      ],
+      "limits": "Launch implementation read locally. Historical tests and original private evidence were not independently rerun or accessed."
+    },
+    {
+      "id": "console-test-history",
+      "question": "The headless Playwright lesson says tests passed. Does that prove the current Commands revision passes?",
+      "intent": "cross-repository",
+      "repository": "tb-tools",
+      "scope": "commands/graph/ai-browser.mjs; console web validation",
+      "evidence": [
+        {
+          "label": "console browser evidence",
+          "ids": [
+            "85fc1644a7e0f60c8e0856e2d122a5d0b677dab4198b1bbc0140b7778c760654"
+          ]
+        }
+      ],
+      "facts": [
+        "The published lesson is provisional imported history.",
+        "The reported historical tests were not rerun for publication.",
+        "Current results need a focused run against the current revision."
+      ],
+      "prohibited": [
+        "Historical success proves the current code passes."
+      ],
+      "anchors": [
+        {
+          "repository": "knowledge",
+          "revision": "a1e73d5d03ed324d86f87d6a5d9d1d02eebcc5d5",
+          "path": "notes/0b0a5467-1808-418d-9516-aa6ed2c22356.md",
+          "id": "85fc1644a7e0f60c8e0856e2d122a5d0b677dab4198b1bbc0140b7778c760654"
+        },
+        {
+          "repository": "tb-tools",
+          "revision": "e73e2bdb18e9703a88702c911643531a4eb376c8",
+          "path": "commands/graph/ai-browser.mjs",
+          "blob": "d6ad6d7e30527a4a896a10f9b894144dd54e68c8"
+        }
+      ],
+      "limits": "Launch implementation read locally. Historical tests and original private evidence were not independently rerun or accessed."
+    },
+    {
+      "id": "print-dialog-reason",
+      "question": "Why was the multiple-message print path changed in Bug 2076335, and what happens on cancellation?",
+      "intent": "reason",
+      "repository": "thunderbird",
+      "scope": "mail/base/content/about3Pane.js",
+      "evidence": [
+        {
+          "label": "Original landed implementation",
+          "ids": [],
+          "anchors": [
+            {
+              "repository": "thunderbird",
+              "revision": "a062dc2b74baf4175510c62d9df095046382bb5a",
+              "path": "mail/base/content/about3Pane.js",
+              "blob": "7101ec8e1f7600ff569c523d9a2fc6eb558c5355",
+              "contains": [
+                "showPrintDialog(window, false, ps)",
+                "NS_ERROR_ABORT",
+                "throw ex;"
+              ]
+            }
+          ]
+        }
+      ],
+      "facts": [
+        "The patch awaits showPrintDialog before silent message printing.",
+        "It replaces the ps.isCancelled check with handling of NS_ERROR_ABORT.",
+        "Cancellation returns; other exceptions are rethrown.",
+        "The commit contains no added test file; do not claim runtime validation from the diff."
+      ],
+      "prohibited": [
+        "All print errors are swallowed.",
+        "The commit adds or proves passing tests."
+      ],
+      "anchors": [
+        {
+          "repository": "thunderbird",
+          "revision": "a062dc2b74baf4175510c62d9df095046382bb5a",
+          "path": "mail/base/content/about3Pane.js",
+          "blob": "7101ec8e1f7600ff569c523d9a2fc6eb558c5355",
+          "contains": [
+            "showPrintDialog(window, false, ps)",
+            "NS_ERROR_ABORT",
+            "throw ex;"
+          ]
+        }
+      ],
+      "limits": "Original commit message and patch read in local Git; pinned resulting source checked. No browser test or external review discussion was run. Retained public history ingestion may not yet contain this commit."
+    },
+    {
+      "id": "unified-folder-regression",
+      "question": "How did Bug 2041038 fix insertChildInOrder failing when parentRow is null in the unified folder view?",
+      "intent": "regression",
+      "repository": "thunderbird",
+      "scope": "mail/base/content/about3Pane.js",
+      "evidence": [
+        {
+          "label": "Original landed implementation",
+          "ids": [],
+          "anchors": [
+            {
+              "repository": "thunderbird",
+              "revision": "89f8669e7812b9435280e21dc60d1e5c899e2fc0",
+              "path": "mail/base/content/about3Pane.js",
+              "blob": "dcb350289191154d776fce6a06b79aaf5e41f1f8",
+              "contains": [
+                "if (!parentRow)",
+                "this._addSearchedFolderToSmartFolder(folderType, childFolder);",
+                "parentRow.insertChildInOrder"
+              ]
+            }
+          ]
+        }
+      ],
+      "facts": [
+        "After attempting to add the parent, parentRow can still be absent because the parent is hidden.",
+        "The patch places the child directly under the smart folder and returns.",
+        "It factors the existing smart-folder insertion into _addSearchedFolderToSmartFolder.",
+        "The source comment gives the hidden Gmail folder as an example, not the only possible provider."
+      ],
+      "prohibited": [
+        "All folders are moved to the top level.",
+        "Only Gmail can trigger the missing row."
+      ],
+      "anchors": [
+        {
+          "repository": "thunderbird",
+          "revision": "89f8669e7812b9435280e21dc60d1e5c899e2fc0",
+          "path": "mail/base/content/about3Pane.js",
+          "blob": "dcb350289191154d776fce6a06b79aaf5e41f1f8",
+          "contains": [
+            "if (!parentRow)",
+            "this._addSearchedFolderToSmartFolder(folderType, childFolder);",
+            "parentRow.insertChildInOrder"
+          ]
+        }
+      ],
+      "limits": "Original commit message and patch read in local Git; pinned resulting source checked. No browser test or external review discussion was run. Retained public history ingestion may not yet contain this commit."
+    }
+  ]
+}

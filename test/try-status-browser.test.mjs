@@ -287,3 +287,50 @@ test("fixup Pending Try status stays compact and Amend controls remain available
   assert.equal(amended, true);
   assert.equal(await page.locator(".commit-row.working-tree").count(), 0);
 });
+
+test("selected commit header keeps its height while integration status refreshes", async t => {
+  let server, browser;
+  t.after(async () => {
+    await browser?.close();
+    if (server) await new Promise(resolve => server.server.close(resolve));
+  });
+  const commit = { hash: "abc123", subject: "Patch", parents: [], refs: [], author: { name: "Test" } };
+  const graphs = [{ label: "comm", path: "/repo", commits: [commit], diffs: {} }];
+  server = await startInteractiveGraphServer({ graphs, token: "secret", tryMonitor: null,
+    html: buildGraphHtml({ graphs, interactive: { enabled: true, token: "secret" }, scriptSrcs: [], stylesheetHref: "/assets/graph-client/style.css" }) });
+  browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  await page.goto(server.url);
+  const result = await page.evaluate(async () => {
+    const { graphStates } = await import("/assets/graph-client/config.js");
+    const { renderCommitIntegrationStatus, loadSelectedCommitIntegrationStatus, clearIntegrationStatus } = await import("/assets/graph-client/diff-viewer.js");
+    const commit = graphStates[0].commits[0];
+    graphStates[0].selectedHash = commit.hash;
+    const container = globalThis.document.querySelector("#diff-0 .integration-status");
+    const header = container.closest(".diff-header");
+    const initial = { bug: { id: 123456, status: "NEW", summary: "A bug", url: "https://example.com/bug" },
+      phabricator: { revision: "D123456", statusName: "Needs Review", title: "A patch", url: "https://example.com/review" } };
+    renderCommitIntegrationStatus(container, initial, { index: 0, commit });
+    const before = { text: container.textContent, height: header.getBoundingClientRect().height };
+    const badge = container.firstElementChild;
+    let resolveFetch;
+    globalThis.fetch = () => new Promise(resolve => { resolveFetch = resolve; });
+    const refresh = loadSelectedCommitIntegrationStatus(0, commit, container);
+    const during = { text: container.textContent, height: header.getBoundingClientRect().height, sameBadge: container.firstElementChild === badge };
+    resolveFetch({ ok: true, json: async () => ({ ...initial, phabricator: { ...initial.phabricator, statusName: "Accepted" } }) });
+    await refresh;
+    const updated = container.textContent;
+    clearIntegrationStatus(container);
+    const firstLoad = loadSelectedCommitIntegrationStatus(0, commit, container);
+    const loading = container.textContent;
+    resolveFetch({ ok: true, json: async () => initial });
+    await firstLoad;
+    return { before, during, updated, loading };
+  });
+  assert.ok(result.before.height > 0, "The commit header should have a visible height.");
+  assert.equal(result.during.text, result.before.text, "A refresh should keep the current status text visible.");
+  assert.equal(result.during.height, result.before.height, "A refresh should keep the commit header height unchanged.");
+  assert.equal(result.during.sameBadge, true, "A pending refresh should retain the existing badge nodes.");
+  assert.match(result.updated, /Accepted/, "A completed refresh should show the new review status.");
+  assert.match(result.loading, /Loading linked/, "An empty status container should show the initial loading message.");
+});

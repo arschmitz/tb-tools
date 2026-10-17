@@ -1,5 +1,6 @@
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { run } from "../../lib/utils.mjs";
 import { getGraphRustUpstreamStatus } from "./actions.mjs";
 
@@ -7,9 +8,17 @@ import { getGraphRustUpstreamStatus } from "./actions.mjs";
 export async function findRustDependencyFailure(evidence) {
   for (const failure of evidence.failures || []) {
     for (const log of failure.logs || []) {
-      const text = log.fullLogPath ? await readFile(log.fullLogPath, "utf8") : log.text || "";
-      if (/Rust dependencies are out of sync|vendored-rust-check[^\n]*Error 88/i.test(text)) {
-        return { jobId: failure.id, url: log.url, signature: "Rust dependencies are out of sync" };
+      if (log.name && !["errorsummary_json", "live_backing_log"].includes(log.name)) continue;
+      const input = log.fullLogPath ? createReadStream(log.fullLogPath) : null;
+      const lines = input ? createInterface({ input, crlfDelay: Infinity }) : (log.text || "").split("\n");
+      try {
+        for await (const line of lines) {
+          if (/Rust dependencies are out of sync|vendored-rust-check[^\n]*Error 88/i.test(line)) {
+            return { jobId: failure.id, url: log.url, signature: "Rust dependencies are out of sync" };
+          }
+        }
+      } finally {
+        if (input) { lines.close(); input.destroy(); }
       }
     }
   }
@@ -21,7 +30,9 @@ export async function checkRustOriginUpdate(state, { runCommand = run, getStatus
   const firefoxGraph = { path: state.geckoPath || path.dirname(state.path) };
   const git = (cwd, args) => runCommand({ cmd: "git", args, cwd, capture: true, silent: true, timeoutMs: 30000 });
   // Update remote refs only. Never change the user's branch or working files.
-  await git(state.path, ["fetch", "--no-tags", "--no-write-fetch-head", "origin", "+refs/heads/main:refs/remotes/origin/main"]);
+  for (const cwd of [state.path, firefoxGraph.path]) {
+    await git(cwd, ["fetch", "--no-tags", "--no-write-fetch-head", "origin", "+refs/heads/main:refs/remotes/origin/main"]);
+  }
   const status = await getStatus({ commGraph, firefoxGraph, runCommand });
   const newCommCommits = Number((await git(state.path, ["rev-list", "--count", `${state.sourceHash}..${status.commLocalHash}`])).trim());
   return { ...status, available: status.upToDate && (newCommCommits > 0 || Boolean(state.geckoHash && state.geckoHash !== status.firefoxRemoteHash)) };

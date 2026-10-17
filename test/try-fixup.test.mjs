@@ -9,7 +9,9 @@ import { run } from "../lib/utils.mjs";
 import { createTryMonitorStore, mergeMonitoredTryRuns } from "../commands/graph/try-monitor-store.mjs";
 import { getGraphTryRunsForCommit } from "../commands/graph/data.mjs";
 import { squashTryFixup, resumeTryFixupSquash } from "../commands/graph/try-fixup.mjs";
+import { findTryFixupMonitor } from "../commands/graph/try-fixup-identity.mjs";
 import { createTryRepairer, refreshTryRepairSource, validateTryRepairFiles } from "../commands/graph/try-repair.mjs";
+import { createTryMonitor } from "../commands/graph/try-monitor.mjs";
 const exec = promisify(execFile);
 
 test("repair file validation distinguishes malformed reports from valid no-commit results", () => {
@@ -59,6 +61,81 @@ async function fixture(t) {
   store.save(state);
   return { git, root, store, state, parent, fixup, commit, directory };
 }
+
+test("Amend accepts an ordinary fixup without inventing a Try result", async t => {
+  const f = await fixture(t);
+  const store = createTryMonitorStore(path.join(f.directory, "local-store"));
+  const message = await f.git("show", "-s", "--format=%B", f.parent);
+  const result = await squashTryFixup({ graph: { path: f.root }, hash: f.fixup, store });
+  assert.equal(await f.git("show", "-s", "--format=%B", result.hash), message,
+    "The amended target should keep its original message");
+  assert.equal(await f.git("show", `${result.hash}:feature.txt`), "fixed",
+    "The amended target should contain the fixup changes");
+  assert.equal(await f.git("rev-parse", "patch-alias"), result.hash,
+    "The target alias should follow the amended commit");
+  assert.equal(await f.git("show", "child-a:a.txt"), "a",
+    "The child branch should retain its own changes");
+  assert.deepEqual(store.list()[0].attempts, [], "A local fixup should have no Try attempts");
+  assert.equal(store.list()[0].phase, "squashed", "Local recovery should finish without starting Try work");
+});
+
+test("Amend rejects an ordinary fixup with a different direct parent", async t => {
+  const f = await fixture(t);
+  const store = createTryMonitorStore(path.join(f.directory, "local-store"));
+  await f.git("switch", "child-b");
+  await f.git("cherry-pick", f.fixup);
+  const hash = await f.git("rev-parse", "HEAD");
+  await assert.rejects(squashTryFixup({ graph: { path: f.root }, hash, store }), /matching target/,
+    "A fixup with a different parent should be rejected");
+  assert.equal(await f.git("rev-parse", "HEAD"), hash, "Rejected Amend should preserve HEAD");
+});
+
+test("the monitor resumes a local Amend with no Try attempts", async t => {
+  const f = await fixture(t);
+  const store = createTryMonitorStore(path.join(f.directory, "local-store"));
+  await assert.rejects(squashTryFixup({ graph: { path: f.root }, hash: f.fixup, store,
+    transaction: async () => { throw new Error("interrupted transaction"); } }), /interrupted transaction/,
+  "An interrupted Amend should keep a recovery plan");
+  const monitor = createTryMonitor({ graphs: [{ path: f.root }], store, aiEnabled: false,
+    treeherder: {}, runCommand: run });
+  t.after(() => monitor.stop());
+  await monitor.tick();
+  assert.equal(store.list()[0].phase, "squashed", "The scheduler should resume local Amend without a Try attempt");
+  assert.equal(await f.git("show", "patch:feature.txt"), "fixed", "Recovery should apply the fixup to its target");
+});
+
+test("Amend does not treat an orphan Try repair as an ordinary fixup", async t => {
+  const f = await fixture(t);
+  const store = createTryMonitorStore(path.join(f.directory, "local-store"));
+  await f.git("switch", "tb-try-fixup/test");
+  await f.git("commit", "--amend", "-m", "fixup! Bug 123 - Feature\n\nTb-Try-Monitor: missing");
+  const hash = await f.git("rev-parse", "HEAD");
+  await assert.rejects(squashTryFixup({ graph: { path: f.root }, hash, store }), /no matching repair record/,
+    "An orphan Try fixup should retain the requirement for a matching repair record");
+  assert.equal(await f.git("rev-parse", "HEAD"), hash, "Rejected Amend should preserve the orphan fixup");
+});
+
+test("Amend recognizes a rebased fixup by stable ID and rejects changed repair content", async t => {
+  const f = await fixture(t);
+  await f.git("switch", "-c", "rebased", `${f.parent}^`);
+  await f.commit("extra.txt", "extra\n");
+  await f.git("cherry-pick", f.parent);
+  const parent = await f.git("rev-parse", "HEAD");
+  await f.git("cherry-pick", f.fixup);
+  const fixup = await f.git("rev-parse", "HEAD");
+  assert.notEqual(fixup, f.fixup);
+  const options = { graph: { path: f.root }, monitors: f.store.list() };
+  assert.equal((await findTryFixupMonitor({ ...options, hash: fixup })).id, f.state.id);
+  const result = await squashTryFixup({ graph: options.graph, hash: fixup, store: f.store });
+  assert.equal(await f.git("show", `${result.hash}:feature.txt`), "fixed");
+  assert.equal(await f.git("show", `${result.hash}:extra.txt`), "extra");
+  assert.equal(await f.git("show", "-s", "--format=%B", result.hash), await f.git("show", "-s", "--format=%B", parent));
+  await f.git("switch", "--detach", fixup);
+  await writeFile(path.join(f.root, "feature.txt"), "different repair\n");
+  await f.git("add", "feature.txt");
+  await f.git("commit", "--amend", "--no-edit");
+  assert.equal(await findTryFixupMonitor({ ...options, hash: await f.git("rev-parse", "HEAD") }), undefined);
+});
 
 test("Amend folds in only fixup changes and preserves forks, aliases, and the parent message", async t => {
   const { git, root, store, fixup, parent, state } = await fixture(t);
@@ -180,6 +257,48 @@ test("restart recovers an interrupted Amend transaction without losing descendan
   assert.equal(await git("rev-parse", "child-b^"), state.squashedHash);
   assert.equal(await git("branch", "--show-current"), "patch");
   assert.equal(await git("show", "-s", "--format=%B", "patch"), await git("show", "-s", "--format=%B", parent));
+});
+
+test("Amend keeps repair validation files and attaches Try records after recovery", async t => {
+  const f = await fixture(t);
+  const workspace = path.join(f.directory, "repair");
+  await f.git("worktree", "add", "--detach", workspace, f.fixup);
+  const log = path.join(workspace, "artifacts", "repair-validation", "test.log");
+  await mkdir(path.dirname(log), { recursive: true });
+  await writeFile(log, "validation evidence\n");
+  f.state.workspace = workspace;
+  f.state.attempts = [{ id: "fixed", hash: f.fixup, status: "passed", url: "https://example.com/fixed", createdAt: new Date(2000).toISOString() }];
+  f.store.save(f.state);
+  await assert.rejects(squashTryFixup({ graph: { path: f.root }, hash: f.fixup, store: f.store,
+    transaction: async () => { throw new Error("interrupted"); } }), /interrupted/);
+  const state = f.store.read("test");
+  await resumeTryFixupSquash({ state, store: f.store });
+  assert.equal((await exec("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim(), state.sourceHash);
+  assert.equal(await readFile(log, "utf8"), "validation evidence\n");
+  assert.equal(state.phase, "passed");
+  const graph = { path: f.root };
+  const history = mergeMonitoredTryRuns(graph, { runs: [] }, f.store.list());
+  const runs = await getGraphTryRunsForCommit({ graph, commit: { hash: state.sourceHash, subject: state.subject }, store: history });
+  assert.equal(runs[0].id, "fixed");
+  assert.equal(runs[0].testedHash, f.fixup);
+});
+
+test("Amend rejects repair source changes before moving branches", async t => {
+  for (const file of ["feature.txt", "new-source.txt", "artifacts/other.log", "artifacts/repair-validation/staged.log"]) {
+    const f = await fixture(t);
+    const workspace = path.join(f.directory, "repair");
+    await f.git("worktree", "add", "--detach", workspace, f.fixup);
+    await mkdir(path.dirname(path.join(workspace, file)), { recursive: true });
+    await writeFile(path.join(workspace, file), "keep this change\n");
+    if (file.endsWith("staged.log")) await exec("git", ["add", file], { cwd: workspace });
+    f.state.workspace = workspace;
+    f.store.save(f.state);
+    const refs = await f.git("show-ref");
+    await assert.rejects(squashTryFixup({ graph: { path: f.root }, hash: f.fixup, store: f.store }), /saved repair checkout changed/);
+    assert.equal(await f.git("show-ref"), refs);
+    assert.equal(await f.git("rev-parse", "patch"), f.parent);
+    assert.equal(await readFile(path.join(workspace, file), "utf8"), "keep this change\n");
+  }
 });
 
 test("repair creates one detailed fixup, recovers its receipt, then amends it and resubmits", async t => {
@@ -558,4 +677,38 @@ test("competing publication rolls back its branch when patch ownership is alread
   await assert.rejects(updateRefs(f.root, transaction(second)));
   assert.equal(await f.git("rev-parse", first), f.fixup);
   await assert.rejects(f.git("rev-parse", "--verify", second));
+});
+
+for (const changed of [false, true]) test(`blocked Try checks Gecko-only changes without dropping its comm fixup (${changed})`, async t => {
+  const f = await fixture(t);
+  Object.assign(f.state, { geckoPath: "/gecko", geckoHash: "old-gecko", phase: "build-blocked",
+    workspace: "/old/workspace", localBuildHash: f.parent, validationHash: "old-validation",
+    attempts: [{ id: "old", hash: f.fixup, status: "build-blocked", buildValidationBlocked: true }] });
+  f.store.save(f.state);
+  const repairer = createTryRepairer({ store: f.store, runCommand: async options => {
+    if (options.cwd === "/gecko") return changed ? "new-gecko" : "old-gecko";
+    return (await exec(options.cmd, options.args, { cwd: options.cwd })).stdout;
+  } });
+  assert.equal(await repairer.resumeBlocked(f.state), changed, "Blocked recovery should require a changed source revision.");
+  assert.equal(f.state.fixupHash, f.fixup, "A Gecko-only change should preserve the comm fixup.");
+  assert.equal(f.state.attempts[0].buildValidationBlocked, true, "Recovery should preserve the old failed build verdict.");
+  assert.equal(f.state.phase, changed ? "ready-to-submit" : "build-blocked", "Only changed source should resume submission.");
+  if (changed) {
+    assert.equal(f.state.options.artifact, false, "A build-blocked retry should request full builds.");
+    assert.equal(f.state.workspace, "", "Changed Gecko source should get a new workspace.");
+    assert.equal(f.state.localBuildHash, undefined, "Changed Gecko source should clear the old local build receipt.");
+    assert.equal(f.state.sourceUpdates[0].geckoHash, "old-gecko", "Source history should retain the tested Gecko revision.");
+  }
+});
+
+test("blocked source refresh resumes after a restart between its state saves", async t => {
+  const f = await fixture(t);
+  Object.assign(f.state, { phase: "build-blocked", geckoHash: "new-gecko",
+    blockedBuildRecovery: { sourceHash: f.parent, geckoHash: "old-gecko" },
+    attempts: [{ id: "old", status: "build-blocked", buildValidationBlocked: true }] });
+  f.store.save(f.state);
+  const repairer = createTryRepairer({ store: f.store });
+  assert.equal(await repairer.resumeBlocked(f.state), true, "A saved source refresh should resume submission after restart.");
+  assert.equal(f.state.phase, "ready-to-submit", "A recovered source refresh should advance to submission.");
+  assert.equal(f.state.options.artifact, false, "Recovery should still require full builds.");
 });

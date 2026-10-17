@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
@@ -12,14 +13,87 @@ import {
   getGraphPatchReviewCodexThreadName,
   getGraphPatchReviewContext,
   getGraphPatchReviewPrompt,
+  importGraphPatchReviewConflictStack,
+  importGraphPatchReviewSinglePatch,
   prepareGraphPatchReviewCodexPrompt,
   refreshGraphPatchReviewContext,
   prepareGraphPatchReviewSession,
   retryGraphPatchReviewSession,
+  serializeGraphPatchReviewSession,
   steerGraphPatchReviewSession,
   submitGraphPatchReview,
 } from "../commands/graph/patch-review.mjs";
 import { formatGraphPatchUpdateMemory } from "../commands/graph/patch-update-memory.mjs";
+import { createPatchSessionStore } from "../commands/graph/patch-session-store.mjs";
+
+test("The single-patch choice imports only that revision in the configured Review checkout", async t => {
+  const session = createGraphPatchReviewSession({ graphs: getReviewGraphs(), revision: "D123456", aiEnabled: false });
+  const calls = [];
+  const diff = "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n";
+  t.after(async () => { if (session.rawPatchPath) await rm(path.dirname(session.rawPatchPath), { recursive: true, force: true }); });
+  const result = await importGraphPatchReviewSinglePatch({ session, runCommand: async command => {
+    calls.push(command);
+    if (command.cmd === "moz-phab") {
+      assert.deepEqual(command.args, ["patch", "D123456", "--raw", "--skip-dependencies", "--yes"],
+        "The choice should fetch only the selected patch.");
+      await writeFile(command.env.TB_TOOLS_MOZPHAB_REVIEW_EXPORT, JSON.stringify([{
+        diff, body: "Bug 123 - Patch\n\nDifferential Revision: https://example.invalid/D123456\n",
+      }]));
+      return diff;
+    }
+    if (command.args[0] === "rev-parse") return "a".repeat(40);
+    return "";
+  } });
+  assert.equal(result.currentHash, "a".repeat(40), "The importer should return the selected commit.");
+  assert.ok(calls.every(command => command.cwd === "/repo/review/comm"),
+    "The single-patch choice should use only the configured Review checkout.");
+  assert.ok(calls.some(command => command.args[0] === "switch" && command.args[1] === "--detach"),
+    "The importer should detach before importing without moving existing branches.");
+  assert.equal(serializeGraphPatchReviewSession(session).singlePatchOnly, true,
+    "The session should expose the omitted-parent scope.");
+  assert.match(getGraphPatchReviewPrompt({ ...session, reviewDiscussion: { available: false } }), /Parent patches were omitted/,
+    "The AI review should account for omitted parents.");
+  const savedDirectory = await mkdtemp(path.join(os.tmpdir(), "single-review-store-"));
+  t.after(() => rm(savedDirectory, { recursive: true, force: true }));
+  const store = createPatchSessionStore({ directory: savedDirectory });
+  Object.assign(session, { aiEnabled: true, status: "review", currentHash: result.currentHash });
+  store.save("review", session);
+  assert.equal(createPatchSessionStore({ directory: savedDirectory }).load("review", session).singlePatchOnly, true,
+    "Restart should preserve the explicit single-patch choice.");
+  assert.equal(await readFile(session.rawPatchPath, "utf8"), diff,
+    "The review should use the freshly fetched exact patch.");
+  await assert.rejects(importGraphPatchReviewSinglePatch({ session: { ...session,
+    graph: { ...session.graph, checkout: "working" } }, runCommand: async () => assert.fail("The import should reject Working before running commands.") }),
+    /configured Review comm checkout/, "A single-patch choice should reject the Working checkout.");
+});
+
+test("Review conflict imports scope the base fallback and report command details", async () => {
+  for (const reviewMainHash of ["a".repeat(40), ""]) {
+    const session = { graph: { checkout: "review", repository: "comm", path: "/review/comm" },
+      revision: "D123456", reviewMainHash, output: "Previous failure\n" };
+    await assert.rejects(importGraphPatchReviewConflictStack({ session, runCommand: async command => {
+      assert.equal(command.env.TB_TOOLS_MOZPHAB_REVIEW_MAIN, reviewMainHash,
+        "The fallback should receive the pinned baseline when available.");
+      command.onStderr("Unable to find a commit to apply D123456 at.\n");
+      throw new Error("moz-phab exited with 1");
+    } }), error => {
+      assert.match(error.message, /Unable to find a commit to apply D123456 at/,
+        "The error should include the current import failure.");
+      assert.doesNotMatch(error.message, /Previous failure/,
+        "The error should exclude output from earlier commands.");
+      return true;
+    });
+  }
+  await assert.rejects(importGraphPatchReviewConflictStack({
+    session: { graph: { checkout: "review", repository: "comm", path: "/review/comm" }, revision: "D123456" },
+    runCommand: async () => { throw new Error("Cannot launch moz-phab"); },
+  }), /Cannot launch moz-phab/, "The import should preserve errors without command output.");
+  const error = Object.assign(new Error("Cancelled"), { code: "ABORT_ERR" });
+  await assert.rejects(importGraphPatchReviewConflictStack({
+    session: { graph: { checkout: "review", repository: "comm", path: "/review/comm" }, revision: "D123456" },
+    runCommand: async () => { throw error; },
+  }), value => value === error, "The import should preserve cancellation.");
+});
 
 test("Review removes repeated history fields while preserving distinct evidence and discussion", () => {
   const history = formatGraphPatchUpdateMemory({ event: "Assessed", session: {
@@ -117,6 +191,41 @@ function getReviewGraphs() {
     },
   ];
 }
+
+test("patch apply conflicts pause before building and expose a rebase request", async () => {
+  const session = createGraphPatchReviewSession({ graphs: getReviewGraphs(), revision: "D123456", aiEnabled: true });
+  await assert.rejects(prepareGraphPatchReviewSession({ session,
+    getSnapshot: async () => assert.fail("No snapshot before applying the stack"),
+    prepareBuild: async () => assert.fail("No build before conflicts are resolved"),
+    makeTempDirectory: async () => "/tmp/review-conflict-test",
+    writeRawPatch: async () => {},
+    runCommand: async command => {
+      if (command.cmd === "moz-phab" && command.args.includes("--raw")) return "diff --git a/a.js b/a.js\n@@ -1 +1 @@\n-a\n+b\n";
+      if (command.cmd === "moz-phab") throw new Error("Failed to rebase the patches; conflict in a.js");
+      return "";
+    } }), /Could not apply the patch stack/);
+  assert.equal(session.status, "paused");
+  assert.equal(session.applyConflict, true);
+  assert.match(session.rebaseRequestMessage, /Please rebase D123456 onto the latest main/);
+});
+
+test("review refuses a patch left on an old base before building", async () => {
+  const session = createGraphPatchReviewSession({ graphs: getReviewGraphs(), revision: "D123456", aiEnabled: false });
+  session.reviewMainHash = "f".repeat(40);
+  await assert.rejects(prepareGraphPatchReviewSession({ session,
+    getSnapshot: async () => assert.fail("Do not review an old base"),
+    prepareBuild: async () => assert.fail("Do not build an old base"),
+    makeTempDirectory: async () => "/tmp/review-conflict-test", writeRawPatch: async () => {},
+    runCommand: async command => {
+      if (command.cmd === "moz-phab" && command.args.includes("--raw")) return "diff --git a/a.js b/a.js\n@@ -1 +1 @@\n-a\n+b\n";
+      if (command.args.includes("--is-ancestor")) throw new Error("Not an ancestor");
+      if (command.args[0] === "rev-parse") return "e".repeat(40);
+      if (command.args[0] === "log") return "Bug 123456 - Example\n\nDifferential Revision: https://phabricator.services.mozilla.com/D123456";
+      return "";
+    } }), /older base/);
+  assert.equal(session.status, "paused");
+  assert.equal(session.applyConflict, true);
+});
 
 test("patch review pulls an exact raw patch into the configured Review clone when AI is disabled", async () => {
   const calls = [];
@@ -270,73 +379,30 @@ test("patch review cancels an in-progress Review checkout pull", () => {
   assert.equal(session.message, "Review checkout session cancelled.");
 });
 
-test("patch review falls back to the selected patch after parent patches fail", async () => {
+test("patch review stops when the parent stack fails instead of dropping dependencies", async () => {
   const calls = [];
-  const session = createGraphPatchReviewSession({
-    graphs: getReviewGraphs(),
-    revision: "123456",
-    aiEnabled: false,
-  });
-
-  await prepareGraphPatchReviewSession({
+  const session = createGraphPatchReviewSession({ graphs: getReviewGraphs(), revision: "D123456", aiEnabled: false });
+  await assert.rejects(prepareGraphPatchReviewSession({
     session,
-    getSnapshot: async () => ({ branch: "D123456" }),
-    makeTempDirectory: async () => "/tmp/tb-tools-review-fallback",
+    getSnapshot: async () => assert.fail("Do not review an incomplete stack"),
+    makeTempDirectory: async () => "/tmp/tb-tools-review-failure",
     writeRawPatch: async () => {},
-    runCommand: async ({ args, cmd, cwd }) => {
-      calls.push({ args, cmd, cwd });
-
-      if (cmd === "git" && args[0] === "status") {
-        return "";
+    prepareBuild: async () => assert.fail("Do not build an incomplete stack"),
+    runCommand: async (command) => {
+      calls.push(command);
+      if (command.cmd === "moz-phab") {
+        assert.equal(command.env.TB_TOOLS_MOZPHAB_REVIEW, "1");
+        if (command.args.includes("--raw")) return "diff --git a/a b/a\n";
+        throw new Error("parent patch could not apply");
       }
-      if (cmd === "moz-phab" && args.includes("--raw")) {
-        return "diff --git a/mail/example.mjs b/mail/example.mjs\n@@ -1 +1 @@\n-old\n+new\n";
-      }
-      if (cmd === "moz-phab" && !args.includes("--skip-dependencies")) {
-        const error = new Error("parent patch could not apply");
-
-        error.stderr = "parent patch could not apply\n";
-        throw error;
-      }
-      if (cmd === "git" && args[0] === "rev-parse") {
-        return "abcdef123456\n";
-      }
-      if (cmd === "git" && args[0] === "log") {
-        return "Bug 123456 - Example\n\nDifferential Revision: https://phabricator.services.mozilla.com/D123456\n";
-      }
-      if (cmd === "git" && args[0] === "branch") {
-        return "phab-D123456\n";
-      }
-
       return "";
     },
-  });
-
-  assert.equal(session.status, "complete");
-  assert.deepEqual(calls.map(({ args }) => args), [
-    ["rebase", "--abort"],
-    ["cherry-pick", "--abort"],
-    ["merge", "--abort"],
-    ["am", "--abort"],
-    ["reset", "--hard"],
-    ["clean", "-ffdx"],
-    ["switch", "main"],
-    ["patch", "D123456", "--raw", "--skip-dependencies", "--yes"],
-    ["patch", "D123456", "--apply-to", "here", "--yes"],
-    ["rebase", "--abort"],
-    ["cherry-pick", "--abort"],
-    ["merge", "--abort"],
-    ["am", "--abort"],
-    ["reset", "--hard"],
-    ["clean", "-ffdx"],
-    ["switch", "main"],
-    ["patch", "D123456", "--skip-dependencies", "--apply-to", "here", "--yes"],
-    ["rev-parse", "HEAD"],
-    ["log", "-1", "--format=%B"],
-    ["branch", "--show-current"],
-    ["log", "--reverse", "--format=%H%x09%s", "main..HEAD"],
-  ]);
-  assert.match(session.output, /Parent patch stack could not be applied/);
+  }), /Could not apply the patch stack.*parent patch could not apply/);
+  assert.equal(session.status, "error");
+  assert.equal(session.currentHash, "");
+  const patches = calls.filter(command => command.cmd === "moz-phab" && !command.args.includes("--raw"));
+  assert.equal(patches.length, 1);
+  assert.ok(!patches[0].args.includes("--skip-dependencies"));
 });
 
 test("patch review accepts moz-phab's branch identity when commits omit Differential Revision", async () => {
@@ -798,9 +864,10 @@ test("patch review serializes a context version so a later discussion response r
   assert.equal(context.reviewContextVersion, 2);
 });
 
-test("capacity retry sends the full review prompt in the saved conversation", async () => {
+for (const retryKind of ["retry", "resume-guidance"]) test(`${retryKind} after capacity failure sends the full review prompt in the saved conversation`, async () => {
   let received;
   const session = {
+    aiEnabled: true,
     activity: [],
     codexSessionId: "saved-thread",
     codexAgent: { threadId: "saved-thread", client: { startTurn: async (args) => {
@@ -819,14 +886,27 @@ test("capacity retry sends the full review prompt in the saved conversation", as
     reviewDiscussion: { comments: [], inlineComments: [] },
     status: "error",
     error: "Selected model is at capacity. Please try a different model.",
+    restored: true,
+    interrupted: true,
     workingTreeDiffVersion: 0,
   };
-  retryGraphPatchReviewSession({ session, runCommand: async () => "review-head\n" });
-  assert.equal(session.status, "reviewing");
+  if (retryKind === "retry") retryGraphPatchReviewSession({ session, runCommand: async () => "review-head\n" });
+  else await steerGraphPatchReviewSession({ session, instruction: "Resume the review and preserve previous evidence.",
+    runCommand: async () => "review-head\n" });
+  assert.equal(session.status, "reviewing", "A retry should restart the review.");
+  assert.equal(session.error, "", "A retry should clear the previous capacity error.");
+  assert.equal(session.restored, false, "An active retry should clear the saved-review state.");
+  assert.equal(session.interrupted, false, "An active retry should clear the interrupted-review state.");
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(received.threadId, "saved-thread");
   assert.equal(received.task, "review");
+  assert.equal(received.knowledgeRequest.taskType, "review", "The retry should retain the review task type");
+  assert.match(received.knowledgeRequest.question, /Add a calendar row action/, "The retry should retrieve for the actual patch subject");
+  assert.doesNotMatch(received.knowledgeRequest.question, /Return JSON/, "The retry should omit workflow response instructions from retrieval");
+  assert.match(received.knowledgeQuery, /Perform the full Thunderbird Phabricator patch review for D330263/, "The retry should retain the complete task contract");
   assert.match(received.prompt, /Perform the full Thunderbird Phabricator patch review for D330263/);
+  if (retryKind === "resume-guidance") assert.match(received.prompt, /Resume the review and preserve previous evidence/,
+    "A guidance retry should preserve the reviewer's instruction.");
   assert.equal(session.status, "review");
   assert.equal(session.error, "");
   assert.equal(session.workingTreeDiffVersion, 1);

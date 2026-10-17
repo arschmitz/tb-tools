@@ -45,7 +45,7 @@ const argv = _unknown || [];
 
 const commands = {
   knowledge: {
-    description: "Use shared project knowledge: status, search, show, record, lesson, catalog, rebuild, import, maintain, publish, repair, sync, or index. See docs/knowledge.md.",
+    description: "Use shared project knowledge: status, search, show, record, lesson, catalog, rebuild, import, maintain, publish, repair, sync, index, follow-up, history-complete, gaps, gap-review, or gap-work. See docs/knowledge.md.",
     run: () => knowledgeCommand(argv),
   },
   "version": {
@@ -153,7 +153,7 @@ const commands = {
     },
   },
   desktop: {
-    description: "Starts the Electron desktop app in its own process.",
+    description: "Starts Thunderbird Development Dashboard in its own process.",
     header: "Desktop Options",
     options: [
       { name: "comm", type: String, description: "Thunderbird comm checkout. Defaults to the current checkout, saved checkout, or folder picker." },
@@ -164,7 +164,7 @@ const commands = {
     },
   },
   console: {
-    description: "Starts the interactive Thunderbird Desktop Console with a Phabricator/Bugzilla dashboard, live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, tracked try runs, update/rebase controls, and build/run output.",
+    description: "Starts the interactive Thunderbird Development Dashboard with a Phabricator/Bugzilla dashboard, live comm and Firefox checkout graphs, server-loaded diffs, origin/main freshness, Rust dependency remote-build warnings, checkout/rebase/interactive-rebase/prune/amend/submit/land actions, tracked try runs, update/rebase controls, and build/run output.",
     header: "Console Options",
     options: [
       { name: "open", description: "Open the console in a browser", defaultValue: "true" },
