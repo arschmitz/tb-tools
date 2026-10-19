@@ -8,6 +8,7 @@ import { createGraphCodexAppServer } from "./codex-app-server.mjs";
 import { registerConsoleBrowserAccess } from "./ai-browser-access.mjs";
 import { createReviewHandledStore, applyHandledReviews } from "./review-handled.mjs";
 import { summarizeBackgroundJob } from "./background-jobs.mjs";
+import { createTaskDismissalStore } from "./task-dismissals.mjs";
 import { createTryMonitorStore } from "./try-monitor-store.mjs";
 import { createImplementationManager } from "./implement.mjs";
 import { prepareDashboardPatchAction } from "./dashboard-actions.mjs";
@@ -355,6 +356,7 @@ export async function startInteractiveGraphServer({
   syncReviewCheckout = syncReviewCheckoutFromWorking,
   serverFactory = createServer,
   patchSessionDirectory,
+  taskDismissalDirectory,
   taskWorktreeDirectory,
   prepareTaskBuild = runCommand === run,
   reviewHandledPath,
@@ -445,8 +447,11 @@ export async function startInteractiveGraphServer({
       getRevisionReview: phabWebSession.getReview?.bind(phabWebSession), runCommand }).catch(() => {});
   }
   const patchSessionStore = createPatchSessionStore({ directory: patchSessionDirectory });
+  const taskDismissals = createTaskDismissalStore({ directory: taskDismissalDirectory ??
+    (patchSessionDirectory ? path.join(patchSessionDirectory, "dismissed-tasks") : undefined) });
   let patchSessionsFrozen = false;
   if (taskWorktrees) for (const { kind, session } of patchSessionStore.list(serverGraphs, { includeFinished: true })) {
+    if (taskDismissals.has(kind, session.id)) session.dismissed = true;
     session.aiEnabled = isGraphAiEnabled(appConfig);
     session.codexCommand = String(appConfig?.ai?.command || "");
     if (kind === "update") session.persistPatchState = () => patchSessionStore.save("update", session);
@@ -1740,13 +1745,26 @@ export async function startInteractiveGraphServer({
       if (request.method === "POST" && url.pathname === "/api/background-jobs/dismiss") {
         const body = await readRequestJson(request);
         validateToken(body.token, token);
+        // Save the dismissal even if only a stale browser still knows this task.
+        taskDismissals.dismiss(body.kind, body.id);
         const sessions = body.kind === "review" ? patchReviewSessions : body.kind === "update" ? patchUpdateSessions : null;
         const session = sessions?.get(body.id);
-        if (!session) throw Object.assign(new Error("Unknown saved task."), { statusCode: 404 });
-        session.dismissed = true;
-        patchSessionStore.save(body.kind, session);
+        if (session) {
+          session.dismissed = true;
+          patchSessionStore.save(body.kind, session);
+        }
         sendJson(response, 200, { ok: true });
         return;
+      }
+      const trayTaskMatch = url.pathname.match(/^\/api\/(review|patch-update|implement|submit|rebase)\/([^/]+)$/);
+      if (request.method === "GET" && trayTaskMatch) {
+        const kind = trayTaskMatch[1] === "patch-update" ? "update" : trayTaskMatch[1];
+        const id = decodeURIComponent(trayTaskMatch[2]);
+        if (taskDismissals.has(kind, id)) {
+          validateToken(url.searchParams.get("token"), token);
+          sendJson(response, 200, { ok: true, id, dismissed: true });
+          return;
+        }
       }
       const cancelMach = /^\/api\/mach-action\/[^/]+\/cancel$/.test(url.pathname);
       if (request.method === "POST" &&
@@ -1818,7 +1836,9 @@ export async function startInteractiveGraphServer({
           });
         }
         sendJson(response, 200, { ok: true, aiEnabled: isGraphAiEnabled(appConfig),
-          tryAiPaused: backgroundTryStore.isAutomationPaused(), jobs: jobs.filter(Boolean) });
+          tryAiPaused: backgroundTryStore.isAutomationPaused(),
+          dismissedTasks: taskDismissals.list(),
+          jobs: jobs.filter(job => job && !taskDismissals.has(job.kind.toLowerCase(), job.id.slice(job.kind.length + 1))) });
         return;
       }
       const implementTaskMatch = url.pathname.match(/^\/api\/implement\/([^/]+)$/);

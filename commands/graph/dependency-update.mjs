@@ -1,17 +1,31 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { run } from "../../lib/utils.mjs";
 import { getGraphRustUpstreamStatus } from "./actions.mjs";
+import { getConsoleBuildEnvironment } from "./build.mjs";
 import { runLoggedBuild } from "./daily-build.mjs";
 import { ensurePairedWorktrees, writeWorktreeBuildConfig } from "./worktrees.mjs";
+
+async function hasInstalledBuild({ commSource, runCommand }) {
+  const env = await getConsoleBuildEnvironment({ path: commSource });
+  const output = String(await runCommand({ cmd: "./mach", args: ["environment", "--format", "json"],
+    cwd: path.dirname(commSource), env, capture: true, silent: true }));
+  const environment = JSON.parse(output.slice(output.indexOf("{")));
+  if (!environment.topobjdir) throw new Error("Build environment has no object directory.");
+  return access(path.join(environment.topobjdir, "dist", "bin")).then(() => true, error => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+}
 
 export function createDependencyUpdateService({ geckoSource, commSource,
   directory = path.join(os.homedir(), ".tb-tools", "dependency-update",
     createHash("sha256").update(JSON.stringify([geckoSource, commSource])).digest("hex").slice(0, 16)),
   runCommand = run, getRustStatus = getGraphRustUpstreamStatus, build = runLoggedBuild,
+  isBuildReady = hasInstalledBuild,
   now = () => Date.now(), intervalMs = 5 * 60_000, retryMs = 30 * 60_000,
 } = {}) {
   if (!geckoSource || !commSource) throw new Error("Dependency updates need Firefox and comm checkouts.");
@@ -47,16 +61,19 @@ export function createDependencyUpdateService({ geckoSource, commSource,
     await rename(temporary, stateFile);
   }
 
-  async function inspectMain(source, target, expectedHead) {
+  async function inspectMain(source, target, expected) {
     const head = await git(source, ["rev-parse", "HEAD"]);
-    const branch = await git(source, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
-    if (branch !== "main") throw new Error(`Automatic update is waiting: ${source} must be on main.`);
-    if (expectedHead && head !== expectedHead) throw new Error(`Automatic update is waiting: ${source} changed during the build.`);
-    if (await git(source, ["status", "--porcelain"])) {
-      throw new Error(`Automatic update is waiting: ${source} has local changes.`);
+    const branch = await git(source, ["branch", "--show-current"]);
+    if (branch && branch !== "main") throw new Error(`Automatic update is waiting: ${source} is on patch branch ${branch}.`);
+    if (expected && (head !== expected.head || branch !== expected.branch)) {
+      throw new Error(`Automatic update is waiting: ${source} changed during the build.`);
     }
+    if (await git(source, ["status", "--porcelain", "--untracked-files=no"])) {
+      throw new Error(`Automatic update is waiting: ${source} has local tracked changes.`);
+    }
+    // Detached checkouts can advance only along published main history.
     await git(source, ["merge-base", "--is-ancestor", head, target]);
-    return head;
+    return { head, branch };
   }
 
   async function update() {
@@ -75,24 +92,14 @@ export function createDependencyUpdateService({ geckoSource, commSource,
         if (now() < nextCheckAt) return;
       }
       state = { ...state, updatedSources: [] };
-      setState("checking", "Checking local and fetched Rust dependencies.");
-      const local = await getRustStatus({ graphs, commRef: "HEAD", firefoxRef: "HEAD", runCommand });
-      const fetched = await getRustStatus({ graphs, runCommand });
-      if (local.upToDate && fetched.upToDate && !state.pending) {
-        state.completed = Boolean(state.completed && state.geckoRevision === local.firefoxRemoteHash &&
-          state.commRevision === local.commLocalHash);
-        if (state.completed) setState("passed", "Main checkout build is ready.");
-        else setState("idle", "");
-        return;
-      }
-      nextCheckAt = now() + retryMs;
-      setState("fetching", "Fetching main to look for compatible Rust dependencies.");
+      setState("fetching", "Fetching main to check source and build freshness.");
       for (const source of [geckoSource, commSource]) {
         checkCancelled();
         await git(source, ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"]);
       }
       const candidate = await getRustStatus({ graphs, runCommand });
       if (!candidate.upToDate) {
+        nextCheckAt = now() + retryMs;
         setState("waiting", "Automatic update is waiting for compatible Rust dependencies on main.");
         return;
       }
@@ -103,7 +110,16 @@ export function createDependencyUpdateService({ geckoSource, commSource,
       for (let index = 0; index < sources.length; index++) {
         heads.push(await inspectMain(sources[index], targets[index]));
       }
-      state = { ...state, pending: true };
+      const matchesCompletedBuild = state.completed && state.geckoRevision === targets[0] &&
+        state.commRevision === targets[1] && heads.every((source, index) => source.head === targets[index]);
+      if (!state.pending && matchesCompletedBuild && await isBuildReady({ commSource, runCommand })) {
+        nextCheckAt = 0;
+        setState("passed", "Main checkout build is ready.");
+        return;
+      }
+
+      nextCheckAt = now() + retryMs;
+      state = { ...state, pending: true, completed: false };
       await saveState();
       const gecko = path.join(directory, "gecko");
       const trees = await ensurePairedWorktrees({ geckoSource, commSource, directory: gecko,
@@ -134,15 +150,18 @@ export function createDependencyUpdateService({ geckoSource, commSource,
       for (let index = 0; index < sources.length; index++) {
         checkCancelled();
         await inspectMain(sources[index], targets[index], heads[index]);
-        await git(sources[index], ["merge", "--ff-only", targets[index]]);
+        const args = heads[index].branch ? ["merge", "--ff-only", "--no-overwrite-ignore", targets[index]]
+          : ["switch", "--detach", "--no-overwrite-ignore", targets[index]];
+        await git(sources[index], args);
         state.updatedSources.push(sources[index]);
       }
       setState("building-main", "Updating the main checkout build.");
       await build({ cwd: geckoSource, env: {}, file: state.logFile, signal: abort.signal, runCommand });
       checkCancelled();
       for (let index = 0; index < sources.length; index++) {
-        await inspectMain(sources[index], targets[index], targets[index]);
+        await inspectMain(sources[index], targets[index], { head: targets[index], branch: heads[index].branch });
       }
+      nextCheckAt = 0;
       state = { ...state, completed: true, pending: false, geckoRevision: targets[0], commRevision: targets[1] };
       setState("passed", "Main checkout build is ready.");
     } catch (error) {

@@ -62,6 +62,10 @@ async function fixture(t, { enabled = true, permission = "granted" } = {}) {
       await page.locator(".patch-update-steer-input").fill("Check this patch.");
       await page.locator(".patch-update-steer-submit").click();
       await page.waitForFunction(() => !globalThis.document.querySelector(".patch-update-steer-input").value);
+    } else {
+      // Review Update and Verify wait for the user's checkout choice.
+      await page.locator(".patch-update-checkout").selectOption("main");
+      await page.locator(".patch-update-start").click();
     }
   };
   return { page, sessions, posts, openUpdate, initialize };
@@ -71,9 +75,10 @@ for (const mode of ["update", "freeform", "verify"]) test(`${mode} minimizes, ke
   const { page, sessions, posts, openUpdate } = await fixture(t);
   await openUpdate(mode);
   const toast = page.locator('[data-task-key="update:u1"]');
-  assert.equal(await toast.getAttribute("data-state"), "thinking");
+  assert.equal(await toast.getAttribute("data-state"), "thinking", "A running task should show its thinking state.");
   await page.locator("#patch-update-dialog .ai-task-minimize").click();
-  assert.equal(await page.locator("#patch-update-dialog").getAttribute("open"), null);
+  assert.equal(await page.locator("#patch-update-dialog").getAttribute("open"), null,
+    "Minimize should close the dialog and preserve its running task.");
   await page.waitForFunction(() => !globalThis.document.body.classList.contains("patch-update-open"));
   await page.evaluate(async () => (await import("/assets/graph-client/patch-review-dialog.js")).openPatchReviewDialog({ patch: { id: "D2" } }));
   sessions.get("u1").activity.push({ id: "cmd", kind: "command", title: "Running tests" });
@@ -82,17 +87,27 @@ for (const mode of ["update", "freeform", "verify"]) test(`${mode} minimizes, ke
   await page.waitForFunction(() => globalThis.notices.some(note => note.title.endsWith(": Waiting for input")));
   await page.evaluate(() => globalThis.notices.at(-1).onclick());
   await page.locator("#patch-update-dialog[open]").waitFor();
-  assert.equal(await page.locator("#patch-review-dialog").getAttribute("open"), null);
-  assert.equal(posts.length, 2, "reopening must not POST or restart a task");
-  assert.equal(await page.evaluate(() => globalThis.focusCalls), 1);
+  assert.equal(await page.locator("#patch-review-dialog").getAttribute("open"), null,
+    "Opening the update notification should minimize the other task's dialog.");
+  assert.equal(posts.length, 2, "Reopening should not POST or restart a task.");
+  assert.equal(await page.evaluate(() => globalThis.focusCalls), 1, "A task notification should focus the window.");
   await page.locator("#patch-update-dialog .ai-task-minimize").click();
   sessions.get("u1").status = "complete";
   await page.waitForFunction(() => globalThis.notices.some(note => note.title.endsWith(": Complete")));
-  assert.equal(await toast.getAttribute("data-state"), "complete");
+  await toast.waitFor({ state: "detached" });
+  assert.equal(await toast.count(), 0, "A completed task should leave the tray.");
+  await page.evaluate(() => globalThis.notices.at(-1).onclick());
+  await page.locator("#patch-update-dialog[open]").waitFor();
+  assert.equal(await toast.count(), 0,
+    "Opening a completion notification should keep its completed card out of the tray.");
+  assert.equal(posts.length, 2,
+    "A completion notification should reopen the existing task without starting another run.");
   const count = await page.evaluate(() => globalThis.notices.length);
   await page.waitForTimeout(1700);
-  assert.equal(await page.evaluate(() => globalThis.notices.length), count);
-  assert.equal(posts.some(post => /cancel/.test(post.url)), false);
+  assert.equal(await page.evaluate(() => globalThis.notices.length), count,
+    "A completed task should not send repeated notifications.");
+  assert.equal(posts.some(post => /cancel/.test(post.url)), false,
+    "Minimizing and reopening notifications should not cancel the task.");
   await page.screenshot({ path: `/tmp/ai-task-tray-${mode}.png`, fullPage: true });
 });
 
@@ -235,7 +250,7 @@ test("confirmed Submit closes its AI dialog, then closes the Submit dialog when 
   assert.equal(await page.locator("#patch-update-dialog").getAttribute("open"), null);
   state = "complete"; sessions.get("u1").status = "complete";
   await page.locator("#submit-dialog").waitFor({ state: "hidden" });
-  await page.locator('[data-task-key="update:u1"][data-state="complete"]').waitFor();
+  await page.locator('[data-task-key="update:u1"]').waitFor({ state: "detached" });
 });
 
 for (const action of ["close", "escape"]) test(`Review ${action} cancels and dismisses instead of minimizing`, async t => {
@@ -264,23 +279,29 @@ for (const action of ["close", "escape"]) test(`Review ${action} cancels and dis
   assert.equal(await page.locator('[data-task-key="review:r1"]').count(), 0);
 });
 
-test("tray dismissal stays visible on save failure and hides only after server confirmation", async t => {
+for (const kind of ["review", "update", "implement", "submit", "rebase"]) {
+  test(`${kind} tray dismissal stays visible on save failure and hides only after server confirmation`, async t => {
   const { page, initialize } = await fixture(t);
   await initialize();
   let succeeds = false;
-  await page.route("**/api/background-jobs/dismiss", route => route.fulfill({ status: succeeds ? 200 : 503, json: { ok: succeeds } }));
-  await page.evaluate(async () => {
-    const { trackAiTask } = await import("/assets/graph-client/ai-task-tray.js");
-    trackAiTask({ kind: "review", session: { id: "dismiss-test", revision: "D123", status: "review" }, title: "Review save test" });
+  await page.route("**/api/background-jobs/dismiss", route => {
+    assert.equal(route.request().postDataJSON().kind, kind,
+      "The dismissal request should identify the selected task kind.");
+    return route.fulfill({ status: succeeds ? 200 : 503, json: { ok: succeeds } });
   });
-  const card = page.locator('[data-task-key="review:dismiss-test"]');
+  await page.evaluate(async kind => {
+    const { trackAiTask } = await import("/assets/graph-client/ai-task-tray.js");
+    trackAiTask({ kind, session: { id: "dismiss-test", revision: "D123", status: "review" }, title: "Save test" });
+  }, kind);
+  const card = page.locator(`[data-task-key="${kind}:dismiss-test"]`);
   await card.locator(".ai-task-dismiss").click();
   await page.waitForFunction(() => globalThis.document.querySelector(".ai-task-notification-note")?.textContent?.includes("Could not save"));
-  assert.equal(await card.count(), 1);
+  assert.equal(await card.count(), 1, "A failed server save should leave the task visible.");
   succeeds = true;
   await card.locator(".ai-task-dismiss").click();
   await card.waitFor({ state: "hidden" });
-});
+  });
+}
 
 test("a reopened review returns to the tray after it was dismissed", async t => {
   const { page, sessions, initialize, posts } = await fixture(t);
@@ -325,7 +346,7 @@ test("cancelled implementations disappear and missing tasks stop polling", async
   await page.route("**/api/implement/restored?*", route => { restoredRequests++; return route.fulfill({ json: { ok: true, id: "restored", phase: "cancelled" } }); });
   await page.evaluate(async () => {
     const { trackAiTask } = await import("/assets/graph-client/ai-task-tray.js");
-    trackAiTask({ kind: "implement", session: { id: "restored", phase: "complete" }, title: "Saved implementation", endpoint: "/api/implement/restored" });
+    trackAiTask({ kind: "implement", session: { id: "restored", phase: "implementing" }, title: "Saved implementation", endpoint: "/api/implement/restored" });
   });
   await page.reload();
   await page.evaluate(async () => { await import("/assets/graph-client/ai-task-tray.js"); });

@@ -71,17 +71,26 @@ export function learningSkipReason(record, store) {
   return "";
 }
 
-export function classifyLearningQueue(store) {
+export async function classifyLearningQueue(store) {
   const counts = {};
-  const rows = store.db.prepare("SELECT id FROM jobs WHERE state='pending'").all();
-  for (const row of rows) {
-    const record = store.get(row.id);
-    if (!record) continue;
-    const reason = learningSkipReason(record, store);
-    if (!reason) continue;
-    store.db.prepare("UPDATE jobs SET state='skipped' WHERE id=? AND state='pending'").run(record.id);
-    store.setting(`learning-skip:${record.id}`, reason);
-    counts[reason] = (counts[reason] || 0) + 1;
+  const throughRowid = store.db.prepare("SELECT coalesce(max(rowid), 0) AS rowid FROM jobs").get().rowid;
+  let afterRowid = 0;
+  while (true) {
+    const rows = store.db.prepare(`SELECT rowid,id FROM jobs WHERE state='pending' AND rowid>? AND rowid<=?
+      ORDER BY rowid LIMIT 32`).all(afterRowid, throughRowid);
+    if (!rows.length) break;
+    for (const row of rows) {
+      // Full records can be large. Let dashboard requests run before each read.
+      await new Promise(resolve => setImmediate(resolve));
+      const record = store.get(row.id);
+      if (!record) continue;
+      const reason = learningSkipReason(record, store);
+      if (!reason) continue;
+      store.db.prepare("UPDATE jobs SET state='skipped' WHERE id=? AND state='pending'").run(record.id);
+      store.setting(`learning-skip:${record.id}`, reason);
+      counts[reason] = (counts[reason] || 0) + 1;
+    }
+    afterRowid = rows.at(-1).rowid;
   }
   return counts;
 }

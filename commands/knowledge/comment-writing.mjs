@@ -3,6 +3,10 @@ export const COMMENT_WRITING_GUIDANCE = `When writing or reviewing source commen
 Read the implementation and relevant callers first. Add a comment when it explains
 a reason, constraint, caller contract, or non-obvious action. Follow the affected
 repository's comment coverage rules. Do not add narration for obvious code.
+Add short clarifying comments beside complex or non-obvious logic. Explain the
+reason, constraint, ordering, or effect that the reader cannot readily infer.
+During reviews, suggest the missing explanation within the review scope. Do not
+invent intent.
 Use short, natural sentences with common words. Name the actor and target. For a
 function summary, use a concrete present-tense verb: "Returns...", "Sets...", or
 "Removes...". The function is the implied subject. For instructions, use "Use..."
@@ -27,6 +31,14 @@ side effects accurate. State what an async promise resolves to and what completi
 means when callers need it. Use small checked examples when usage is unclear.
 Check: useful comment; true behavior; clear actor and target; clear condition,
 reason, and result; unambiguous references; accurate caller contract; local format.
+Every assertion must have a non-empty message that states the expected behavior.
+Apply this rule when writing assertions, including examples and local experiments,
+and during every review, self-review, verification, and repair flow. Check the
+actual assertion API and message argument, including assertions in shared helpers.
+Report missing or empty messages in assertions within the review scope, including
+other authors' patches. Do not treat a nearby comment or test name as the message.
+Keep unrelated assertions outside the requested change unchanged.
+
 When writing or self-reviewing tests, every assertion message must contain the
 word "should" and state the expected behavior. For example: "The Save button
 should be disabled." Check this before finishing a test change. When reviewing

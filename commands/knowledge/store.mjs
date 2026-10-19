@@ -68,7 +68,9 @@ export async function openKnowledgeStore(directory) {
     CREATE TABLE IF NOT EXISTS sections (id TEXT PRIMARY KEY, record_id TEXT, body TEXT);
     CREATE VIRTUAL TABLE IF NOT EXISTS section_search USING fts5(id UNINDEXED, repository UNINDEXED, text, tokenize='porter unicode61');
     CREATE INDEX IF NOT EXISTS records_repository ON records(repository);
+    CREATE INDEX IF NOT EXISTS records_repository_id ON records(repository, id);
     CREATE INDEX IF NOT EXISTS records_classification ON records(kind, visibility, repository);
+    CREATE INDEX IF NOT EXISTS records_classification_metadata ON records(kind, visibility, repository, id);
     CREATE INDEX IF NOT EXISTS records_visibility ON records(visibility);
     CREATE INDEX IF NOT EXISTS records_source_type ON records(json_extract(body, '$.source.type'));
     CREATE INDEX IF NOT EXISTS sections_record_id ON sections(record_id);
@@ -207,7 +209,10 @@ export async function openKnowledgeStore(directory) {
         where.push(`${key === "sourceType" ? "json_extract(body, '$.source.type')" : key}=?`);
         values.push(options[key]);
       }
-      return db.prepare(`SELECT rowid,id,repository,kind,visibility FROM records WHERE ${where.join(" AND ")} ORDER BY rowid LIMIT ?`)
+      // Publication pages need metadata. Avoid table reads through the visibility index.
+      const index = options.kind !== undefined && options.visibility !== undefined && options.sourceType === undefined
+        ? " INDEXED BY records_classification_metadata" : "";
+      return db.prepare(`SELECT rowid,id,repository,kind,visibility FROM records${index} WHERE ${where.join(" AND ")} ORDER BY rowid LIMIT ?`)
         .all(...values, options.limit);
     },
     *records(query = {}) {

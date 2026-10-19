@@ -72,7 +72,9 @@ async function importCheckout(store, directory) {
 async function importTree(store, directory, ref) {
   const entries = (await git(directory, ["ls-tree", "-r", "-z", ref])).split("\0").filter(Boolean);
   const pending = [];
-  for (const entry of entries) {
+  for (const [index, entry] of entries.entries()) {
+    // Cached receipts still require database reads. Let dashboard requests run between batches.
+    if (index && index % 32 === 0) await new Promise(resolve => setImmediate(resolve));
     const match = entry.match(/^100644 blob ([a-f0-9]+)\t(.+)$/);
     if (!match || !(instructionFile(match[2]) || noteName.test(match[2]) || recordName.test(match[2]))) {
       throw new Error("Knowledge repository contains unsupported files or modes.");

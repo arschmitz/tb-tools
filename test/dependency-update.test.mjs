@@ -66,12 +66,12 @@ async function fixture(t) {
   const directory = path.join(root, "service");
   const create = (options = {}) => {
     const service = createDependencyUpdateService({ geckoSource: sources[0], commSource: sources[1], directory,
-      runCommand, now: () => time, build: async options => { builds.push(options); }, ...options });
+      runCommand, now: () => time, isBuildReady: async () => true, build: async options => { builds.push(options); }, ...options });
     t.after(() => service.stop());
     return service;
   };
   return { sources, writers, builds, commands, create, directory, runCommand,
-    advance: () => { time += 31 * 60_000; } };
+    advance: (minutes = 31) => { time += minutes * 60_000; } };
 }
 
 test("automatic updates fetch compatible Rust, build worktrees, then update and build main", async t => {
@@ -98,7 +98,7 @@ test("automatic updates fetch compatible Rust, build worktrees, then update and 
   f.advance();
   await service.check();
   assert.equal(f.builds.length, 2, "Current dependencies should not trigger another build.");
-  assert.equal(f.commands.filter(command => command.args[0] === "fetch").length, 2, "Current dependencies should not trigger another fetch.");
+  assert.equal(f.commands.filter(command => command.args[0] === "fetch").length, 4, "Each scheduled check should refresh upstream source even when Rust already matches.");
 });
 
 test("incompatible fetched Rust leaves the primary checkouts and builds untouched", async t => {
@@ -121,7 +121,7 @@ for (const condition of ["dirty", "branch", "diverged", "changed-during-build", 
   test(`automatic updates preserve main source when ${condition}`, async t => {
     const f = await fixture(t);
     const original = git(f.sources[1], "rev-parse", "HEAD");
-    if (condition === "dirty") await writeFile(path.join(f.sources[1], "untracked.txt"), "keep me\n");
+    if (condition === "dirty") await writeFile(path.join(f.sources[1], "rust/checksums.json"), "local edits\n");
     if (condition === "branch") git(f.sources[1], "switch", "-c", "Bug-123");
     if (condition === "diverged") {
       await writeFile(path.join(f.sources[1], "local.txt"), "local commit\n");
@@ -242,8 +242,8 @@ test("manual source changes clear the saved ready-build claim", async t => {
   git(f.sources[1], "commit", "-m", "manual source change");
   f.advance();
   await service.check();
-  assert.equal(service.status().completed, false, "A changed primary revision should clear the saved build completion.");
-  assert.equal(service.status().phase, "idle", "Current dependencies on unbuilt source should not claim a ready build.");
+  assert.equal(service.status().phase, "failed", "Unpublished manual source changes should block an automatic update.");
+  assert.doesNotMatch(service.status().message, /build is ready/, "Unbuilt source should not claim a ready build.");
 });
 
 
@@ -291,4 +291,103 @@ test("a partial update reports the changed checkout and can retry", async t => {
   f.advance();
   await service.check();
   assert.equal(service.status().phase, "passed", "A retry should complete the remaining update and primary build.");
+});
+
+
+test("compatible Rust still fetches and builds when the primary build has no completion record", async t => {
+  const f = await fixture(t);
+  git(f.sources[1], "pull", "--ff-only", "origin", "main");
+  const before = f.sources.map(source => git(source, "rev-parse", "HEAD"));
+  const service = f.create();
+  await service.check();
+  assert.equal(service.status().phase, "passed", "A missing build record should trigger a verification build even when Rust matches.");
+  assert.equal(f.builds.length, 2, "A missing build record should prepare worktree and primary output.");
+  assert.deepEqual(f.sources.map(source => git(source, "rev-parse", "HEAD")), before, "Current source revisions should remain unchanged while their build is prepared.");
+});
+
+test("the next five-minute check finds newer source without any Rust change", async t => {
+  const f = await fixture(t);
+  const service = f.create();
+  await service.check();
+  await writeFile(path.join(f.writers[1], "frontend.js"), "new frontend source\n");
+  git(f.writers[1], "add", ".");
+  git(f.writers[1], "commit", "-m", "new source with unchanged Rust");
+  git(f.writers[1], "push");
+  f.advance(5);
+  await service.check();
+  assert.equal(f.builds.length, 4, "The normal five-minute check should build newer source even when Rust already matches.");
+  assert.equal(git(f.sources[1], "rev-parse", "HEAD"), git(f.writers[1], "rev-parse", "HEAD"), "The primary checkout should advance to the newly built source.");
+});
+
+test("a detached upstream checkout advances without moving its named main branch", async t => {
+  const f = await fixture(t);
+  const branchHead = git(f.sources[1], "rev-parse", "main");
+  git(f.sources[1], "switch", "--detach", "HEAD");
+  const service = f.create();
+  await service.check();
+  assert.equal(service.status().phase, "passed", "A detached upstream checkout should support the automatic build update.");
+  assert.equal(git(f.sources[1], "branch", "--show-current"), "", "The primary checkout should remain detached.");
+  assert.equal(git(f.sources[1], "rev-parse", "main"), branchHead, "The named main branch should remain unchanged.");
+  assert.equal(git(f.sources[1], "rev-parse", "HEAD"), git(f.writers[1], "rev-parse", "HEAD"), "The detached checkout should advance to the tested revision.");
+});
+
+test("unrelated untracked files remain untouched during an automatic update", async t => {
+  const f = await fixture(t);
+  const leftover = path.join(f.sources[0], "old-review-notes.txt");
+  await writeFile(leftover, "preserve these notes\n");
+  const service = f.create();
+  await service.check();
+  assert.equal(service.status().phase, "passed", "Unrelated untracked files should not block the build update.");
+  assert.equal(await readFile(leftover, "utf8"), "preserve these notes\n", "The updater should preserve unrelated untracked files.");
+});
+
+for (const detached of [false, true]) {
+  for (const ignored of [false, true]) {
+    test(`source promotion preserves a ${ignored ? "ignored" : "untracked"} collision in a ${detached ? "detached" : "main"} checkout`, async t => {
+      const f = await fixture(t);
+      await writeFile(path.join(f.writers[1], "collision.txt"), "upstream source\n");
+      git(f.writers[1], "add", ".");
+      git(f.writers[1], "commit", "-m", "new upstream file");
+      git(f.writers[1], "push");
+      await writeFile(path.join(f.sources[1], "collision.txt"), "preserve local file\n");
+      if (ignored) await writeFile(path.join(f.sources[1], ".git/info/exclude"), "collision.txt\n");
+      if (detached) git(f.sources[1], "switch", "--detach", "HEAD");
+      const before = git(f.sources[1], "rev-parse", "HEAD");
+      const service = f.create();
+      await service.check();
+      assert.equal(service.status().phase, "failed", "A file collision should stop source promotion.");
+      assert.equal(await readFile(path.join(f.sources[1], "collision.txt"), "utf8"), "preserve local file\n", "Git should preserve the colliding local file.");
+      assert.equal(git(f.sources[1], "rev-parse", "HEAD"), before, "A blocked source promotion should preserve the original revision.");
+      assert.equal(f.builds.length, 1, "A blocked source promotion should not start the primary build.");
+    });
+  }
+}
+
+test("a branch change at the same commit blocks promotion", async t => {
+  const f = await fixture(t);
+  const service = f.create({ build: async options => {
+    f.builds.push(options);
+    git(f.sources[1], "switch", "--detach", "HEAD");
+  } });
+  await service.check();
+  assert.equal(service.status().phase, "failed", "A branch identity change should block source promotion even when HEAD is unchanged.");
+  assert.equal(f.builds.length, 1, "A changed branch should prevent the primary build.");
+});
+
+test("missing installed output rebuilds an otherwise completed source pair", async t => {
+  const f = await fixture(t);
+  const object = path.join(f.directory, "installed");
+  await mkdir(path.join(object, "dist/bin"), { recursive: true });
+  const service = f.create({ isBuildReady: undefined, runCommand: async options => {
+    if (options.args[0] === "environment") return JSON.stringify({ topobjdir: object });
+    return f.runCommand(options);
+  } });
+  await service.check();
+  f.advance(5);
+  await service.check();
+  assert.equal(f.builds.length, 2, "Existing installed output should allow the saved completed build to be reused.");
+  await rm(path.join(object, "dist/bin"), { recursive: true });
+  f.advance(5);
+  await service.check();
+  assert.equal(f.builds.length, 4, "Missing installed output should trigger worktree and primary builds.");
 });

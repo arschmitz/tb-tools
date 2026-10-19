@@ -97,14 +97,19 @@ When sccache is installed, each worktree uses its own server and source base
 path with the common compiler cache. The app disables sccache direct mode because
 [version 0.18 can reuse stale headers across worktrees](https://github.com/mozilla/sccache/issues/2863).
 
-The desktop app checks local and fetched Rust dependencies at startup and every
-five minutes. If dependencies are out of sync, it fetches Firefox and Thunderbird
-`origin/main`. If the new revisions have compatible Rust dependencies, it checks
-and builds that exact pair in detached worktrees. After the build passes, it
+The desktop app fetches Firefox and Thunderbird `origin/main` at startup and
+every five minutes, even when Rust dependencies already match. It checks Rust
+compatibility before building. Newer source, missing installed output, or a
+missing completion record triggers a build of that exact pair in detached
+worktrees. After the build passes, it
 updates both primary checkouts with fast-forward merges and prepares the primary
-checkout build with its existing configuration. Both primary checkouts must stay
-clean and on `main`; patch branches, local edits, and diverged history block the
-update. Source changes during the worktree build also block the update.
+checkout build with its existing configuration. Primary checkouts must stay on
+`main` or detached at a commit in upstream main history. A detached checkout stays
+detached; its named branches do not move. Patch branches, tracked edits, and
+diverged history block the update. Unrelated untracked files are preserved, and
+Git refuses to overwrite colliding untracked or ignored files. Source or branch
+changes during the worktree build also block the update. Temporary build and
+review directories stay outside the primary Firefox checkout.
 
 The Rust status tooltip shows update progress and failures. Failed or blocked
 updates retry after 30 minutes. Build state, one reusable worktree pair, and the

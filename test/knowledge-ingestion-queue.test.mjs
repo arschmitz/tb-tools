@@ -211,7 +211,7 @@ test("queue events stay private and do not create learning work", async t => {
     "An operational input bundle should stay out of the learning queue.");
   store.db.prepare("UPDATE jobs SET state='pending' WHERE id=?").run(events[0].id);
   store.db.prepare("UPDATE jobs SET state='pending' WHERE id=?").run(operationalInput.id);
-  assert.equal(classifyLearningQueue(store)["operational-queue-state"], 2,
+  assert.equal((await classifyLearningQueue(store))["operational-queue-state"], 2,
     "Classification should skip both operational types restored to pending.");
   assert.equal(store.db.prepare("SELECT state FROM jobs WHERE id=?").get(events[0].id).state, "skipped",
     "A restored control event should return to skipped state.");

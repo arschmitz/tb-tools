@@ -9,6 +9,7 @@ import { access, realpath } from "node:fs/promises";
 import { openKnowledgeStore, searchKnowledge, digest, atomicWrite } from "./store.mjs";
 import { importLegacyKnowledge } from "./import.mjs";
 import { createLocalEmbeddings } from "./embeddings.mjs";
+import { createKnowledgeSearch } from "./search-process.mjs";
 import { VECTOR_SEARCH_VERSION } from "./vector-search.mjs";
 import { learnKnowledge, writeComponentGuides } from "./learning.mjs";
 import { syncKnowledge, saveLocalKnowledgeHistory, withKnowledgeLock } from "./sync.mjs";
@@ -78,6 +79,7 @@ export async function createKnowledgeService(options, { generate, embeddings, fo
   options.maxContextChars = Math.max(1000, Math.min(24_000, Number(options.maxContextChars) || 10_000));
   const store = await openKnowledgeStore(options.directory);
   await store.rebuild();
+  const taskSearch = createKnowledgeSearch(options.directory);
   if (options.semantic || embeddings) {
     const previousError = store.setting("semanticError");
     if (previousError) store.setting("semanticLastError", { message: previousError, observedAt: new Date().toISOString() });
@@ -136,7 +138,7 @@ export async function createKnowledgeService(options, { generate, embeddings, fo
   async function indexEmbeddings() {
     if (!semantic?.ready) return 0;
     store.setting("semanticError", null);
-    const missing = store.db.prepare("SELECT s.id,s.body FROM sections s LEFT JOIN section_vectors v ON s.id=v.id AND v.model=? WHERE v.id IS NULL LIMIT 32").all(semantic.model);
+    const missing = await taskSearch.missingSections(semantic.model);
     if (!missing.length) return 0;
     const vectors = await semantic.embed(missing.map(row => {
       const record = JSON.parse(row.body);
@@ -223,7 +225,7 @@ export async function createKnowledgeService(options, { generate, embeddings, fo
       const vectors = await semantic?.embed([query], 300).catch(failure => {
         store.setting("semanticError", failure.message); return null;
       });
-      const result = searchKnowledge(store, { query, queryParts, question: request.question, filters: request.filters, repository: context.repository,
+      const result = await taskSearch.search({ query, queryParts, question: request.question, filters: request.filters, repository: context.repository,
         vector: vectors?.[0], model: semantic?.model, maxChars: options.maxContextChars - Math.min(1600, options.maxContextChars / 4) });
       const applicability = [];
       for (const id of result.ids.slice(0, 6)) {
@@ -335,7 +337,7 @@ export async function createKnowledgeService(options, { generate, embeddings, fo
         await atomicWrite(path.join(options.directory, "AGENTS.md"), knowledgeInstructions(options.directory, options.repositoryDirectory));
         if (options.importLegacy) await importLegacyKnowledge(store, options.memoryDirectory);
         await readKnowledgeRepository(store, options.repositoryDirectory);
-        classifyLearningQueue(store);
+        await classifyLearningQueue(store);
         if (options.push !== false) await publishProjectLessons(store, options);
         await writeComponentGuides(store);
       });
@@ -346,6 +348,7 @@ export async function createKnowledgeService(options, { generate, embeddings, fo
       stopped = true;
       clearInterval(timer); clearTimeout(vectorTimer);
       activeAbort?.abort(); followUpAbort?.abort(); queryGapAbort?.abort(); queryGapEvaluationAbort?.abort();
+      await taskSearch.close();
       await activeJob; await vectorJob; await semantic?.close();
       store.close();
     },

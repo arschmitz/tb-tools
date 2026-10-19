@@ -67,7 +67,7 @@ export async function acceptLessons(store, records, output) {
 
 export async function learnKnowledge(store, { generate, maxCallsPerDay = 4, maxInputChars = 24_000, now = Date.now() }) {
   return withKnowledgeLock(store.directory, "learning", async () => {
-    const skipped = classifyLearningQueue(store);
+    const skipped = await classifyLearningQueue(store);
     const day = new Date(now).toISOString().slice(0, 10), key = `calls:${day}`;
     const calls = store.setting(key) || 0;
     if (!generate || calls >= maxCallsPerDay) return { budgetReached: calls >= maxCallsPerDay, skipped };
@@ -117,7 +117,13 @@ export async function learnKnowledge(store, { generate, maxCallsPerDay = 4, maxI
 
 export async function writeComponentGuides(store) {
   const groups = new Map();
-  const lessons = [...store.records({ kind: "lesson" })].filter(record => record.evidence.every(id => store.get(id)));
+  const lessons = [], exists = store.db.prepare("SELECT 1 FROM records WHERE id=?");
+  let visited = 0;
+  for (const record of store.records({ kind: "lesson" })) {
+    // Guides need citation presence, not the potentially large source bodies.
+    if (record.evidence.every(id => exists.get(id))) lessons.push(record);
+    if (++visited % 32 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
   const retired = new Set(lessons.flatMap(record => record.status === "supported" ? record.supersedes : []));
   for (const record of lessons.filter(r => !retired.has(r.id) && r.status !== "superseded")) {
     const key = `${record.repository}/${record.component || "general"}`;

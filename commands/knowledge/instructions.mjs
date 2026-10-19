@@ -2,7 +2,7 @@ import { CODE_EVIDENCE_GUIDANCE } from "./code-evidence.mjs";
 import os from "node:os";
 import path from "node:path";
 import { COMMENT_WRITING_GUIDANCE } from "./comment-writing.mjs";
-import { CODE_STYLE_GUIDANCE } from "./code-style.mjs";
+import { CODE_READABILITY_GUIDANCE, CODE_STYLE_GUIDANCE } from "./code-style.mjs";
 
 export function knowledgeDirectory(settings = {}, home = os.homedir()) {
   const value = settings.ai?.knowledge?.directory || "~/.tb-tools/knowledge";
@@ -57,6 +57,16 @@ belong in the shared repository. Git hosting permissions control who can push.
 Do not force-push. Fetch and merge unique new files; report unresolved instruction
 or evidence conflicts. The console automates local commits and sync when configured.
 If memory is unavailable, continue with current source and report the limit.
+
+Every assertion must have a non-empty message that states the expected behavior.
+Apply this rule when writing assertions, including examples and local experiments,
+and during every review, self-review, verification, and repair flow. Check the
+actual assertion API and message argument, including assertions in shared helpers.
+Report missing or empty messages in assertions within the review scope, including
+other authors' patches. Do not treat a nearby comment or test name as the message.
+Keep unrelated assertions outside the requested change unchanged.
+
+${CODE_READABILITY_GUIDANCE}
 
 ${COMMENT_WRITING_GUIDANCE}
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EventEmitter } from "node:events";
-import { CODE_STYLE_GUIDANCE } from "../commands/knowledge/code-style.mjs";
+import { CODE_READABILITY_GUIDANCE, CODE_STYLE_GUIDANCE } from "../commands/knowledge/code-style.mjs";
 import { knowledgeInstructions } from "../commands/knowledge/instructions.mjs";
 import { createGraphCodexAppServer } from "../commands/graph/codex-app-server.mjs";
 
@@ -9,8 +9,20 @@ test("code style guidance reaches turns with and without a shared checkout", () 
   for (const repository of ["", "/shared/knowledge"]) {
     const input = knowledgeInstructions("/private/knowledge", repository);
     assert.ok(
+      input.includes(CODE_READABILITY_GUIDANCE),
+      "All writing and review tasks should receive the full readability guidance."
+    );
+    assert.ok(
       input.includes(CODE_STYLE_GUIDANCE),
       "Console instructions should include the full scoped code style guidance."
+    );
+    assert.ok(
+      input.includes("Every assertion must have a non-empty message that states the expected behavior."),
+      "All console tasks should require assertion messages without a shared checkout."
+    );
+    assert.ok(
+      input.includes("Report missing or empty messages in assertions within the review scope, including"),
+      "Reviews should report missing messages in other authors' assertions."
     );
   }
 });
@@ -58,8 +70,16 @@ test("new and steered console turns receive code style when retrieval is disable
     for (const method of ["turn/start", "turn/steer"]) {
       const request = requests.find(item => item.method === method);
       assert.ok(
+        request?.params.input[0].text.includes(CODE_READABILITY_GUIDANCE),
+        `${method} should receive readability guidance even when retrieval is disabled.`
+      );
+      assert.ok(
         request?.params.input[0].text.includes(CODE_STYLE_GUIDANCE),
         `${method} should receive complete code style guidance without retrieval.`
+      );
+      assert.ok(
+        request.params.input[0].text.includes("Every assertion must have a non-empty message that states the expected behavior."),
+        `${method} should require assertion messages even when retrieval is disabled.`
       );
       assert.ok(
         request.params.input[0].text.startsWith(method === "turn/start" ? startPrompt : steerPrompt),

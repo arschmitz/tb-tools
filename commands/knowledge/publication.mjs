@@ -23,8 +23,12 @@ function safeProjectClaim(record) {
 export async function publishProjectLessons(store, { shareRepositories = [] } = {}) {
   const counts = { published: 0, alreadyPublished: 0 };
   const throughRowid = store.maxRecordRowid(), existing = new Map();
-  for (const lesson of store.records({ kind: "lesson", visibility: "shared", throughRowid })) existing.set(claimKey(lesson), lesson);
+  for (const lesson of store.records({ kind: "lesson", visibility: "shared", throughRowid })) {
+    await new Promise(resolve => setImmediate(resolve));
+    existing.set(claimKey(lesson), lesson);
+  }
   for (const lesson of store.records({ kind: "lesson", visibility: "private", throughRowid })) {
+    await new Promise(resolve => setImmediate(resolve));
     if (!shareRepositories.includes(lesson.repository)) continue;
     const key = claimKey(lesson);
     // The earlier backfill already recorded these original IDs. Keep its citations.

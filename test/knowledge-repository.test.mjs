@@ -67,6 +67,36 @@ test("memory sync accepts plain notes without installed console commands", async
   assert.equal(a.store.all()[0].source.reference, "review:D123");
 });
 
+test("cached repository imports let dashboard callbacks run between receipt checks", async t => {
+  const { clone } = await fixture(t), a = await clone("cached-reader");
+  for (let index = 0; index < 70; index++) {
+    await writeFile(path.join(a.directory, `notes/note-${index}.md`), note(`Observation ${index}`));
+  }
+  await git(a.directory, "add", "notes");
+  await git(a.directory, "commit", "-m", "Add evidence notes");
+  await syncKnowledgeRepository(a.store, { repositoryDirectory: a.directory, push: false });
+  const count = a.store.all().length;
+  const setting = a.store.setting.bind(a.store);
+  let reads = 0, readsAtCallback = 0;
+  a.store.setting = (key, value) => {
+    if (value === undefined && key.startsWith("repository-blob:")) {
+      reads++;
+      if (reads === 1) setImmediate(() => { readsAtCallback = reads; });
+    }
+    return setting(key, value);
+  };
+  t.after(() => { a.store.setting = setting; });
+
+  await syncKnowledgeRepository(a.store, { repositoryDirectory: a.directory, push: false });
+
+  assert.ok(reads > 64, "The cached import should check every file receipt.");
+  assert.ok(readsAtCallback > 0 && readsAtCallback < reads,
+    "A dashboard callback should run before the receipt checks finish.");
+  assert.equal(a.store.all().length, count, "A cached import should preserve the evidence records.");
+  assert.equal(await git(a.directory, "status", "--porcelain"), "",
+    "The import should leave the checkout clean.");
+});
+
 test("shared skills sync as reviewed instructions without becoming learning evidence", async t => {
   const { root, remote, clone } = await fixture(t), a = await clone("skills-writer");
   const folder = path.join(a.directory, "skills/thunderbird-review");

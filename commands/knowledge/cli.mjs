@@ -105,7 +105,7 @@ export async function runKnowledgeCommand(argv = [], { config = {}, generate } =
       if (evidence.some(record => !record)) throw new Error("Missing lesson evidence.");
       result = { accepted: await acceptLessons(store, evidence, input), publication: await publishProjectLessons(store, options) };
     }
-    if (action === "repair") result = { ...await repairPortableRecords(store), skipped: classifyLearningQueue(store) };
+    if (action === "repair") result = { ...await repairPortableRecords(store), skipped: await classifyLearningQueue(store) };
     if (action === "publish") {
       result = { publication: await publishProjectLessons(store, options), sync: await syncKnowledgeRepository(store, options) };
       store.setting("lastSync", { ...result.sync, at: new Date().toISOString() });

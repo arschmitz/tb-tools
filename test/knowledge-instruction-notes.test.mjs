@@ -19,6 +19,37 @@ const instruction = {
   ...metadata, paths: [], source: { type: "user-directed-code-style", status: "instruction" },
 };
 
+test("queue classification yields between record reads and bounds new arrivals", async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "tb-classification-pages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = await openKnowledgeStore(root);
+  t.after(() => store.close());
+  for (let index = 0; index < 70; index++) {
+    await store.put({ kind: "evidence", repository: "tb-tools", at: metadata.at,
+      text: `Instruction ${index}`, source: instruction.source });
+  }
+  const get = store.get.bind(store);
+  let reads = 0, readsAtCallback = 0;
+  store.get = id => {
+    reads++;
+    if (reads === 1) setImmediate(() => {
+      readsAtCallback = reads;
+      store.db.prepare("INSERT INTO jobs (id,state) VALUES (?, 'pending')").run("later-job");
+    });
+    return get(id);
+  };
+
+  const result = await classifyLearningQueue(store);
+
+  assert.deepEqual(result, { "reviewed-instruction": 70 },
+    "Classification should preserve the skip reason and count across pages.");
+  assert.equal(readsAtCallback, 1,
+    "A dashboard callback should run before the second full record read.");
+  assert.equal(reads, 70, "Classification should leave jobs added after its snapshot for the next pass.");
+  assert.equal(store.db.prepare("SELECT state FROM jobs WHERE id='later-job'").get().state, "pending",
+    "A later job should remain pending.");
+});
+
 test("Git sync recognizes the evidence workflow without importing instructions as lessons", async t => {
   let store;
   t.after(() => store?.close());
@@ -76,7 +107,7 @@ test("imported instructions leave the learning queue without hiding ordinary evi
     "A user instruction should stay outside automatic lesson generation.");
   assert.equal(learningSkipReason({ ...imported, source: { type: "shared-note", status: "instruction" } }, store),
     "reviewed-instruction", "An older imported instruction should also stay outside automatic lesson generation.");
-  assert.deepEqual(classifyLearningQueue(store), { "reviewed-instruction": 1 },
+  assert.deepEqual(await classifyLearningQueue(store), { "reviewed-instruction": 1 },
     "Queue classification should skip the instruction without skipping ordinary evidence.");
   const state = id => store.db.prepare("SELECT state FROM jobs WHERE id=?").get(id).state;
   assert.equal(state(imported.id), "skipped", "The instruction job should be skipped.");

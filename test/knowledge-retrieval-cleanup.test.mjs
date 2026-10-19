@@ -293,7 +293,7 @@ test("pending archive jobs are skipped without model calls or lesson output", as
   store.cleanRetrieval({ apply: true });
   store.db.prepare("UPDATE jobs SET state='pending',retry=0 WHERE id=?").run(raw.id);
   let calls = 0;
-  classifyLearningQueue(store);
+  await classifyLearningQueue(store);
   const result = await learnKnowledge(store, { generate: async () => { calls++; return { lessons: [] }; } });
 
   assert.equal(calls, 0, "An archived pending input should never reach the model.");

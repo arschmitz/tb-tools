@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import {
   getTbToolsCommandEnvironment,
@@ -27,6 +30,37 @@ test("run passes the shared mach environment to child commands", async () => {
   });
 
   assert.equal(output, "1:1");
+});
+
+test("run bypasses the configured Git file-system monitor without changing repository settings", async (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "tb-git-monitor-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const git = (args) => execFileSync("git", args, { cwd: directory, encoding: "utf8" }).trim();
+  git(["init", "--quiet"]);
+  const hook = path.join(directory, "monitor-hook");
+  const marker = path.join(directory, "monitor-ran");
+  writeFileSync(hook, '#!/bin/sh\ntouch monitor-ran\nexit 1\n', { mode: 0o755 });
+  git(["config", "core.fsmonitor", hook]);
+
+  const output = await run({
+    cmd: "git", args: ["status", "--porcelain"], cwd: directory, capture: true, silent: true,
+  });
+
+  assert.match(output, /\?\? monitor-hook/, "Git status should return untracked files.");
+  assert.equal(existsSync(marker), false, "Git status should bypass the configured monitor hook.");
+  assert.equal(git(["config", "--local", "--get", "core.fsmonitor"]), hook,
+    "The repository should retain its configured monitor.");
+});
+
+test("run bypasses the monitor for an absolute Git executable", async () => {
+  const executable = execFileSync(process.platform === "win32" ? "where.exe" : "which", ["git"], {
+    encoding: "utf8",
+  }).trim().split(/\r?\n/)[0];
+  const output = await run({
+    cmd: executable, args: ["config", "--get", "core.fsmonitor"], capture: true, silent: true,
+  });
+
+  assert.equal(output.trim(), "false", "An absolute Git executable should bypass the monitor.");
 });
 
 test("run cancels an active child process", async () => {

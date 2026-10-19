@@ -9,10 +9,11 @@ let polling = false;
 let openGeneration = 0;
 let collapsed = false;
 const dismissed = new Set();
+const serverDismissed = new Set();
 
 export function getAiTaskState(session = {}, busy) {
   const phase = session.status || session.phase;
-  if (["complete", "cancelled", "canceled"].includes(phase)) return "complete";
+  if (["complete", "completed", "done", "passed", "squashed", "superseded", "cancelled", "canceled"].includes(phase)) return "complete";
   if (phase === "error") return "error";
   if (session.interrupted || session.restored || session.error || ["paused", "needs-evidence"].includes(phase)) return "waiting";
   const running = busy ?? ["running", "preparing", "recovering-build", "pulling", "reviewing", "applying", "amending", "posting", "implementing", "committing", "verifying", "submitting", "monitoring"].includes(phase);
@@ -48,9 +49,9 @@ export async function enableTaskNotifications() {
 function ensureTray() {
   if (tray || !INTERACTIVE.aiEnabled || !INTERACTIVE.enabled) return;
   tray = document.createElement("aside");
-  tray.className = "ai-task-tray"; tray.setAttribute("aria-label", "AI tasks");
+  tray.className = "ai-task-tray"; tray.setAttribute("aria-label", "Tasks");
   const header = document.createElement("div"); header.className = "ai-task-tray-header";
-  const title = document.createElement("strong"); title.textContent = "AI tasks";
+  const title = document.createElement("strong"); title.textContent = "Tasks";
   const collapse = document.createElement("button"); collapse.type = "button"; collapse.textContent = "Collapse";
   collapse.className = "ai-task-collapse"; collapse.setAttribute("aria-expanded", "true");
   collapse.addEventListener("click", () => {
@@ -73,13 +74,14 @@ function persistDismissed() {
 
 async function dismissTask(key, saveOnServer = false) {
   const [kind, id] = key.split(":");
-  if (saveOnServer && ["review", "update"].includes(kind)) {
+  if (saveOnServer) {
     try {
       const response = await fetch("/api/background-jobs/dismiss", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: INTERACTIVE.token, kind, id }),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: INTERACTIVE.token, kind, id }),
       });
       if (!response.ok) throw new Error("Could not save task dismissal. Reload and try again.");
+      serverDismissed.add(key);
     } catch (error) {
       if (permissionNote) permissionNote.textContent = error.message;
       return;
@@ -134,7 +136,7 @@ function notify(task) {
       const notification = new Notification(`${task.title}: ${labels[state]}`, {
         body: "Open this task in Thunderbird Development Dashboard.", tag: `tb-task:${task.key}`,
       });
-      notification.onclick = () => { window.focus(); void openTask(task.key); notification.close(); };
+      notification.onclick = () => { window.focus(); void openTask(task.key, task); notification.close(); };
     } catch { permissionNote.textContent = "System notifications could not be shown. Task updates remain here."; }
   };
   if (navigator.locks) void navigator.locks.request(`${storageKey}:notifications`, send).catch(() => {});
@@ -145,7 +147,18 @@ export function trackAiTask({ kind, session, title, endpoint, busy, open }) {
   if (!INTERACTIVE.aiEnabled || !session?.id) return;
   const key = `${kind}:${session.id}`;
   if (["cancelled", "canceled"].includes(session.status || session.phase)) { dismissTask(key); return; }
+  if (session.dismissed || serverDismissed.has(key)) {
+    serverDismissed.add(key);
+    void dismissTask(key);
+    return;
+  }
   const state = getAiTaskState(session, busy);
+  if (state === "complete") {
+    const task = tasks.get(key);
+    if (task && task.state !== state) notify({ ...task, state, session });
+    void dismissTask(key);
+    return;
+  }
   if (dismissed.has(key)) return;
   let task = tasks.get(key);
   const previous = task?.state;
@@ -161,8 +174,10 @@ export function trackAiTask({ kind, session, title, endpoint, busy, open }) {
   return task;
 }
 
-async function openTask(key) {
-  const task = tasks.get(key); if (!task) return;
+async function openTask(key, notificationTask) {
+  // Completed cards leave the tray before their notifications are opened.
+  const task = tasks.get(key) || notificationTask;
+  if (!task) return;
   const generation = ++openGeneration;
   window.commandsBrowser?.focus?.();
   const minimize = () => {
@@ -285,13 +300,18 @@ async function restoreServerTasks() {
     const response = await fetch(`/api/background-jobs?token=${encodeURIComponent(INTERACTIVE.token)}`, { cache: "no-store" });
     const result = await response.json();
     if (!response.ok || !result.ok) return;
+    // Server dismissals override stale cards saved by any browser session.
+    for (const key of result.dismissedTasks || []) {
+      serverDismissed.add(key);
+      void dismissTask(key);
+    }
     const kinds = { Review: "review", Update: "update", Implement: "implement", Submit: "submit", Rebase: "rebase" };
     await Promise.all((result.jobs || []).filter(job => kinds[job.kind] &&
       (["running", "waiting"].includes(job.state) || job.kind === "Review" && job.phase === "interrupted")).map(async job => {
       const kind = kinds[job.kind];
       const id = job.id.slice(job.kind.length + 1);
       const key = `${kind}:${id}`;
-      if (tasks.has(key) || dismissed.has(key)) return;
+      if (tasks.has(key) || dismissed.has(key) || serverDismissed.has(key)) return;
       const endpoint = `/api/${kind === "update" ? "patch-update" : kind}/${encodeURIComponent(id)}`;
       try {
         const taskResponse = await fetch(`${endpoint}?token=${encodeURIComponent(INTERACTIVE.token)}`, { cache: "no-store" });
@@ -339,11 +359,12 @@ if (INTERACTIVE.aiEnabled && INTERACTIVE.enabled) {
       if (!["update", "review", "implement", "submit", "rebase"].includes(task.kind) || typeof task.id !== "string") continue;
       task.key = `${task.kind}:${task.id}`;
       task.endpoint = `/api/${task.kind === "update" ? "patch-update" : task.kind}/${encodeURIComponent(task.id)}`;
-      if (dismissed.has(task.key)) continue;
+      if (dismissed.has(task.key) || task.state === "complete") continue;
       task.needsRefresh = true;
       tasks.set(task.key, task); render(task);
     }
   } catch { /* A fresh tray is safe if saved browser state cannot be read. */ }
+  persist();
   if (tasks.size) schedule();
   void restoreServerTasks();
 }
