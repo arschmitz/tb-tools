@@ -5,7 +5,12 @@ const { spawnSync } = require("node:child_process");
 function toolEnvironment(env = process.env, platform = process.platform) {
   const home = env.HOME || env.USERPROFILE || os.homedir();
   const extras = platform === "win32"
-    ? [path.win32.join(home, ".local", "bin"), ...["", "msys2/usr/bin", "python3", "python"].map(part => path.win32.join(env.MOZILLABUILD || "C:\\mozilla-build", part))]
+    ? [path.win32.join(home, ".local", "bin"),
+      ...["", "bin", "msys2/mingw64/bin", "msys2/usr/bin", "python3", "python"]
+        .map(part => path.win32.join(env.MOZILLABUILD || "C:\\mozilla-build", part)),
+      path.win32.join(env.ProgramW6432 || env.ProgramFiles || "C:\\Program Files", "Git", "cmd"),
+      path.win32.join(env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Git", "cmd"),
+      path.win32.join(env.LOCALAPPDATA || path.win32.join(home, "AppData", "Local"), "Programs", "Git", "cmd")]
     : [path.posix.join(home, ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin"];
   const key = Object.keys(env).find(name => name.toLowerCase() === "path") || "PATH";
   return { ...env, [key]: [env.UV_TOOL_BIN_DIR || "", ...extras, env[key] || ""].filter(Boolean).join(platform === "win32" ? ";" : ":") };

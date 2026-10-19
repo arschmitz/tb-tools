@@ -118,9 +118,14 @@ test("Windows prerequisite installation requests elevation and waits for the ins
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tb installer "));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const calls = [];
-  const options = { platform: "win32", directory, exists: () => true,
+  let installed = false;
+  const options = { platform: "win32", directory, exists: () => installed,
     fetchResponse: async () => ({ ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }),
-    execute: (command, args, settings) => { calls.push({ command, args, settings }); return { status: 0 }; } };
+    execute: (command, args, settings) => {
+      calls.push({ command, args, settings });
+      if (command === "powershell.exe") installed = true;
+      return { status: 0 };
+    } };
   await installPrerequisites(options);
   const installer = calls[0];
   assert.equal(installer.command, "powershell.exe", "Windows should use PowerShell to request installer elevation.");
@@ -131,6 +136,7 @@ test("Windows prerequisite installation requests elevation and waits for the ins
   assert.deepEqual(calls.slice(1).map(call => call.command), ["git", "python"], "Tool checks should run after installer completion.");
   for (const failure of [{ status: 1 }, { status: 1603 }, { error: new Error("launch failed") }]) {
     calls.length = 0;
+    installed = false;
     await assert.rejects(installPrerequisites({ ...options, execute: (...args) => { calls.push(args); return failure; } }),
       /did not finish/, "Cancellation or installer failure should leave setup incomplete.");
     assert.equal(calls.length, 1, "Failed installation should stop before tools are rechecked.");
@@ -140,10 +146,94 @@ test("Windows prerequisite installation requests elevation and waits for the ins
 test("Windows tools are found without restarting the desktop", () => {
   const env = toolEnvironment({ USERPROFILE: "C:\\Users\\Contributor", Path: "C:\\Windows\\System32", MOZILLABUILD: "D:\\mozilla-build" }, "win32");
   assert.equal(env.PATH, undefined, "Windows should retain the existing Path variable spelling.");
-  assert.ok(env.Path.includes("D:\\mozilla-build\\msys2\\usr\\bin"), "Windows should find MozillaBuild Git immediately.");
+  assert.ok(env.Path.includes("D:\\mozilla-build\\msys2\\mingw64\\bin"), "Windows should find MozillaBuild's native Git immediately.");
+  assert.ok(env.Path.includes("D:\\mozilla-build\\msys2\\usr\\bin"), "Windows should retain MozillaBuild's MSYS tools.");
   assert.ok(env.Path.includes("D:\\mozilla-build\\python3"), "Windows should find MozillaBuild Python immediately.");
   assert.ok(env.Path.endsWith("C:\\Windows\\System32"), "Windows should retain the existing search path.");
   const result = checkPrerequisites({ platform: "win32", env, exists: () => false, execute: () => assert.fail("Missing MozillaBuild should stop tool probes.") });
   assert.equal(result.ready, false, "Missing MozillaBuild should keep setup incomplete.");
   assert.equal(result.canInstall, true, "Missing MozillaBuild should offer its installer.");
+});
+
+test("bundled Git makes Windows setup ready without downloading another installer", async () => {
+  const sourceEnv = { USERPROFILE: "C:\\Users\\Contributor", Path: "C:\\Windows\\System32", MOZILLABUILD: "D:\\mozilla-build" };
+  const env = toolEnvironment(sourceEnv, "win32");
+  const execute = (command, _args, settings) => {
+    assert.ok(["git", "python"].includes(command), "Ready tools should not run an installer.");
+    const found = command !== "git" || settings.env.Path.split(";").includes("D:\\mozilla-build\\msys2\\mingw64\\bin");
+    return { status: found ? 0 : 1 };
+  };
+  const tools = checkPrerequisites({ platform: "win32", env, execute, exists: () => true });
+  assert.equal(tools.ready, true, "MozillaBuild's bundled native Git should satisfy the Git check.");
+  await installPrerequisites({ platform: "win32", env: sourceEnv, execute, exists: () => true,
+    fetchResponse: () => assert.fail("Ready tools should not download an installer.") });
+});
+
+for (const [arch, suffix] of [["x64", "64-bit"], ["arm64", "arm64"]]) {
+  test(`Windows installs only missing ${arch} Git when MozillaBuild is present`, async t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tb missing git "));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const env = { USERPROFILE: "C:\\Users\\Contributor", Path: "C:\\Windows\\System32", MOZILLABUILD: "D:\\mozilla-build" };
+    let installed = false;
+    const calls = [], downloads = [];
+    const assets = ["64-bit", "arm64"].map(target => ({ name: `Git-9.9.9-${target}.exe`,
+      browser_download_url: `https://github.com/git-for-windows/git/releases/download/v9.9.9.windows.1/Git-9.9.9-${target}.exe` }));
+    const fetchResponse = async url => {
+      downloads.push(url);
+      return { ok: true, json: async () => ({ assets }), arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer };
+    };
+    const execute = (command, args, settings) => {
+      calls.push({ command, args, settings });
+      if (command === "powershell.exe") installed = true;
+      return { status: command === "git" && !installed ? 1 : 0 };
+    };
+    await installPrerequisites({ platform: "win32", arch, env, directory, exists: () => true, execute, fetchResponse });
+
+    assert.deepEqual(downloads, ["https://api.github.com/repos/git-for-windows/git/releases/latest",
+      `https://github.com/git-for-windows/git/releases/download/v9.9.9.windows.1/Git-9.9.9-${suffix}.exe`],
+    "A missing Git should download only the official installer for the selected architecture.");
+    const installers = calls.filter(call => call.command === "powershell.exe");
+    assert.equal(installers.length, 1, "An existing MozillaBuild should not be reinstalled.");
+    assert.equal(installers[0].settings.env.TB_SETUP_INSTALLER, path.join(directory, "GitSetup.exe"),
+      "The elevated installer should receive the Git installer path as environment data.");
+    assert.match(installers[0].args.at(-1), /-Verb RunAs -Wait -PassThru/,
+      "The Git installer should request elevation and wait for completion.");
+    const finalProbe = calls.at(-2);
+    assert.equal(finalProbe.command, "git", "Setup should recheck Git after its installer finishes.");
+    assert.ok(finalProbe.settings.env.Path.includes("C:\\Program Files\\Git\\cmd"),
+      "The recheck should find system Git without restarting the desktop.");
+    assert.ok(finalProbe.settings.env.Path.includes("C:\\Users\\Contributor\\AppData\\Local\\Programs\\Git\\cmd"),
+      "The recheck should also find Git installed for the current user.");
+    assert.equal(env.Path, "C:\\Windows\\System32", "Setup should preserve the caller's environment.");
+  });
+}
+
+test("an installed MozillaBuild with unusable Python stays incomplete without being reinstalled", async () => {
+  await assert.rejects(installPrerequisites({ platform: "win32", exists: () => true,
+    execute: command => {
+      assert.ok(["git", "python"].includes(command), "Missing Python should not reinstall a found MozillaBuild.");
+      return { status: command === "python" ? 1 : 0 };
+    },
+    fetchResponse: () => assert.fail("A found MozillaBuild should not be downloaded again.") }),
+  /Some tools still need attention/, "An unusable Python should still prevent setup from completing.");
+});
+
+test("missing Git rejects unofficial or unavailable installer assets", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tb invalid git "));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const assets of [[],
+    [{ name: "Git-9.9.9-64-bit.exe", browser_download_url: "https://example.invalid/Git-9.9.9-64-bit.exe" }],
+    [{ name: "Git-9.9.9-64-bit.exe", browser_download_url: "https://github.com/git-for-windows/git/releases/download/v9.9.9.windows.1/Git-9.9.9-arm64.exe" }],
+  ]) {
+    const downloads = [];
+    await assert.rejects(installPrerequisites({ platform: "win32", arch: "x64", directory, exists: () => true,
+      execute: command => {
+        assert.ok(["git", "python"].includes(command), "An invalid download should not run an installer.");
+        return { status: command === "git" ? 1 : 0 };
+      },
+      fetchResponse: async url => { downloads.push(url); return { ok: true, json: async () => ({ assets }) }; } }),
+    /official Git release has no installer/, "An unavailable or unofficial Git installer should stop setup.");
+    assert.deepEqual(downloads, ["https://api.github.com/repos/git-for-windows/git/releases/latest"],
+      "Setup should not download an installer from an unapproved source.");
+  }
 });

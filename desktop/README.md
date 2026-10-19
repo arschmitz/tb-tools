@@ -193,8 +193,8 @@ First-time contributor setup checks Git, Python 3.10 or newer, and the platform
 build tools before preparing source files. New source locations also need at
 least 40 GB free. This is a minimum check, not an estimate for every build.
 The **Install missing tools** button opens the system installer in a terminal:
-Apple command line tools and Homebrew on macOS, MozillaBuild on Windows, or
-APT/DNF packages on supported Linux distributions. The user handles password
+Apple command line tools and Homebrew on macOS, missing MozillaBuild or Git on
+Windows, or APT/DNF packages on supported Linux distributions. The user handles password
 and installer prompts. Other Linux distributions link to the manual steps.
 
 Both new and existing checkout setup ask for a Git name and email. Setup fills
